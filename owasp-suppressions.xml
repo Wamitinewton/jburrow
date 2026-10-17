@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+    <!--
+      One <suppress> per CVE consciously accepted, each with a note saying why: a confirmed false
+      positive (CPE mismatch, non-executable jar) or a real issue with no patch yet and a link to
+      track it. Reviewed on every dependency bump. See SECURITY.md. Empty until the first finding.
+    -->
+</suppressions>

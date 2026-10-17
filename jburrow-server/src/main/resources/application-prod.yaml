@@ -1,0 +1,27 @@
+# Every value that differs between deployments comes from the environment, with no default, so a missing
+# variable stops startup with the placeholder named.
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+  mail:
+    host: ${SPRING_MAIL_HOST}
+    port: ${SPRING_MAIL_PORT}
+    username: ${SPRING_MAIL_USERNAME}
+    password: ${SPRING_MAIL_PASSWORD}
+    # SES's SMTP interface on 587: refuse to send credentials before STARTTLS, and never hang a thread on a slow host.
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+      mail.smtp.starttls.required: true
+      mail.smtp.connectiontimeout: 10000
+      mail.smtp.timeout: 10000
+      mail.smtp.writetimeout: 10000
+
+jburrow:
+  mail:
+    from-address: ${JBURROW_MAIL_FROM_ADDRESS}
+    from-name: ${JBURROW_MAIL_FROM_NAME:JBurrow}
+    ses-configuration-set: ${JBURROW_MAIL_SES_CONFIGURATION_SET:}
+    smoke-test-recipient: ${JBURROW_MAIL_SMOKE_TEST_RECIPIENT:}

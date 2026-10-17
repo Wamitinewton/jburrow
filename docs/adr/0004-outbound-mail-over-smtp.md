@@ -1,0 +1,59 @@
+# 4. Outbound mail over SMTP behind a port
+
+- Status: accepted
+- Date: 2026-10-17
+
+## Context
+
+Phase 5 sends email verification and password reset messages, and later phases may send alerts.
+Mail has to work in three places with one code path:
+
+- **Locally and in tests**, against Mailpit, which accepts anything over plain SMTP and shows it
+  in an inbox UI.
+- **On the hosted instance**, through Amazon SES, from an address on a domain verified in SES with
+  DKIM, SPF and DMARC in place.
+- **For self-hosters**, through whatever provider or relay they already have.
+
+The server is open source and provider-neutral by design. Each deployment brings its own sender
+address and credentials.
+
+## Decision
+
+- Features send mail through one port, `OutboundMail.send(EmailMessage)`. The message carries the
+  recipient, subject, a plain-text body and an optional HTML body, and nothing else.
+- **The sender is fixed by configuration** (`jburrow.mail.from-address`, `jburrow.mail.from-name`),
+  not chosen per message, so no feature can send as an arbitrary address by accident.
+- **One SMTP adapter**, `SmtpOutboundMail`, on Spring's `JavaMailSender`, configured through the
+  standard `spring.mail.*` keys. The same adapter serves Mailpit, SES and any other SMTP server.
+- **SES through its SMTP interface**, on port 587 with STARTTLS required, authenticated with SMTP
+  credentials from a dedicated IAM user, with 10-second connection, read and write timeouts.
+- **SES configuration sets through the `X-SES-CONFIGURATION-SET` header**, added only when
+  `jburrow.mail.ses-configuration-set` is set.
+- Send failures become `MailDeliveryException` (`MAIL_DELIVERY_FAILED`). Its message never repeats
+  the SMTP server's reply, which can echo addresses. Retrying is each feature's decision.
+- An opt-in startup smoke test (`jburrow.mail.smoke-test-recipient`) proves a deployment's sender
+  and credentials deliver. There is no HTTP endpoint that sends mail.
+- Mail health is reported but kept out of readiness: a provider outage must not take the API, or
+  later the tunnels, out of service.
+
+The production sender address and its domain are configured per deployment and are not recorded
+in this repository.
+
+## Consequences
+
+- No AWS SDK in the build. Moving the hosted instance to another provider, or running a self-hosted
+  copy against a local relay, is a configuration change.
+- Integration tests run against a real SMTP server (Mailpit in Testcontainers) and read back what
+  it received, instead of mocking `JavaMailSender`.
+- Bounce and complaint handling, when it is needed, comes from SES event destinations on the
+  configuration set, outside the server.
+- Anything SMTP can't express (for example SES's suppression list API) needs a second adapter
+  behind the same port.
+
+## Alternatives considered
+
+- **The AWS SDK v2 `sesv2` client.** It adds an AWS dependency to an open-source server for no
+  feature JBurrow needs today, and self-hosters would still need an SMTP adapter. It remains
+  possible later as a second adapter behind `OutboundMail`.
+- **A hosted email API** (Postmark, SendGrid, Resend and similar). Each is its own HTTP client and
+  its own lock-in, and none removes the need for SMTP for self-hosters.

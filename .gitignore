@@ -1,0 +1,36 @@
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Java / Maven
+target/
+build/
+*.class
+.mvn/wrapper/maven-wrapper.jar
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Secrets and local overrides: never commit these
+*.env
+.env
+.env.*
+application-secrets.yaml
+application-secrets.yml
+application-local-overrides.yaml
+*-credentials.json
+
+# Private build plans and production deployment notes
+docs/workflows/
+DEPLOY.md
+
+# Coding-agent guidance and settings: kept locally, not published
+.claude/
+AGENTS.md
+CLAUDE.md

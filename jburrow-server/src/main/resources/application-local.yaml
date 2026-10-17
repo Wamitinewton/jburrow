@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/jburrow
+    username: jburrow
+    password: jburrow
+  mail:
+    host: localhost
+    port: 1025
+
+jburrow:
+  mail:
+    from-address: no-reply@jburrow.localhost

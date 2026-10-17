@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: jburrow-server
+  profiles:
+    default: local
+  threads:
+    virtual:
+      enabled: true
+  # Neon suspends idle compute; a pool that drains to zero lets it, and the timeout covers the wake-up.
+  # Hikari binds its timeouts as plain milliseconds, not durations.
+  datasource:
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 0
+      idle-timeout: 120000
+      connection-timeout: 15000
+      keepalive-time: 0
+  flyway:
+    schemas: jburrow
+    default-schema: jburrow
+    create-schemas: true
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: jburrow
+
+server:
+  port: 7090
+
+management:
+  server:
+    port: 7091
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+
+jburrow:
+  api:
+    prefix: /api/v1
+  mail:
+    from-name: JBurrow
