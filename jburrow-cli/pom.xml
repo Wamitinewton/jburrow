@@ -13,6 +13,10 @@
     <name>jburrow-cli</name>
     <description>The jburrow command line.</description>
 
+    <properties>
+        <start-class>io.jburrow.cli.JBurrowCli</start-class>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>io.jburrow</groupId>
@@ -28,5 +32,38 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>jburrow-cli.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>jburrow-cli.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>io.github.git-commit-id</groupId>
+                <artifactId>git-commit-id-maven-plugin</artifactId>
+            </plugin>
+            <!-- The parent's shade setup sets Main-Class from start-class and replaces the main artifact with the fat JAR. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <configuration>
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

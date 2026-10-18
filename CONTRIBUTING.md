@@ -112,10 +112,34 @@ to the index in [`docs/adr/README.md`](docs/adr/README.md).
 
 ## Continuous integration
 
-*Added in phase 0.* Two systems build this code. GitHub Actions runs `./mvnw verify` on every pull
-request, including from forks, with no secrets and no access to anything else; that is the check
-your pull request needs to pass. The maintainers' own pipeline builds and deploys `main` only, and
-never runs code from a pull request.
+Two systems build this code ([ADR-0005](docs/adr/0005-ci-trust-boundary-public-repository.md)).
+
+- **GitHub Actions** ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)) runs on every
+  pull request, including from forks, and on every push to `main`. The `verify` job runs
+  `./mvnw verify` and uploads the test reports; the `image` job then builds the server image from
+  `jburrow-server/Dockerfile` and discards it. Both must pass before a pull request merges. The
+  workflow has a read-only token and no secrets.
+- **The maintainers' pipeline** builds and deploys `main` only, and never runs code from a pull
+  request. Its deployment details are configured on the job, not in this repository.
+
+The [`Jenkinsfile`](Jenkinsfile) is that pipeline, and it's reusable as it stands. It runs
+`./mvnw verify` in a Maven container with the agent's Docker socket mounted for Testcontainers,
+builds the server image, pushes `<IMAGE_REPOSITORY>:<build>-<sha>` and `:main`, then commits the
+new tag to a GitOps repository for Argo CD or Flux to pick up. Every target comes from job
+parameters, listed at the top of the file: `IMAGE_REPOSITORY`, `REGISTRY_CREDENTIALS_ID` (username
+and password), `GITOPS_REPO_URL`, `GITOPS_BRANCH`, `GITOPS_MANIFEST_PATH`, `GITOPS_CREDENTIALS_ID`
+(secret text), `GITOPS_COMMIT_NAME` and `GITOPS_COMMIT_EMAIL`. Set them as string parameters with
+default values on the job, since a webhook-triggered build runs with the defaults. The first stage
+fails with the names of any that are empty. The file declares no `parameters {}` block on purpose:
+one would overwrite the job's configured values on its next run.
+
+If you're a first-time contributor, a maintainer approves the workflow run on your pull request
+before it starts. When `verify` fails, the `test-reports` artifact on the run holds the Surefire
+and Failsafe reports.
+
+Never add a secret, a registry login, a deploy step or a `pull_request_target` trigger to a
+workflow. Third-party actions are pinned to full commit SHAs with the version in a comment, and
+Dependabot opens the pull requests that move them.
 
 ## Pull requests
 

@@ -1,0 +1,11 @@
+**/target
+.git
+.idea
+.vscode
+.claude
+docs/workflows
+DEPLOY.md
+AGENTS.md
+CLAUDE.md
+*.env
+.env*

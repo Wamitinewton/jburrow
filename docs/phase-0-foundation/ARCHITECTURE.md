@@ -407,12 +407,20 @@ to clients, in-flight streams allowed to finish).
   configuration change.
 - **Logs:** Spring Boot's structured logging, ECS format, on stdout in `prod`
   (`logging.structured.format.console: ecs`), with `service.name`, `service.version` and the
-  instance id on every line. Human-readable logs in `local`.
+  instance id (`service.node.name`) on every line. Human-readable logs in `local`. The instance id
+  is drawn into the environment by an `EnvironmentPostProcessor` before logging starts, rather
+  than put in MDC, so lines from every thread carry it, and the `InstanceId` bean reads the same
+  value.
 - **What is never logged:** passwords, SMTP credentials, the datasource password, message bodies.
   Email recipients are logged masked (`j***@example.com`).
 - **Build identity:** `spring-boot-maven-plugin`'s `build-info` goal and
-  `git-commit-id-maven-plugin` write `build-info.properties` and `git.properties`, which feed
-  `/actuator/info`, `/api/v1/meta`, the metric above and the startup log line.
+  `git-commit-id-maven-plugin` write `build-info.properties` and `git.properties`. The commit
+  also goes into `build-info.properties` as `build.commit`, from the `jburrow.git.commit` Maven
+  property, which defaults to the git plugin's abbreviated commit and is overridden with `-D` in
+  the image build, whose context has no `.git`. `build-info.properties` alone feeds
+  `/api/v1/meta`, the metric above and the startup log line, so a container and a local build
+  report the commit the same way; `git.properties` only adds detail to `/actuator/info` when it
+  exists.
 
 ## Build and packaging
 
@@ -431,7 +439,12 @@ to clients, in-flight streams allowed to finish).
   --layers --launcher`) so dependency layers are cached between builds, runs as a non-root user
   (uid 10001), sets `TZ=UTC`, exposes 7090 and 7091, and has no `HEALTHCHECK` since Kubernetes
   probes do that job. It carries `org.opencontainers.image.source=https://github.com/Wamitinewton/jburrow`,
-  which links the GHCR package to the repository, plus `revision` and `version` labels.
+  which links the GHCR package to the repository, plus `revision` and `version` labels. The
+  commit comes in as the `GIT_COMMIT` build argument (see Build identity). The POM version is
+  not overridden at build time; `VERSION` only sets the `version` label, and `make image` reads
+  it from the root POM. `.dockerignore` keeps `.git`, `target`, IDE and agent settings,
+  `docs/workflows`, `DEPLOY.md` and env files out of the build context, so nothing private can
+  reach a layer of the public image.
 - **JVM flags** come from the deployment, not the image: `-XX:MaxRAMPercentage=75.0
   -XX:+ExitOnOutOfMemoryError`.
 - **CLI:** `jburrow-cli` builds a runnable fat JAR in phase 0 (`java -jar jburrow-cli.jar version`).
@@ -442,24 +455,33 @@ to clients, in-flight streams allowed to finish).
 **GitHub Actions (`.github/workflows/verify.yml`)** runs on every pull request and every push to
 `main`: checkout, Temurin 21 with the Maven cache, `./mvnw -B verify`. Docker is available on the
 hosted runner, so the Testcontainers suites run there too. Permissions are `contents: read`, no
-secrets are referenced, and third-party actions are pinned to commit SHAs. A fork's pull request
-gets the same check as a maintainer's and can't reach anything else.
+secrets are referenced, and third-party actions are pinned to commit SHAs, kept current by
+Dependabot. A second job, `image`, builds the server image from `jburrow-server/Dockerfile` after
+`verify` passes and never pushes it, so a broken Dockerfile fails on the pull request rather than on
+Jenkins. A fork's pull request gets the same checks as a maintainer's and can't reach anything else
+([ADR-0005](../adr/0005-ci-trust-boundary-public-repository.md)).
 
 **Jenkins (`Jenkinsfile`)** builds `main` only:
 
-1. Checkout, record the short commit SHA.
+1. Validate the job parameters (below), then check out, refuse any branch other than `main`, and
+   record the short commit SHA.
 2. `./mvnw -B verify` in `maven:3.9-eclipse-temurin-21`, with the Docker socket mounted for
    Testcontainers. JUnit reports published.
-3. `docker build` and push of `${IMAGE_REPOSITORY}:${BUILD_NUMBER}-${SHORT_SHA}` and
-   `${IMAGE_REPOSITORY}:main`, logging in with `REGISTRY_CREDENTIALS_ID`.
-4. Clone `GITOPS_REPO_URL` with `GITOPS_CREDENTIALS_ID`, replace the image tag on every `image:`
-   line for `${IMAGE_REPOSITORY}` in `GITOPS_MANIFEST_PATH`, commit as `GITOPS_COMMIT_NAME` /
-   `GITOPS_COMMIT_EMAIL` with the message `ci: deploy jburrow-server ${tag}`, and push.
+3. `docker build`, then push `${IMAGE_REPOSITORY}:${BUILD_NUMBER}-${SHORT_SHA}` and
+   `${IMAGE_REPOSITORY}:main`, logging in with `REGISTRY_CREDENTIALS_ID` under a per-build
+   `DOCKER_CONFIG` so the login never touches the agent's shared Docker configuration.
+4. Clone `GITOPS_BRANCH` of `GITOPS_REPO_URL` with `GITOPS_CREDENTIALS_ID`, replace the image tag
+   on every `image:` line for `${IMAGE_REPOSITORY}` in `GITOPS_MANIFEST_PATH`, commit as
+   `GITOPS_COMMIT_NAME` / `GITOPS_COMMIT_EMAIL` with the message `ci: deploy jburrow-server ${tag}`,
+   and push, rebasing and retrying if another pipeline pushed first. A manifest with no matching
+   `image:` line fails the build instead of passing without deploying. The token reaches git through
+   a credential helper, never the clone URL.
 
 The values in capitals are Jenkins **job parameters**, configured on the job, not in the file. The
 pipeline's first stage checks that each one is non-empty and fails with the missing name otherwise.
 The Jenkinsfile declares no `parameters {}` block: a declared block would replace the job's
-configured defaults on the first run. Nothing about the deployment target appears in the
+configured defaults on the first run. Shell steps that see a secret are single-quoted, so Groovy
+never interpolates one into a command line. Nothing about the deployment target appears in the
 repository.
 
 ## Deployment shape

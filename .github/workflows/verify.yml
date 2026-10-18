@@ -1,0 +1,49 @@
+name: verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Fork pull requests run here too, so the token stays read-only and no secret is ever referenced.
+# Never switch this to pull_request_target: it runs fork code with the base repository's token.
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git-commit-id-maven-plugin needs history
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: ./mvnw -B --no-transfer-progress verify
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports
+          path: '**/target/*-reports/*.xml'
+          retention-days: 7
+          if-no-files-found: ignore
+
+  image:
+    runs-on: ubuntu-24.04
+    needs: verify
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Builds only. Pushing images is the deployment pipeline's job, never this workflow's.
+      - run: docker build -f jburrow-server/Dockerfile --build-arg GIT_COMMIT=${GITHUB_SHA::7} .

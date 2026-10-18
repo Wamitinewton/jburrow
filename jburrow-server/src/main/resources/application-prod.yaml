@@ -25,3 +25,13 @@ jburrow:
     from-name: ${JBURROW_MAIL_FROM_NAME:JBurrow}
     ses-configuration-set: ${JBURROW_MAIL_SES_CONFIGURATION_SET:}
     smoke-test-recipient: ${JBURROW_MAIL_SMOKE_TEST_RECIPIENT:}
+
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: jburrow-server
+        version: "@project.version@"
+        node-name: ${jburrow.instance.id}

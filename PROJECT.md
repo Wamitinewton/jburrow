@@ -65,7 +65,7 @@ That doesn't make the code less structured. The engineering discipline from Pall
 | Rate limiting and abuse controls | `jburrow-server-core` `limits`, `jburrow-server-api` `abuse` | Bucket4j (in-memory, single node), subdomain blocklist |
 | TLS | At the cluster edge in production; inside the server for self-hosters (v1) | cert-manager with DNS-01 in Kubernetes, acme4j in self-hosted mode |
 | Observability | Every module | Micrometer, Prometheus, structured JSON logs, OpenTelemetry later |
-| CLI | `jburrow-cli` | picocli, GraalVM native-image |
+| CLI | `jburrow-cli` | picocli, GraalVM native-image, JReleaser |
 | Deployment | `Jenkinsfile` here, manifests in a private GitOps repository | Jenkins, GHCR, ArgoCD, k3s |
 
 ## Architecture overview
@@ -163,7 +163,7 @@ The first transport is **one frame per binary WebSocket message** over TLS on 44
 
 **TLS.** In Kubernetes the ingress controller terminates TLS with a wildcard certificate that cert-manager issues and renews through a DNS-01 challenge. The server itself speaks plain HTTP. For self-hosters without Kubernetes (v1), the server terminates TLS itself and runs ACME through acme4j. Both live behind one `CertificateSource` port, so neither mode leaks into the tunnel engine.
 
-**CLI.** picocli, compiled to native binaries with GraalVM native-image for Linux, macOS, and Windows on x64 and ARM (v1). A JVM fat JAR remains the fallback for any platform without a native build.
+**CLI.** picocli, compiled to native binaries with GraalVM native-image for Linux, macOS, and Windows on x64 and ARM (v1). A JVM fat JAR remains the fallback for any platform without a native build. From phase 1, when Netty enters the client, every pull request also builds the native binary, so native-image incompatibilities fail the change that introduces them rather than surfacing at release. At v1, users install with one command: `install.sh` through `curl`, a Homebrew tap, or a Scoop bucket, all fed by the same release ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)).
 
 **Observability.** Micrometer with the Prometheus registry on a management port. Spring Boot's built-in structured logging (JSON) on stdout, which the cluster's log collector already ships. Tracing (OpenTelemetry) is Later in the roadmap and arrives through Micrometer Tracing without code changes in the features.
 
@@ -266,6 +266,8 @@ The dashboard has no access to tunnel traffic and never will. Request inspection
 |---|---|---|
 | [`github.com/Wamitinewton/jburrow`](https://github.com/Wamitinewton/jburrow) | Public | Server, client, protocol, CLI, `Jenkinsfile`, Dockerfile, reference deployment manifests, docs |
 | `github.com/Wamitinewton/jburrow-web` (name proposed) | Public | Dashboard and public site, its own `Jenkinsfile` and Dockerfile |
+| `github.com/Wamitinewton/homebrew-tap` (from v1) | Public | Homebrew formula for the CLI, written only by the release workflow |
+| `github.com/Wamitinewton/scoop-bucket` (from v1) | Public | Scoop manifest for the CLI, written only by the release workflow |
 | Private GitOps repository | Private | Production Kubernetes manifests and ArgoCD `Application`, shared with other workloads on the same cluster |
 
 Layout of the main repository:
@@ -337,7 +339,7 @@ The in-process end-to-end suite is the most important one and gets built alongsi
 
 Two systems, each doing the work it suits.
 
-**GitHub Actions: public checks and CLI releases.** Every pull request, including ones from forks, runs `./mvnw verify` (unit, codec, architecture, persistence, and end-to-end tests) on GitHub's runners. This needs no secrets and never touches the deployment. Tagging a release (`v0.3.0`) runs a matrix that builds native CLI binaries on Linux, macOS, and Windows runners, since those binaries can't be cross-compiled from one Linux host, and attaches them to the GitHub release with checksums.
+**GitHub Actions: public checks and CLI releases.** Every pull request, including ones from forks, runs `./mvnw verify` (unit, codec, architecture, persistence, and end-to-end tests) on GitHub's runners. From phase 1, a separate job also compiles the CLI with native-image and runs the binary, publishing nothing. None of this needs secrets or touches the deployment. Tagging a release (`v1.0.0`) runs a matrix that builds native CLI binaries on Linux, macOS, and Windows runners, x64 and arm64, since those binaries can't be cross-compiled from one Linux host. JReleaser then publishes them: the GitHub release with archives and checksums, the Homebrew formula in the tap, and the Scoop manifest in the bucket. `install.sh` downloads from the latest release, so it needs no publishing step of its own.
 
 **Jenkins: server image and deployment.** Jenkins only builds pushes to `main`, never pull requests. Running a stranger's fork on a build agent that holds a Docker socket and registry credentials is not an option for a public repository. The pipeline:
 
@@ -346,7 +348,7 @@ Two systems, each doing the work it suits.
 3. Build the `jburrow-server` image and push it to GHCR under the personal account that owns this repository, `ghcr.io/wamitinewton/jburrow-server`, tagged with the build number and the short commit SHA. The push authenticates with a JBurrow-only Jenkins credential, a personal access token from that account with `write:packages`. It never reuses a registry credential that belongs to another project on the same Jenkins server. The image is public, so self-hosters pull the same image production runs, and the cluster needs no pull secret for it.
 4. Clone the private GitOps repository, update the image tag in the JBurrow deployment manifest, commit, and push. ArgoCD notices and syncs.
 
-**The Jenkinsfile in a public repository must not reveal anything about where it deploys.** It contains no repository URLs, hostnames, IP addresses, organization names, manifest paths, credential IDs that identify other projects, or commit-author emails. Everything deployment-specific is read from environment variables set on the Jenkins job (`GITOPS_REPO_URL`, `GITOPS_MANIFEST_PATH`, `GITOPS_COMMIT_EMAIL`, `IMAGE_REPOSITORY`) and from Jenkins credentials. The pipeline fails fast with a clear message if any of them is missing, rather than falling back to a default that would have to be written down. A fork's Jenkinsfile is therefore usable by anyone with their own GitOps repository and points nowhere in particular until it is configured.
+**The Jenkinsfile in a public repository must not reveal anything about where it deploys.** It contains no repository URLs, hostnames, IP addresses, organization names, manifest paths, credential IDs that identify other projects, or commit-author emails. Everything deployment-specific is read from parameters set on the Jenkins job (`IMAGE_REPOSITORY`, `GITOPS_REPO_URL`, `GITOPS_BRANCH`, `GITOPS_MANIFEST_PATH`, `GITOPS_COMMIT_NAME`, `GITOPS_COMMIT_EMAIL`) and from Jenkins credentials whose ids are themselves parameters (`REGISTRY_CREDENTIALS_ID`, `GITOPS_CREDENTIALS_ID`). The pipeline fails fast with a clear message if any of them is missing, rather than falling back to a default that would have to be written down. A fork's Jenkinsfile is therefore usable by anyone with their own GitOps repository and points nowhere in particular until it is configured.
 
 The web repository follows the same pattern: GitHub Actions runs `pnpm verify` on pull requests, and Jenkins builds the image on `main`, pushes it to `ghcr.io/wamitinewton/jburrow-web` with the same JBurrow-only credential, and updates its manifest in the same private repository. Build-time public values (`NEXT_PUBLIC_API_URL` and similar) come from Jenkins credentials as build args, not from tracked files.
 
@@ -384,14 +386,14 @@ Bringing JBurrow up on the cluster for the first time (DNS records, namespace, s
 The order follows `ROADMAP.md` section 14, with the walking skeleton added in front so the first tunnel deploys the same way the last one will. Each phase has a "done when" test that must pass on the production cluster, not just on a laptop.
 
 0. **Foundation (walking skeleton).** Reactor, parent POM, the six modules, ArchUnit rules, the server's configuration and API conventions, Postgres (Neon) through Flyway with one reference slice that records every server start, the mail port with SES behind it, health groups, metrics and logs, the Dockerfile, the GitHub Actions PR check, the Jenkinsfile reading every deployment value from job configuration, the manifests in the private GitOps repository, and the ArgoCD `Application`. Done when a push to `main` ends with a new pod `Ready`, `https://api.cloudnativehub.app/api/v1/meta` returning the pushed commit, a smoke-test email delivered through SES, and Neon free to suspend while the pod is idle, with no manual step. Full design: [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md).
-1. **TCP tunnel, one stream.** `jburrow-protocol` with `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`; the control WebSocket; `jburrow tcp <port>` with a static token from configuration. Done when `ssh -p <port> tcp.cloudnativehub.app` reaches a laptop behind NAT.
+1. **TCP tunnel, one stream.** `jburrow-protocol` with `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`; the control WebSocket; `jburrow tcp <port>` with a static token from configuration; the native-image build check on pull requests. Done when `ssh -p <port> tcp.cloudnativehub.app` reaches a laptop behind NAT.
 2. **Multiplexing and flow control.** The stream table, credit windows, `WINDOW_UPDATE`, session writability. Done when 500 concurrent connections share one session, and an end-to-end test with a deliberately slow client shows server heap and direct memory staying flat.
 3. **HTTP tunnels.** The edge listener, per-request routing, random and requested subdomains, the blocklist, the wildcard certificate through the DNS-01 `Issuer`. Done when `jburrow http 3000` gives a working `https://<name>.cloudnativehub.app` with a valid certificate.
 4. **Staying connected.** `PING`/`PONG`, reconnect with backoff, resume tokens, `GOAWAY` and graceful drain, `Recreate` deploys. Done when a server deploy during an open tunnel ends with the same URL serving again within ten seconds, with no action from the user.
 5. **Accounts and persistence.** The account tables on the database phase 0 connected, accounts, email verification through the phase 0 mail port, password reset, sessions, authtokens, reserved subdomains, leases, and `jburrow login`. Static tokens are removed. Done when a new user can sign up, verify, create a token, log in from the CLI, reserve a subdomain, and keep it across a server restart.
 6. **Limits, abuse controls, observability.** Rate limits, size limits, timeouts, the admin API (list and kill sessions, ban accounts), metrics, the Grafana dashboard, and JSON logs with payload redaction tested. Done when a load test against a rate-limited tunnel produces `429`s at the configured rate, the Grafana dashboard shows the load as it happens, and the logs from the test contain no payload bytes.
 7. **Dashboard MVP** (in the web repository, can start once phase 5's API exists). Done when everything in the dashboard's MVP scope works against production.
-8. **Public release, v1.** WebSocket and SSE passthrough, custom domains, the client inspection API, basic auth and IP allow/deny lists, the interstitial, abuse reports, native CLI binaries, `docs/protocol.md`, and self-hosted mode with acme4j. Release tag `v1.0.0`.
+8. **Public release, v1.** WebSocket and SSE passthrough, custom domains, the client inspection API, basic auth and IP allow/deny lists, the interstitial, abuse reports, native CLI binaries installable through `install.sh`, Homebrew and Scoop, `docs/protocol.md`, and self-hosted mode with acme4j. Release tag `v1.0.0`.
 
 ## Where this brief departs from ROADMAP.md
 

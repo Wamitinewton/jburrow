@@ -6,6 +6,8 @@ spring:
   threads:
     virtual:
       enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   # Neon suspends idle compute; a pool that drains to zero lets it, and the timeout covers the wake-up.
   # Hikari binds its timeouts as plain milliseconds, not durations.
   datasource:
@@ -29,6 +31,7 @@ spring:
 
 server:
   port: 7090
+  shutdown: graceful
 
 management:
   server:
@@ -40,6 +43,23 @@ management:
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
+      # Dependencies stay out of the probes: a Neon suspend or an SMTP outage must not take the pod out of service,
+      # and a probe query every few seconds would keep Neon awake.
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  metrics:
+    tags:
+      application: jburrow-server
 
 springdoc:
   api-docs:

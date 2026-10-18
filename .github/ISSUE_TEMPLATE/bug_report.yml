@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in JBurrow doesn't work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities go through private vulnerability reporting, not an issue. See `SECURITY.md`.
+        Don't paste authtokens, passwords, or request bodies from a tunnel.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest set of steps or commands that shows the problem.
+      placeholder: |
+        1. make up && make run
+        2. curl -s localhost:7090/api/v1/meta
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `jburrow version`, or the commit you built from.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Java version, and how the server runs (local, container, self-hosted).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines, with tokens and personal data removed.
+      render: text

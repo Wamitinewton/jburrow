@@ -54,9 +54,12 @@ An open-source, self-hostable tunneling system (ngrok-style) built in Java, depl
 | Clear error messages and meaningful exit codes | MVP |
 | YAML config file with multiple named tunnels | v1 |
 | Device login flow (`login` obtains a token through a verification code) | v1 |
-| Cross-platform binaries: Windows, macOS, Linux (x64 and ARM) via GraalVM native-image or jpackage | v1 |
+| Native-image build checked on every pull request from the first client networking code ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)) | MVP |
+| Cross-platform binaries: Windows, macOS, Linux (x64 and ARM) via GraalVM native-image, released through JReleaser | v1 |
+| Install methods: `install.sh` (curl), Homebrew tap, Scoop bucket | v1 |
 | Self-update and version check (`update`) | Later |
-| Install methods: curl script, Homebrew, Scoop, apt/deb, Docker image | Later |
+| Install methods: winget, apt/deb and rpm, Docker image | Later |
+| Signed binaries: macOS notarization, Windows code signing | Later |
 | Run as a background service (systemd, Windows service) | Later |
 | Shell autocompletion | Later |
 

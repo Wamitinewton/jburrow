@@ -22,3 +22,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Outbound mail through an `OutboundMail` port and one SMTP adapter, with the SES configuration-set
   header when configured and an opt-in startup smoke test
   ([ADR-0004](docs/adr/0004-outbound-mail-over-smtp.md)).
+- Liveness and readiness health groups that leave the database and mail out, graceful shutdown
+  with a 20-second phase timeout, Prometheus metrics tagged with the application and instance,
+  and a `jburrow_build_info{version,commit}` metric.
+- ECS JSON logs in the `prod` profile carrying the service name, version and instance id.
+- `jburrow version` and `jburrow --version`, from a fat JAR.
+- A layered, non-root `jburrow-server` container image built from `jburrow-server/Dockerfile`
+  with only Docker (`make image`), carrying its commit without a `.git` directory in the build
+  context.
+- A GitHub Actions check on every pull request and push to `main` that runs `./mvnw verify` and
+  builds the server image without pushing it, with a read-only token and no secrets, plus
+  Dependabot for Maven and Actions, and issue and pull request templates
+  ([ADR-0005](docs/adr/0005-ci-trust-boundary-public-repository.md)).
+- A `Jenkinsfile` that verifies `main`, pushes the server image and commits its tag to a GitOps
+  repository, reading every deployment value from job parameters and failing fast on a missing
+  one.

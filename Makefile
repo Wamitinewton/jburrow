@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := help
 
 MVNW := ./mvnw
+# The reactor version: the first <version> after jburrow-parent's artifactId in the root POM.
+VERSION := $(shell awk '/<artifactId>jburrow-parent<\/artifactId>/{f=1} f && /<version>/{gsub(/.*<version>|<\/version>.*/, ""); print; exit}' pom.xml)
 
 .PHONY: help
 help: ## List targets
@@ -43,5 +45,8 @@ format-check: ## Check formatting without changing files
 	$(MVNW) spotless:check
 
 .PHONY: image
-image: ## Build the server container image (not yet available)
-	@echo "The server image is not built yet: jburrow-server/Dockerfile does not exist." >&2; exit 1
+image: ## Build the server container image as jburrow-server:dev
+	docker build -f jburrow-server/Dockerfile \
+	  --build-arg GIT_COMMIT=$$(git rev-parse --short HEAD) \
+	  --build-arg VERSION=$(VERSION) \
+	  -t jburrow-server:dev .

@@ -8,9 +8,11 @@ import io.jburrow.server.api.instance.application.port.BuildIdentitySource;
 import io.jburrow.server.api.instance.application.port.ServerInstanceStore;
 import io.jburrow.server.api.instance.domain.InstanceId;
 import java.time.Clock;
+import java.util.UUID;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -26,8 +28,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 class UseCaseConfiguration {
 
     @Bean
-    InstanceId currentInstanceId() {
-        return InstanceId.random();
+    InstanceId currentInstanceId(Environment environment) {
+        return new InstanceId(
+                UUID.fromString(environment.getRequiredProperty(InstanceIdEnvironmentPostProcessor.PROPERTY)));
     }
 
     @Bean
