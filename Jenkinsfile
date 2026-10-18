@@ -24,8 +24,9 @@ pipeline {
     }
 
     environment {
-        MAVEN_IMAGE = 'maven:3.9-eclipse-temurin-21'
-        MAVEN_OPTS  = '-Xmx1g'
+        MAVEN_IMAGE      = 'maven:3.9-eclipse-temurin-21'
+        MAVEN_OPTS       = '-Xmx1g'
+        DOCKER_CLI_IMAGE = 'docker:27-cli'
     }
 
     stages {
@@ -69,6 +70,8 @@ pipeline {
                 DOCKER_HOST                           = 'unix:///var/run/docker.sock'
                 TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE = '/var/run/docker.sock'
                 TESTCONTAINERS_RYUK_DISABLED          = 'true'
+                // With host networking, published container ports are on localhost, not a gateway address.
+                TESTCONTAINERS_HOST_OVERRIDE          = 'localhost'
             }
             steps {
                 sh './mvnw -B --no-transfer-progress clean verify'
@@ -82,21 +85,31 @@ pipeline {
         }
 
         stage('Build and push image') {
+            // The Dockerfile needs BuildKit, so the image is built from a docker CLI image that ships
+            // buildx, whatever the agent itself has installed. It drives the agent's Docker daemon.
+            agent {
+                docker {
+                    image "${DOCKER_CLI_IMAGE}"
+                    args '-v /var/run/docker.sock:/var/run/docker.sock'
+                    reuseNode true
+                }
+            }
             steps {
+                // A per-build DOCKER_CONFIG keeps this login away from the agent's default
+                // ~/.docker/config.json, which other pipelines on the same agent rely on.
                 sh '''
+                    set -eu
+                    export DOCKER_CONFIG="$WORKSPACE/.docker"
+                    mkdir -p "$DOCKER_CONFIG"
                     docker build -f jburrow-server/Dockerfile \
                       --build-arg GIT_COMMIT="$SHORT_SHA" \
                       -t "$IMAGE_REPOSITORY:$IMAGE_TAG" -t "$IMAGE_REPOSITORY:main" .
                 '''
                 withCredentials([usernamePassword(credentialsId: params.REGISTRY_CREDENTIALS_ID,
                                                   usernameVariable: 'REG_USER', passwordVariable: 'REG_TOKEN')]) {
-                    // Login and push use a per-build DOCKER_CONFIG so this login never touches the
-                    // agent's default ~/.docker/config.json, which other pipelines on the agent rely
-                    // on. The build above keeps the default config, where the buildx plugin lives.
                     sh '''
                         set -eu
                         export DOCKER_CONFIG="$WORKSPACE/.docker"
-                        mkdir -p "$DOCKER_CONFIG"
                         registry="${IMAGE_REPOSITORY%%/*}"
                         case "$registry" in
                             (*.*|*:*|localhost) ;;
