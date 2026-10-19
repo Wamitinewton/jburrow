@@ -59,9 +59,13 @@ Every server and client module is organised by feature first, then by layer
 (`<feature>/domain`, `<feature>/application`, `<feature>/application/port`,
 `<feature>/adapter/<technology>`):
 
-- `domain` depends only on the JDK and other `domain` packages.
-- `application` depends on `domain` and its own `port` interfaces. No Netty, Spring or JPA. Use
-  cases are plain classes constructed by the composition root in `jburrow-server`.
+- `domain` depends only on the JDK, other `domain` packages and the protocol model.
+- `application` depends on `domain`, its own `port` interfaces and the protocol model. No Netty,
+  Spring or JPA. Use cases are plain classes constructed by the composition root in
+  `jburrow-server`.
+- *Added in phase 1:* the protocol model, `io.jburrow.protocol` outside its `adapter` packages, is
+  pure Java and depends only on the JDK and itself. It is the vocabulary both sides share, which is
+  why core layers may use it (ADR-0007).
 - Netty lives only in `adapter.netty`, Spring MVC only in `adapter.web`, JPA only in
   `adapter.persistence`.
 - A feature reaches another feature only through that feature's `application.port` interfaces.
@@ -84,6 +88,38 @@ architecture rules.
 
 [`PROJECT.md`](PROJECT.md) §Testing lists every level, from codec tests to the in-process end-to-end
 suite.
+
+### Fuzzing
+
+The code that reads untrusted bytes (the frame codec, the control payload reader and the stream state
+machine) has [Jazzer](https://github.com/CodeIntelligenceTesting/jazzer) fuzz targets, the
+`*FuzzTest` classes in `jburrow-protocol/src/test/java/io/jburrow/protocol/fuzz/`. They run in two
+modes:
+
+- **Regression**, in every build: each target replays the files in its inputs directory,
+  `src/test/resources/io/jburrow/protocol/fuzz/<Class>Inputs/<method>/`. Nothing to do.
+- **Fuzzing**, with `make fuzz`: each target runs for its `@FuzzTest(maxDuration)`, two minutes,
+  in its own JVM, since Jazzer fuzzes one target per JVM. The `fuzz` CI job runs the same command
+  on every pull request. For a longer local run, raise `maxDuration` temporarily and don't commit
+  it.
+
+The inputs directories hold two kinds of file:
+
+- **Seeds**, one per conformance vector in `io/jburrow/protocol/vectors/`, named after it.
+  `SeedCorpusTest` fails if they drift from the vectors. After adding or changing a vector, run
+  `./mvnw -pl jburrow-protocol test -Dtest=SeedCorpusTest -Dupdate.seeds=true` and commit the
+  result.
+- **Findings**, named `finding-<description>`. They stay for ever.
+
+When fuzzing finds something, Jazzer writes the input as `crash-<sha1>` into the target's inputs
+directory (or into `jburrow-protocol/` if it can't find the source tree). In CI it's in the
+`fuzz-findings` artifact of the failed run. To turn it into a regression input:
+
+1. Put the file in the target's inputs directory and rename it `finding-<what it does>`.
+   `SeedCorpusTest` refuses any other name. The target now fails in every build.
+2. Fix the cause. If the fix adds or clarifies a receiver rule, add a conformance vector and
+   update the receiver rules in `docs/protocol.md` §12.
+3. Keep the finding in the corpus.
 
 ## Code style
 
@@ -117,8 +153,9 @@ Two systems build this code ([ADR-0005](docs/adr/0005-ci-trust-boundary-public-r
 - **GitHub Actions** ([`.github/workflows/verify.yml`](.github/workflows/verify.yml)) runs on every
   pull request, including from forks, and on every push to `main`. The `verify` job runs
   `./mvnw verify` and uploads the test reports; the `image` job then builds the server image from
-  `jburrow-server/Dockerfile` and discards it. Both must pass before a pull request merges. The
-  workflow has a read-only token and no secrets.
+  `jburrow-server/Dockerfile` and discards it. The `fuzz` job runs `make fuzz` (see
+  [Fuzzing](#fuzzing)) and uploads any crashing input. All three must pass before a pull request
+  merges. The workflow has a read-only token and no secrets.
 - **The maintainers' pipeline** builds and deploys `main` only, and never runs code from a pull
   request. Its deployment details are configured on the job, not in this repository.
 

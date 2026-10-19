@@ -1,5 +1,8 @@
 package io.jburrow.server.architecture;
 
+import static com.tngtech.archunit.base.DescribedPredicate.not;
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAPackage;
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAnyPackage;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
@@ -18,7 +21,11 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * The layer rules from {@code docs/phase-0-foundation/ARCHITECTURE.md}, applied to every server and protocol class.
+ * The layer rules from {@code docs/phase-0-foundation/ARCHITECTURE.md}, as changed by
+ * {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Layer rules, applied to every server and protocol class.
+ *
+ * <p>The protocol model is {@code io.jburrow.protocol} outside its {@code adapter} packages: pure Java, and the one
+ * thing besides the JDK that domain and application code may depend on across modules (ADR-0007).
  *
  * <p>A feature is the package that directly contains a {@code domain}, {@code application} or {@code adapter}
  * package, for example {@code io.jburrow.server.api.instance}. Packages without a layer, such as {@code shared} or
@@ -35,25 +42,31 @@ public final class JBurrowArchitectureRules {
             "jakarta.transaction.Transactional",
             "org.springframework.beans.factory.annotation.Autowired");
 
+    private static final String PROTOCOL_ROOT = "io.jburrow.protocol";
+
+    public static final DescribedPredicate<JavaClass> PROTOCOL_MODEL = protocolModel(PROTOCOL_ROOT);
+
+    public static final ArchRule PROTOCOL_MODEL_IS_PURE = protocolModelIsPure(PROTOCOL_ROOT);
+
     public static final ArchRule DOMAIN_IS_PURE = classes()
             .that()
             .resideInAnyPackage("io.jburrow..domain..", "io.jburrow..shared.error..")
             .should()
-            .onlyDependOnClassesThat()
-            .resideInAnyPackage("java..", "io.jburrow..domain..", "io.jburrow..shared.error..")
-            .as("DOMAIN_IS_PURE: domain and shared error classes depend only on the JDK, domain packages and the"
-                    + " shared error types")
+            .onlyDependOnClassesThat(resideInAnyPackage("java..", "io.jburrow..domain..", "io.jburrow..shared.error..")
+                    .or(PROTOCOL_MODEL))
+            .as("DOMAIN_IS_PURE: domain and shared error classes depend only on the JDK, domain packages, the"
+                    + " shared error types and the protocol model")
             .allowEmptyShould(true);
 
     public static final ArchRule APPLICATION_IS_PURE = classes()
             .that()
             .resideInAPackage("io.jburrow..application..")
             .should()
-            .onlyDependOnClassesThat()
-            .resideInAnyPackage(
-                    "java..", "io.jburrow..domain..", "io.jburrow..application..", "io.jburrow..shared.error..")
+            .onlyDependOnClassesThat(resideInAnyPackage(
+                            "java..", "io.jburrow..domain..", "io.jburrow..application..", "io.jburrow..shared.error..")
+                    .or(PROTOCOL_MODEL))
             .as("APPLICATION_IS_PURE: application classes depend only on the JDK, domain and application packages,"
-                    + " and the shared error types")
+                    + " the shared error types and the protocol model")
             .allowEmptyShould(true);
 
     public static final ArchRule NETTY_ONLY_IN_ADAPTERS = noClasses()
@@ -126,6 +139,27 @@ public final class JBurrowArchitectureRules {
             .allowEmptyShould(true);
 
     private JBurrowArchitectureRules() {}
+
+    /** The classes under {@code root}, outside any {@code adapter} package below it. */
+    static DescribedPredicate<JavaClass> protocolModel(String root) {
+        return resideInAPackage(root + "..")
+                .and(not(resideInAPackage(root + "..adapter..")))
+                .as("are in the protocol model under " + root);
+    }
+
+    /**
+     * {@code PROTOCOL_MODEL_IS_PURE} for the protocol model under {@code root}. The root is a parameter only so the
+     * architecture test can apply the same rule to a fixture package.
+     */
+    static ArchRule protocolModelIsPure(String root) {
+        return classes()
+                .that(protocolModel(root))
+                .should()
+                .onlyDependOnClassesThat(resideInAPackage("java..").or(protocolModel(root)))
+                .as("PROTOCOL_MODEL_IS_PURE: the protocol model depends only on the JDK and itself; Netty and Jackson"
+                        + " stay in its adapter packages")
+                .allowEmptyShould(true);
+    }
 
     static Optional<String> featureOf(String packageName) {
         if (!packageName.startsWith("io.jburrow.")) {
