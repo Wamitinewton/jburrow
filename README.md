@@ -39,6 +39,8 @@ deletes their data. Only the server runs today; tunnels arrive from phase 1.
 - [`ROADMAP.md`](ROADMAP.md): the feature list, staged as MVP, v1 and Later.
 - [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md): the
   detailed design of the current phase.
+- [`docs/protocol.md`](docs/protocol.md): the wire protocol specification, for anyone writing a
+  client or a server.
 - [`docs/adr/`](docs/adr/): architecture decision records.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): how the build fits together and how to send a change.
 - [`SECURITY.md`](SECURITY.md): reporting a vulnerability.

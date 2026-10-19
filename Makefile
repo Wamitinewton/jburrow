@@ -36,6 +36,19 @@ verify: ## Unit, architecture and integration tests (Docker required)
 test: ## Unit and architecture tests only, no containers
 	$(MVNW) test
 
+# Jazzer fuzzes only one @FuzzTest per JVM, so each target gets its own run.
+FUZZ_TARGETS := FrameCodecFuzzTest\#decodeAsServer FrameCodecFuzzTest\#decodeAsClient \
+	ControlJsonFuzzTest\#read StreamLifecycleFuzzTest\#events
+
+.PHONY: fuzz
+fuzz: ## Fuzz each protocol target for its maxDuration (2 min); findings land in its inputs directory
+	@status=0; for target in $(FUZZ_TARGETS); do \
+	  echo "==> Fuzzing $$target"; \
+	  JAZZER_FUZZ=1 $(MVNW) -B --no-transfer-progress -pl jburrow-protocol test \
+	    -Dtest="$$target" -Dsurefire.failIfNoSpecifiedTests=false -Djazzer.valueprofile=true \
+	    -DargLine="-Xmx1g -Xss1m" || status=1; \
+	done; exit $$status
+
 .PHONY: format
 format: ## Apply Spotless formatting
 	$(MVNW) spotless:apply

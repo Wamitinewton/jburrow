@@ -42,6 +42,7 @@
         <archunit.version>1.4.1</archunit.version>
         <springdoc.version>3.1.1</springdoc.version>
         <picocli.version>4.7.7</picocli.version>
+        <jazzer.version>0.30.0</jazzer.version>
 
         <spotless.version>3.10.2</spotless.version>
         <palantir-java-format.version>2.97.0</palantir-java-format.version>
@@ -102,6 +103,11 @@
                 <groupId>info.picocli</groupId>
                 <artifactId>picocli</artifactId>
                 <version>${picocli.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.code-intelligence</groupId>
+                <artifactId>jazzer-junit</artifactId>
+                <version>${jazzer.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

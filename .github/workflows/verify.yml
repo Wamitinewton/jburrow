@@ -37,6 +37,30 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      # Each target fuzzes for its @FuzzTest maxDuration. A finding fails the job and its input is uploaded.
+      - run: make fuzz
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-findings
+          path: |
+            jburrow-protocol/src/test/resources/**/crash-*
+            jburrow-protocol/crash-*
+          retention-days: 14
+          if-no-files-found: ignore
+
   image:
     runs-on: ubuntu-24.04
     needs: verify

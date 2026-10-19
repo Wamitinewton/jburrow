@@ -11,6 +11,9 @@ build/
 *.class
 .mvn/wrapper/maven-wrapper.jar
 
+# Jazzer's working corpus. Findings and seeds live under src/test/resources instead.
+.cifuzz-corpus/
+
 # OS
 .DS_Store
 

@@ -2,7 +2,7 @@
 
 An open-source, self-hostable tunneling server (an ngrok-style service) written in Java. One command on a developer's machine turns a local port into a public HTTPS URL or a public TCP port. Built in public, one capability at a time.
 
-Status: design only; license settled (Apache-2.0); phase 0 (foundation) is designed in [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md) and ready to build. Phase 0 is a walking skeleton: a Maven reactor and a server connected to its production database and mail provider, carried all the way through the real pipeline (Jenkins, image registry, GitOps commit, ArgoCD, Kubernetes) before any tunnel code is written. The deployment path is proven first so every later step deploys the same way.
+Status: design only; license settled (Apache-2.0); phase 0 (foundation) is designed in [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md) and built; phase 1 (TCP tunnel and the wire protocol) is designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md). Phase 0 is a walking skeleton: a Maven reactor and a server connected to its production database and mail provider, carried all the way through the real pipeline (Jenkins, image registry, GitOps commit, ArgoCD, Kubernetes) before any tunnel code is written. The deployment path is proven first so every later step deploys the same way.
 
 ## Contents
 
@@ -85,7 +85,7 @@ flowchart LR
 
 ### The life of a tunnel
 
-1. **Connect.** The CLI opens a WebSocket to `wss://connect.cloudnativehub.app/v1/connect` and sends `HELLO` (protocol version, capabilities). The server answers with what it supports.
+1. **Connect.** The CLI opens a WebSocket to `wss://connect.cloudnativehub.app/v1/connect` offering the protocol version as its WebSocket subprotocol, and sends `HELLO` (client identity, capabilities). The server answers with its own `HELLO`: the session id, the capabilities both support, and the limits the client must respect.
 2. **Register.** The CLI sends `REGISTER` carrying its authtoken and the tunnels it wants (`http` with an optional subdomain, `tcp` with an optional previous port). Token verification hits Postgres, so it runs off the Netty event loop on a virtual thread. The result comes back on the event loop. The server claims the subdomain or port, writes a lease row, and replies with the public URLs and a resume token.
 3. **Serve.** A public request arrives. The edge resolves `Host` to a session, opens a new stream on that session's connection, and sends `OPEN` with the request head followed by body `DATA` frames. The client opens (or reuses) a connection to the local port, replays the request, and streams the response back as `HEADERS` then `DATA`, ending with `CLOSE`.
 4. **Survive.** `PING`/`PONG` every 15 seconds detects a dead connection in under 45 seconds. When the connection drops, the client reconnects with jittered exponential backoff, presents its resume token, and gets back the same URLs.
@@ -117,6 +117,8 @@ A deploy therefore shows up to a user as a few seconds of `502`s followed by the
 
 ## The wire protocol
 
+**[`docs/protocol.md`](docs/protocol.md) is the specification**, with conformance vectors, so third-party clients are possible (roadmap section 1). This section is a summary of it, and ADR-0007 records why it is shaped this way.
+
 Every message between client and server is a frame:
 
 ```
@@ -126,24 +128,24 @@ Every message between client and server is a frame:
 +-------------------+--------+--------+-------------------+------------------+
 ```
 
-Stream `0` is the control stream. The server allocates every other stream id, since only the server ever sees a new public connection arrive. `DATA` payloads are capped at 64 KiB so one large body can't starve other streams on the same session.
+The stream id's top bit is reserved. Stream `0` is the control stream. The server allocates every other stream id, since only the server ever sees a new public connection arrive. `DATA` payloads are capped at 64 KiB so one large body can't starve other streams on the same session.
 
 | Type | Stream | Purpose |
 |---|---|---|
-| `HELLO` | 0 | Protocol version and capability negotiation, both directions |
+| `HELLO` | 0 | Capability negotiation and the server's limits, both directions (the version is the WebSocket subprotocol) |
 | `REGISTER` | 0 | Client requests tunnels (authtoken, kinds, requested names/ports, resume token); server replies with assignments |
 | `OPEN` | n | Server opens a stream: `tcp` (remote address) or `http` (request head) |
 | `HEADERS` | n | Client sends the HTTP response head |
 | `DATA` | n | Payload bytes, either direction |
 | `WINDOW_UPDATE` | n | Returns flow-control credit |
-| `CLOSE` | n | Half-close or reset (flag), with an error code on reset |
+| `CLOSE` | n | Half-close (empty payload) or reset (`RST` flag, the error code as the payload) |
 | `PING` / `PONG` | 0 | Liveness and round-trip time |
 | `GOAWAY` | 0 | Server is draining; carries a reconnect delay |
 | `ERROR` | 0 | Session-level error with a stable code, then the session closes |
 
-Control payloads (`HELLO`, `REGISTER`, `OPEN` heads, `HEADERS`, `GOAWAY`, `ERROR`) are JSON, encoded with Jackson 3, so the protocol stays debuggable while it is changing. Moving them to Protobuf is a later, versioned change negotiated through `HELLO` and doesn't need a new frame layout.
+Each frame's payload grows phase by phase: `jburrow.v1-draft.1`, the phase 1 draft, defines `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR` for TCP tunnels, and reserves the other three type codes for the phases that need them. Control payloads (`HELLO`, `REGISTER`, `OPEN`, `ERROR`, and later `HEADERS` and `GOAWAY`) are strict JSON, so the protocol stays debuggable while it is changing. Moving them to Protobuf is a later, versioned change negotiated through `HELLO` and doesn't need a new frame layout.
 
-The first transport is **one frame per binary WebSocket message** over TLS on 443. That gets through corporate proxies and firewalls that would block an unusual port, and in production it goes through the same ingress as everything else. The frame keeps its own length field even though WebSocket already frames messages, so a raw TCP+TLS transport can be added later with the same codec. The full specification goes into `docs/protocol.md` before the first release so third-party clients are possible (roadmap section 1). Once written, that file is the authority and this section is a summary.
+The first transport is **one frame per binary WebSocket message** over TLS on 443. That gets through corporate proxies and firewalls that would block an unusual port, and in production it goes through the same ingress as everything else. The frame keeps its own length field even though WebSocket already frames messages, so a raw TCP+TLS transport can be added later with the same codec. The protocol's major version is the WebSocket subprotocol (`jburrow.v1-draft.N` until v1.0.0, then `jburrow.v1`); within a version it only grows through capabilities negotiated in `HELLO`. The phase 1 design that implements it is [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md).
 
 ## Tech stack
 
@@ -223,8 +225,9 @@ io.jburrow.server.core
 
 The rules, each enforced by an ArchUnit test that fails `./mvnw verify`, not left as a convention:
 
-- `domain` depends only on the JDK and other `domain` packages. No Netty, Spring, Jackson, or JPA annotations.
-- `application` depends on `domain` and its own `port` interfaces. No Netty, Spring, or JPA. Use cases are plain classes constructed by the composition root.
+- `domain` depends only on the JDK, other `domain` packages, and the protocol model. No Netty, Spring, Jackson, or JPA annotations.
+- `application` depends on `domain`, its own `port` interfaces, and the protocol model. No Netty, Spring, or JPA. Use cases are plain classes constructed by the composition root.
+- The protocol model, `io.jburrow.protocol` outside its `adapter` packages, depends only on the JDK and itself. It is the vocabulary server and client share, so their core layers may use it rather than each keeping a copy (ADR-0007).
 - `adapter` packages depend on `application`. Netty lives only in `adapter.netty`, Spring MVC only in `adapter.web`, JPA only in `adapter.persistence`.
 - A feature reaches another feature only through that feature's `application.port` interfaces, never its `domain` internals or adapters.
 - No cycles between features (ArchUnit `slices().should().beFreeOfCycles()`).
@@ -386,14 +389,14 @@ Bringing JBurrow up on the cluster for the first time (DNS records, namespace, s
 The order follows `ROADMAP.md` section 14, with the walking skeleton added in front so the first tunnel deploys the same way the last one will. Each phase has a "done when" test that must pass on the production cluster, not just on a laptop.
 
 0. **Foundation (walking skeleton).** Reactor, parent POM, the six modules, ArchUnit rules, the server's configuration and API conventions, Postgres (Neon) through Flyway with one reference slice that records every server start, the mail port with SES behind it, health groups, metrics and logs, the Dockerfile, the GitHub Actions PR check, the Jenkinsfile reading every deployment value from job configuration, the manifests in the private GitOps repository, and the ArgoCD `Application`. Done when a push to `main` ends with a new pod `Ready`, `https://api.cloudnativehub.app/api/v1/meta` returning the pushed commit, a smoke-test email delivered through SES, and Neon free to suspend while the pod is idle, with no manual step. Full design: [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md).
-1. **TCP tunnel, one stream.** `jburrow-protocol` with `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`; the control WebSocket; `jburrow tcp <port>` with a static token from configuration; the native-image build check on pull requests. Done when `ssh -p <port> tcp.cloudnativehub.app` reaches a laptop behind NAT.
-2. **Multiplexing and flow control.** The stream table, credit windows, `WINDOW_UPDATE`, session writability. Done when 500 concurrent connections share one session, and an end-to-end test with a deliberately slow client shows server heap and direct memory staying flat.
+1. **TCP tunnel, one stream.** `jburrow-protocol` with `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR`, specified in `docs/protocol.md` and fuzzed; the control WebSocket; `jburrow tcp <port>` with static tokens from configuration; liveness and session-level writability backpressure, pulled forward from phases 4 and 2 because a public server leaks ports and memory without them; the native-image build check on pull requests. Full design: [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md). Done when `ssh -p <port> tcp.cloudnativehub.app` reaches a laptop behind NAT.
+2. **Multiplexing and flow control.** Many streams per session, per-stream credit windows and `WINDOW_UPDATE` on top of phase 1's session writability. Done when 500 concurrent connections share one session, and an end-to-end test with a deliberately slow client shows server heap and direct memory staying flat.
 3. **HTTP tunnels.** The edge listener, per-request routing, random and requested subdomains, the blocklist, the wildcard certificate through the DNS-01 `Issuer`. Done when `jburrow http 3000` gives a working `https://<name>.cloudnativehub.app` with a valid certificate.
-4. **Staying connected.** `PING`/`PONG`, reconnect with backoff, resume tokens, `GOAWAY` and graceful drain, `Recreate` deploys. Done when a server deploy during an open tunnel ends with the same URL serving again within ten seconds, with no action from the user.
+4. **Staying connected.** Reconnect with backoff, resume tokens, `GOAWAY` and graceful drain, `Recreate` deploys. Done when a server deploy during an open tunnel ends with the same URL serving again within ten seconds, with no action from the user.
 5. **Accounts and persistence.** The account tables on the database phase 0 connected, accounts, email verification through the phase 0 mail port, password reset, sessions, authtokens, reserved subdomains, leases, and `jburrow login`. Static tokens are removed. Done when a new user can sign up, verify, create a token, log in from the CLI, reserve a subdomain, and keep it across a server restart.
 6. **Limits, abuse controls, observability.** Rate limits, size limits, timeouts, the admin API (list and kill sessions, ban accounts), metrics, the Grafana dashboard, and JSON logs with payload redaction tested. Done when a load test against a rate-limited tunnel produces `429`s at the configured rate, the Grafana dashboard shows the load as it happens, and the logs from the test contain no payload bytes.
 7. **Dashboard MVP** (in the web repository, can start once phase 5's API exists). Done when everything in the dashboard's MVP scope works against production.
-8. **Public release, v1.** WebSocket and SSE passthrough, custom domains, the client inspection API, basic auth and IP allow/deny lists, the interstitial, abuse reports, native CLI binaries installable through `install.sh`, Homebrew and Scoop, `docs/protocol.md`, and self-hosted mode with acme4j. Release tag `v1.0.0`.
+8. **Public release, v1.** WebSocket and SSE passthrough, custom domains, the client inspection API, basic auth and IP allow/deny lists, the interstitial, abuse reports, native CLI binaries installable through `install.sh`, Homebrew and Scoop, `docs/protocol.md` frozen as `jburrow.v1`, and self-hosted mode with acme4j. Release tag `v1.0.0`.
 
 ## Where this brief departs from ROADMAP.md
 
@@ -436,4 +439,4 @@ Nothing in either public repository may reference the private GitOps repository,
 
 **Name of the web repository.** `jburrow-web` is proposed.
 
-Next step: build phase 0 as designed in [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md). ADR-0001 is written; ADR-0002 to ADR-0005 are written during phase 0.
+Next step: build phase 1 as designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md), once phase 0's exit criteria hold in production. ADR-0001 to ADR-0007 are written; ADR-0008 is written during phase 1.

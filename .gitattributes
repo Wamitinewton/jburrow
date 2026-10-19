@@ -3,3 +3,5 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 *.jar binary
+# Fuzzing seeds and findings are raw bytes: never convert line endings in them.
+jburrow-protocol/src/test/resources/io/jburrow/protocol/fuzz/** binary

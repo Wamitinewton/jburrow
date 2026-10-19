@@ -8,6 +8,7 @@ import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchRule;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -18,12 +19,22 @@ class JBurrowArchitectureTest {
 
     private static final String FIXTURES = "io.jburrow.server.architecture.fixture.";
 
+    private static final Pattern TEST_JAR = Pattern.compile(".*-tests\\.jar!/.*");
+
+    /**
+     * {@code DO_NOT_INCLUDE_TESTS} recognises {@code target/test-classes}, but once the reactor has packaged a module,
+     * its test support reaches downstream modules as a {@code -tests.jar}.
+     */
+    private static final ImportOption DO_NOT_INCLUDE_TEST_JARS = location -> !location.matches(TEST_JAR);
+
     private static final JavaClasses PRODUCTION_CLASSES = new ClassFileImporter()
             .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+            .withImportOption(DO_NOT_INCLUDE_TEST_JARS)
             .importPackages("io.jburrow.server", "io.jburrow.protocol");
 
     static Stream<Arguments> rules() {
         return Stream.of(
+                arguments("PROTOCOL_MODEL_IS_PURE", JBurrowArchitectureRules.PROTOCOL_MODEL_IS_PURE),
                 arguments("DOMAIN_IS_PURE", JBurrowArchitectureRules.DOMAIN_IS_PURE),
                 arguments("APPLICATION_IS_PURE", JBurrowArchitectureRules.APPLICATION_IS_PURE),
                 arguments("NETTY_ONLY_IN_ADAPTERS", JBurrowArchitectureRules.NETTY_ONLY_IN_ADAPTERS),
@@ -38,6 +49,10 @@ class JBurrowArchitectureTest {
 
     static Stream<Arguments> violations() {
         return Stream.of(
+                arguments(
+                        "PROTOCOL_MODEL_IS_PURE",
+                        JBurrowArchitectureRules.protocolModelIsPure(FIXTURES + "impureprotocol"),
+                        "impureprotocol"),
                 arguments("DOMAIN_IS_PURE", JBurrowArchitectureRules.DOMAIN_IS_PURE, "impuredomain"),
                 arguments("DOMAIN_IS_PURE", JBurrowArchitectureRules.DOMAIN_IS_PURE, "impuresharederror"),
                 arguments("APPLICATION_IS_PURE", JBurrowArchitectureRules.APPLICATION_IS_PURE, "impureapplication"),
@@ -83,6 +98,30 @@ class JBurrowArchitectureTest {
         assertThatThrownBy(() -> rule.check(fixtureClasses))
                 .isInstanceOf(AssertionError.class)
                 .hasMessageContaining(name);
+    }
+
+    @ParameterizedTest(name = "{0} accepts the protocol model")
+    @MethodSource("relaxedRules")
+    void coreLayersMayUseTheProtocolModel(String name, ArchRule rule) {
+        JavaClasses fixtureClasses = new ClassFileImporter().importPackages(FIXTURES + "protocolincore");
+        assertThat(fixtureClasses).isNotEmpty();
+
+        rule.check(fixtureClasses);
+    }
+
+    static Stream<Arguments> relaxedRules() {
+        return Stream.of(
+                arguments("DOMAIN_IS_PURE", JBurrowArchitectureRules.DOMAIN_IS_PURE),
+                arguments("APPLICATION_IS_PURE", JBurrowArchitectureRules.APPLICATION_IS_PURE));
+    }
+
+    @Test
+    void protocolAdaptersAreOutsideTheModel() {
+        String root = FIXTURES + "impureprotocol";
+        JavaClasses adapterClasses = new ClassFileImporter().importPackages(root + ".adapter");
+        assertThat(adapterClasses).isNotEmpty();
+
+        JBurrowArchitectureRules.protocolModelIsPure(root).check(adapterClasses);
     }
 
     @Test
