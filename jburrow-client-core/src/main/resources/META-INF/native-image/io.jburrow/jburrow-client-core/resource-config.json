@@ -1,0 +1,9 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "\\Qio/jburrow/client/client.properties\\E"
+      }
+    ]
+  }
+}

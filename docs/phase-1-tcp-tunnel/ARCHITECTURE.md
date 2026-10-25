@@ -454,12 +454,14 @@ jburrow-server/                        io.jburrow.server
 └── observability/    MicrometerTunnelMetrics, EdgeHealthIndicator
 
 jburrow-client-core/                   io.jburrow.client
-├── JBurrowClient, ClientSettings, TunnelHandle    the embeddable API, no Netty in signatures
+├── JBurrowClient, ClientSettings, TunnelHandle, TunnelStartException
+│                     the embeddable API, no Netty in signatures
 └── tunnel/
     ├── domain/       ClientSession, ClientSessionState, LocalTarget, TunnelSpec,
-    │                 ActiveTunnel, PendingData
+    │                 ActiveTunnel, PendingData, TunnelClosed
     ├── application/  port/ TunnelEvents (what the CLI listens to)
-    └── adapter/netty/ NettyTunnelClient, ControlConnection, ClientTls, ControlFrameHandler,
+    └── adapter/netty/ NettyTunnelClient, ControlConnection, ControlFrameHandler,
+                       ClientLivenessHandler, ClientTls, UpgradeFailures, Dialer,
                        LocalConnector, LocalRelayHandler
 
 jburrow-cli/                           io.jburrow.cli
@@ -821,10 +823,13 @@ JBurrowClient client = JBurrowClient.builder()
         .tunnel(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22)).remotePort(20417))
         .events(listener)              // TunnelEvents: established, stream opened/closed, closed
         .build();
-TunnelHandle handle = client.start();  // completes when REGISTER is answered, or fails with the code
-handle.closeFuture();                  // completes when the session ends, with the reason
+TunnelHandle handle = client.start();  // returns when REGISTER is answered; TunnelStartException otherwise
+handle.closed();                       // completes when the session ends, with the reason
 handle.close();                        // orderly: WebSocket close 1000
 ```
+
+`TunnelClosed`, the reason a session ended, lives in the client's domain rather than beside `TunnelHandle`:
+`TunnelEvents` reports it too, and the application layer may not depend on the API package.
 
 **Connection.** `NettyTunnelClient` runs a single-threaded NIO event loop group. The control
 connection, every local connection and every timer of a session live on that one thread, the same
@@ -832,23 +837,27 @@ confinement as the server. TLS uses the JDK provider with the system trust store
 `endpointIdentificationAlgorithm("HTTPS")` set explicitly (not left to Netty's default), SNI from
 the URL's host, TLS 1.3 and 1.2, and ALPN `http/1.1`. The upgrade request sends
 `Sec-WebSocket-Protocol: jburrow.v1-draft.1` and `User-Agent: jburrow-cli/<version> (<os>; <arch>)`
-and no `Origin`. A refused upgrade (`WebSocketClientHandshakeException`) is mapped to its code by
-reading the response's JSON body.
+and no `Origin`. A refused upgrade is mapped to its code by reading the response's JSON body, which
+the client reads before Netty's handshaker does: `WebSocketClientHandshakeException` keeps a
+refusal's status and headers but not its body. Host names, the server's and every local target's,
+are resolved on a virtual thread, never on the event loop, and each address a name resolves to is
+tried in turn, so `localhost` reaches a service listening on only one of `::1` and `127.0.0.1`.
 
 **Handshake.** `HELLO` and `REGISTER` are sent back to back. The first frame the client accepts is
 the server's `HELLO`; it adopts the server's limits and liveness intervals from it. The
 `REGISTER` reply completes `start()`. An `ERROR` before that fails `start()` with the code.
 
 **Streams.** On `OPEN`, the client checks the stream ID and the tunnel id (an unknown tunnel is
-`PROTOCOL_ERROR`), and connects to the tunnel's local target (`TCP_NODELAY`, half-closure allowed,
-10-second connect timeout). Until the connection is up, `DATA` for the stream is held in a
+`PROTOCOL_ERROR`), but not `maxConcurrentStreams`, which binds the server (protocol.md §8.5). It
+reports the stream as opened, with the visitor's address, and connects to the tunnel's local target
+(`TCP_NODELAY`, half-closure allowed, 10-second connect timeout). Until the connection is up, `DATA` for the stream is held in a
 `PendingData` buffer. Past 256 KiB pending, the client stops reading the control connection (and
 pauses its liveness clock) until the connect resolves. On success the pending bytes are written and
 the relay starts; on failure they are released and the stream is reset with
 `LOCAL_SERVICE_UNREACHABLE`.
 
 **Ending.** The session ends on `close()`, on an `ERROR`, on a heartbeat timeout, or when the
-connection drops. `closeFuture()` completes with the reason (a code, or `CONNECTION_LOST` for a
+connection drops. `closed()` completes with the reason (a code, or `CONNECTION_LOST` for a
 dropped connection, a client-side reason that never appears on the wire). There is no reconnect in
 phase 1.
 

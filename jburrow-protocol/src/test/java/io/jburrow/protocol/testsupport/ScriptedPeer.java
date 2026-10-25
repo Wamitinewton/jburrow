@@ -23,7 +23,9 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
@@ -35,11 +37,15 @@ import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolConfig;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.util.ReferenceCountUtil;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -48,6 +54,10 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
+import javax.net.ssl.SSLEngine;
 
 /**
  * A real WebSocket peer for byte-path tests, on the real codec, that plays either side and sends whatever a test
@@ -70,17 +80,28 @@ public final class ScriptedPeer implements AutoCloseable {
 
     private final EventLoopGroup group;
     private final CompletableFuture<Channel> connection = new CompletableFuture<>();
+    private final CompletableFuture<HttpHeaders> upgradeRequest = new CompletableFuture<>();
+    private final CompletableFuture<TlsHello> tlsHello = new CompletableFuture<>();
     private final BlockingQueue<Object> received = new LinkedBlockingQueue<>();
     private final AtomicBoolean closeRecorded = new AtomicBoolean();
     private volatile boolean silenced;
     private volatile boolean closing;
     private volatile Channel listener;
+    private volatile List<String> alpnOffered = List.of();
 
     /** A message the codec refused. */
     private record Rejected(ProtocolException error) {}
 
     /** The WebSocket connection ended, with the peer's close status, or 1006 if it closed without one. */
     private record Closed(WebSocketCloseStatus status) {}
+
+    /**
+     * What a TLS client asked for in its ClientHello, as a peer from {@link #listenTls} saw it.
+     *
+     * @param serverNames the host names sent as SNI
+     * @param applicationProtocols the ALPN protocols offered, in the client's order; empty if it offered none
+     */
+    public record TlsHello(List<String> serverNames, List<String> applicationProtocols) {}
 
     private ScriptedPeer() {
         this.group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
@@ -132,6 +153,19 @@ public final class ScriptedPeer implements AutoCloseable {
 
     /** Listens on loopback as a server, accepting {@code subprotocol}. Port 0 picks an ephemeral port. */
     public static ScriptedPeer listen(int port, String subprotocol) {
+        return listen(port, subprotocol, null);
+    }
+
+    /**
+     * Listens on loopback as a server behind TLS with {@code serverContext}, accepting {@code subprotocol}. The peer
+     * negotiates ALPN itself, choosing {@code http/1.1} when it is offered, and records what the client asked for
+     * ({@link #tlsHello}), so {@code serverContext} must be a JDK provider context without ALPN configuration.
+     */
+    public static ScriptedPeer listenTls(int port, SslContext serverContext, String subprotocol) {
+        return listen(port, subprotocol, Objects.requireNonNull(serverContext, "serverContext"));
+    }
+
+    private static ScriptedPeer listen(int port, String subprotocol, SslContext tls) {
         ScriptedPeer peer = new ScriptedPeer();
         FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create());
         WebSocketServerProtocolConfig config = WebSocketServerProtocolConfig.newBuilder()
@@ -151,6 +185,9 @@ public final class ScriptedPeer implements AutoCloseable {
                         if (peer.connection.isDone()) {
                             ch.close();
                             return;
+                        }
+                        if (tls != null) {
+                            ch.pipeline().addLast(peer.tlsHandler(tls, ch));
                         }
                         ch.pipeline()
                                 .addLast(new HttpServerCodec())
@@ -229,6 +266,31 @@ public final class ScriptedPeer implements AutoCloseable {
         return next(Rejected.class, timeout).error();
     }
 
+    /** The headers of the client's upgrade request, once the upgrade has completed. */
+    public HttpHeaders upgradeRequestHeaders() {
+        awaitConnection();
+        return upgradeRequest.getNow(new DefaultHttpHeaders());
+    }
+
+    /** What the client sent in its TLS ClientHello; only for a peer from {@link #listenTls}. */
+    public TlsHello tlsHello() {
+        try {
+            return tlsHello.get(CONNECT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted waiting for the TLS handshake", e);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("The TLS handshake failed", e.getCause());
+        } catch (TimeoutException e) {
+            throw new IllegalStateException("No TLS handshake within " + CONNECT_TIMEOUT, e);
+        }
+    }
+
+    /** Closes the TCP connection without a WebSocket close, as a crashed or vanished peer would. */
+    public void dropConnection() {
+        awaitConnection().close().awaitUninterruptibly();
+    }
+
     public void pauseReading() {
         awaitConnection().config().setAutoRead(false);
     }
@@ -259,6 +321,32 @@ public final class ScriptedPeer implements AutoCloseable {
         for (Object event = received.poll(); event != null; event = received.poll()) {
             ReferenceCountUtil.release(event);
         }
+    }
+
+    private SslHandler tlsHandler(SslContext tls, SocketChannel ch) {
+        SSLEngine engine = tls.newEngine(ch.alloc());
+        engine.setHandshakeApplicationProtocolSelector((handshaking, offered) -> {
+            alpnOffered = List.copyOf(offered);
+            return offered.contains(ApplicationProtocolNames.HTTP_1_1) ? ApplicationProtocolNames.HTTP_1_1 : null;
+        });
+        SslHandler handler = new SslHandler(engine);
+        handler.handshakeFuture().addListener(done -> {
+            if (!done.isSuccess()) {
+                tlsHello.completeExceptionally(done.cause());
+                return;
+            }
+            List<String> serverNames = engine.getSession() instanceof ExtendedSSLSession session
+                    ? session.getRequestedServerNames().stream()
+                            .map(ScriptedPeer::hostName)
+                            .toList()
+                    : List.of();
+            tlsHello.complete(new TlsHello(serverNames, alpnOffered));
+        });
+        return handler;
+    }
+
+    private static String hostName(SNIServerName name) {
+        return name instanceof SNIHostName host ? host.getAsciiName() : name.toString();
     }
 
     private ChannelHandler[] frameHandlers(FrameCodec codec) {
@@ -338,6 +426,9 @@ public final class ScriptedPeer implements AutoCloseable {
         public void userEventTriggered(ChannelHandlerContext ctx, Object event) throws Exception {
             if (event == WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_COMPLETE
                     || event instanceof WebSocketServerProtocolHandler.HandshakeComplete) {
+                if (event instanceof WebSocketServerProtocolHandler.HandshakeComplete upgrade) {
+                    upgradeRequest.complete(new DefaultHttpHeaders().set(upgrade.requestHeaders()));
+                }
                 connection.complete(ctx.channel());
             }
             super.userEventTriggered(ctx, event);

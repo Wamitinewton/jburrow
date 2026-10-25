@@ -18,6 +18,61 @@
             <groupId>io.jburrow</groupId>
             <artifactId>jburrow-protocol</artifactId>
         </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+        </dependency>
+        <!-- TLS with the JDK provider only: no netty-tcnative, which native-image and cross-platform builds can't take. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <!-- ScriptedPeer and the Netty leak detection that fails any test class that leaks a buffer. -->
+        <dependency>
+            <groupId>io.jburrow</groupId>
+            <artifactId>jburrow-protocol</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Test certificates: the replacement Netty 4.2 names for the deprecated SelfSignedCertificate. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-pkitesting</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>io/jburrow/client/client.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>io/jburrow/client/client.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
+    </build>
 
 </project>
