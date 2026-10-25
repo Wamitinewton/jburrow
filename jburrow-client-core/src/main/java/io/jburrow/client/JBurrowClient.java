@@ -1,0 +1,92 @@
+package io.jburrow.client;
+
+import io.jburrow.client.tunnel.application.port.TunnelEvents;
+import io.jburrow.client.tunnel.domain.TunnelSpec;
+import java.net.URI;
+import java.time.Duration;
+import javax.net.ssl.TrustManagerFactory;
+
+/**
+ * A JBurrow client: one session with a server, carrying the tunnels it asked for. The embeddable entry point; the CLI
+ * is one user of it, a test or another program can be another.
+ *
+ * <pre>{@code
+ * try (JBurrowClient client = JBurrowClient.builder()
+ *         .server(URI.create("wss://connect.example.dev/v1/connect"))
+ *         .authtoken(token)
+ *         .tunnel(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22)))
+ *         .build()) {
+ *     TunnelHandle handle = client.start();
+ *     handle.tunnels().forEach(tunnel -> System.out.println(tunnel.url()));
+ *     handle.closed().toCompletableFuture().join();
+ * }
+ * }</pre>
+ *
+ * <p>A client runs one session, on one daemon I/O thread of its own, and is started once. There is no reconnect in this
+ * version: when the session ends, {@link TunnelHandle#closed()} says why, and a new client is needed for a new
+ * session.
+ */
+public interface JBurrowClient extends AutoCloseable {
+
+    static Builder builder() {
+        return new DefaultBuilder();
+    }
+
+    /**
+     * Connects, upgrades, and runs the handshake. Blocks until the server answers {@code REGISTER}, or the session
+     * fails before that.
+     *
+     * @throws TunnelStartException if the session couldn't be established, with the reason and, where the server gave
+     *     one, its error code
+     * @throws IllegalStateException if the client was already started or closed
+     */
+    TunnelHandle start() throws TunnelStartException;
+
+    /**
+     * Closes the session if it is open, waiting briefly for an orderly close, then stops the I/O thread. Called from a
+     * {@link TunnelEvents} callback, it doesn't wait.
+     */
+    @Override
+    void close();
+
+    /** Collects a client's settings. {@link #server}, {@link #authtoken} and one {@link #tunnel} are required. */
+    interface Builder {
+
+        /**
+         * The connect URL: {@code wss://host[:port]/v1/connect}, or {@code ws://} to this machine only ({@code
+         * localhost}, {@code 127.0.0.0/8} or {@code ::1}). A query is dropped.
+         */
+        Builder server(URI uri);
+
+        /** The credential sent in {@code REGISTER}. Never logged and never part of any {@code toString}. */
+        Builder authtoken(String token);
+
+        /** The tunnel to open. This version opens exactly one per client. */
+        Builder tunnel(TunnelSpec spec);
+
+        /** Who hears about the session; optional. Called on the client's I/O thread, so it must not block. */
+        Builder events(TunnelEvents listener);
+
+        /** The name and version sent in {@code HELLO} and {@code User-Agent}. By default this library's. */
+        Builder clientInfo(String name, String version);
+
+        /**
+         * Replaces the system trust store for verifying the server's certificate. For tests: host name verification
+         * stays on whatever is trusted.
+         */
+        Builder trustManager(TrustManagerFactory trustManagerFactory);
+
+        /**
+         * How long the server has, from the TCP connection opening, to complete TLS and the WebSocket upgrade and to
+         * answer {@code HELLO} and {@code REGISTER}. 10 seconds by default.
+         */
+        Builder handshakeTimeout(Duration timeout);
+
+        /**
+         * Validates the settings and builds the client. Nothing connects until {@link JBurrowClient#start()}.
+         *
+         * @throws IllegalArgumentException naming the first setting that is missing or breaks its rule
+         */
+        JBurrowClient build();
+    }
+}
