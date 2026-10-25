@@ -891,7 +891,12 @@ Forwarding  tcp://tcp.cloudnativehub.app:20417 -> localhost:22
 ```
 
 **JSON output** writes one JSON object per event to stdout (`registered`, `stream_opened`,
-`stream_closed`, `closed`), for scripts and for the native smoke test.
+`stream_closed`, `closed`), for scripts and for the native smoke test. Every run whose arguments
+parse ends with exactly one `closed` event, including a session that never started. Its `reason`
+is how the session ended (`USER_CLOSED`, `SERVER_ERROR`, `HEARTBEAT_TIMEOUT`, `CONNECTION_LOST`,
+`LOCAL_ERROR`), why it never started (`CONNECT_FAILED`, `TLS_FAILED`, `UPGRADE_REFUSED`,
+`SERVER_ERROR`, `TIMEOUT`, `LOCAL_ERROR`), `USAGE_ERROR`, or `INTERNAL_ERROR`; its `code` is the
+protocol error code, or `null`.
 
 **Exit codes**:
 
@@ -901,9 +906,12 @@ Forwarding  tcp://tcp.cloudnativehub.app:20417 -> localhost:22
 | 1 | Internal error |
 | 2 | Usage error (bad argument, `ws://` to a non-loopback host, missing token) |
 | 3 | Authentication failed (`AUTHTOKEN_INVALID`) |
-| 4 | Could not connect, or the connection was lost (network, TLS, `HEARTBEAT_TIMEOUT`, `SERVER_SHUTTING_DOWN`, `SERVER_AT_CAPACITY`, `INTERNAL_ERROR`) |
+| 4 | Could not connect, or the connection was lost (network, TLS, a refused upgrade without a code, `NOT_FOUND`, `HANDSHAKE_TIMEOUT`, `HEARTBEAT_TIMEOUT`, `SERVER_SHUTTING_DOWN`, `SERVER_AT_CAPACITY`, `INTERNAL_ERROR`) |
 | 5 | Registration refused (`PORT_UNAVAILABLE`, `PORT_POOL_EXHAUSTED`, a limit, `VALIDATION_FAILED`) |
-| 6 | Protocol mismatch or violation (`UNSUPPORTED_PROTOCOL_VERSION`, `PROTOCOL_ERROR`, `FRAME_SIZE_ERROR`): upgrade the CLI, or report a bug |
+| 6 | Protocol mismatch or violation (`UNSUPPORTED_PROTOCOL_VERSION`, `PROTOCOL_ERROR`, `FRAME_SIZE_ERROR`, `FORBIDDEN_ORIGIN`, `PING_RATE_EXCEEDED`): upgrade the CLI, or report a bug |
+
+Every protocol error code has an exit code, the same whether the session failed to start or ended
+later. A new code in `ErrorCode` doesn't compile in the CLI until it is given one.
 
 ## Layer rules
 

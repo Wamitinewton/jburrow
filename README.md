@@ -31,7 +31,29 @@ make verify                               # unit, architecture and integration t
 ```
 
 `make help` lists every target. `make down` stops the local dependencies, and `make reset` also
-deletes their data. Only the server runs today; tunnels arrive from phase 1.
+deletes their data.
+
+## Try it
+
+With the server running (`make run`, above), expose a local echo service through a TCP tunnel. The
+token is the development token from [`CONTRIBUTING.md`](CONTRIBUTING.md); it only unlocks a server on
+your own machine.
+
+```bash
+./mvnw -q -pl jburrow-cli -am package -DskipTests
+ncat -lk 9000 --exec /bin/cat &           # something to tunnel to
+JBURROW_AUTHTOKEN=jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00 \
+  java -jar jburrow-cli/target/jburrow-cli-*.jar tcp 9000 --server ws://localhost:7080/v1/connect
+# Forwarding  tcp://localhost:21037 -> localhost:9000
+
+echo hello | ncat localhost 21037         # another terminal, with the port printed above
+```
+
+`jburrow tcp 22` instead tunnels to your SSH daemon (`ssh -p 21037 localhost`). Add `--output json`
+for one JSON event per line. Ctrl-C stops the tunnel with exit code 0; any other exit code says
+what went wrong (`jburrow tcp --help`, and ARCHITECTURE.md §The CLI for the list). Pass the token
+through `JBURROW_AUTHTOKEN` rather than `--authtoken`: a command-line argument is visible to every
+user of the machine.
 
 ## Documentation
 
