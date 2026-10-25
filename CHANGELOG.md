@@ -44,3 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   indicator.
 - Static authtokens from `jburrow.auth.static-tokens` (`name:sha256hex`, so configuration never
   holds a usable token), and `make authtoken NAME=<name>` to mint one.
+- `jburrow tcp [host:]port`: exposes a local TCP port through a public port on the server, logs
+  each connection, and stops on Ctrl-C with exit code 0. `--output json` writes one event per
+  line, ending with a `closed` event. Exit codes 2 to 6 tell usage errors, a refused authtoken, a
+  lost connection, a refused registration and a protocol mismatch apart. The authtoken comes from
+  `JBURROW_AUTHTOKEN` or `--authtoken`.
