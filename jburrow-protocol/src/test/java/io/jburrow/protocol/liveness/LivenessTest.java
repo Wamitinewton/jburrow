@@ -102,13 +102,15 @@ class LivenessTest {
     }
 
     @Test
-    void pausedTimeDoesNotCount() {
+    void pausedTimeNeverMakesThePeerDead() {
         Liveness liveness = new Liveness(PING, IDLE, 0);
         liveness.pause();
 
         for (long now = 0; now <= 3 * IDLE; now += SECOND) {
-            assertThat(liveness.check(now)).isEqualTo(NONE);
-            assertThat(liveness.nextDeadlineNanos(now)).isEqualTo(Liveness.NO_DEADLINE);
+            assertThat(liveness.check(now)).isNotEqualTo(DEAD);
+            if (liveness.check(now) == SEND_PING) {
+                liveness.onPingSent(now, now);
+            }
         }
 
         long resumedAt = 3 * IDLE;
@@ -117,6 +119,40 @@ class LivenessTest {
         assertThat(liveness.nextDeadlineNanos(resumedAt)).isEqualTo(resumedAt + PING);
         assertThat(liveness.check(resumedAt + PING)).isEqualTo(SEND_PING);
         assertThat(liveness.check(resumedAt + IDLE)).isEqualTo(DEAD);
+    }
+
+    /** The peer, still reading, must keep hearing from a side that has stopped reading it. */
+    @Test
+    void aPausedSidePingsAtOnceThenEveryPingInterval() {
+        Liveness liveness = new Liveness(PING, IDLE, 0);
+        long pausedAt = 2 * SECOND;
+        liveness.pause();
+
+        assertThat(liveness.nextDeadlineNanos(pausedAt)).isEqualTo(pausedAt);
+        assertThat(liveness.check(pausedAt)).isEqualTo(SEND_PING);
+        liveness.onPingSent(pausedAt, 1);
+
+        assertThat(liveness.check(pausedAt + PING - 1)).isEqualTo(NONE);
+        assertThat(liveness.nextDeadlineNanos(pausedAt + 1)).isEqualTo(pausedAt + PING);
+        assertThat(liveness.check(pausedAt + PING)).isEqualTo(SEND_PING);
+        liveness.onPingSent(pausedAt + PING, 2);
+        assertThat(liveness.nextDeadlineNanos(pausedAt + PING)).isEqualTo(pausedAt + 2 * PING);
+    }
+
+    /** Pausing again soon after a {@code PING} doesn't bring the next one forward, which a rate limit would refuse. */
+    @Test
+    void pingsStayAPingIntervalApartAcrossPauses() {
+        Liveness liveness = new Liveness(PING, IDLE, 0);
+        liveness.onPingSent(PING, 1);
+
+        liveness.pause();
+        assertThat(liveness.check(PING + SECOND)).isEqualTo(NONE);
+        assertThat(liveness.nextDeadlineNanos(PING + SECOND)).isEqualTo(2 * PING);
+
+        liveness.resume(PING + SECOND);
+        liveness.pause();
+        assertThat(liveness.check(2 * PING - 1)).isEqualTo(NONE);
+        assertThat(liveness.check(2 * PING)).isEqualTo(SEND_PING);
     }
 
     @Test
@@ -196,7 +232,8 @@ class LivenessTest {
 
         Liveness paused = new Liveness(PING, IDLE, 0);
         paused.pause();
-        assertThatIllegalStateException().isThrownBy(() -> paused.onPingSent(PING, 1));
+        paused.onPingSent(SECOND, 1);
+        assertThatIllegalStateException().isThrownBy(() -> paused.onPingSent(SECOND + PING - 1, 2));
     }
 
     @Test

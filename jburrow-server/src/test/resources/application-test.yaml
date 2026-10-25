@@ -1,0 +1,20 @@
+# The test profile: TestContainersConfiguration supplies Postgres, Mailpit and an ephemeral edge port.
+# Each end-to-end test class sets its own jburrow.tcp.port-range, so classes never share tunnel ports.
+spring:
+  mail:
+    # Boot configures a mail sender only when a host is set before the context starts; the container's
+    # address replaces this one once it is running.
+    host: localhost
+
+jburrow:
+  mail:
+    from-address: no-reply@jburrow.test
+  auth:
+    # Test-only tokens, in TunnelTestSupport. They unlock a test server and nothing else.
+    static-tokens:
+      - alice:323ac347ae8706bc80f52638ad52aa9606662ed7b9460fe6e994f239c07d08f4
+      - bob:abb0b5d39f1a192b607e23e2615c883b5beed90e5b2b9e354cde249d8c7e66f7
+  edge:
+    connect-host: localhost
+  tcp:
+    public-host: localhost

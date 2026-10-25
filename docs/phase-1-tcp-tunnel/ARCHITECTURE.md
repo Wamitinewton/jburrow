@@ -341,6 +341,13 @@ implements the rules for both sides.
 - **Paused reading pauses the clock.** Without this rule, a visitor that stops reading (an SSH
   client suspended with Ctrl-Z) would make the server stop reading the client, never see the
   client's `PONG`, and kill a healthy session.
+- **A paused side keeps pinging.** Pausing the clock alone only moves the failure: the peer, still
+  reading, hears nothing and ends the session after the idle timeout. A local service that stops
+  reading makes the client pause, and the server drops it; a visitor that stops reading makes the
+  server pause, and the client drops it. So a paused side sends a `PING` every ping interval, which
+  the peer counts as proof of life. `SlowReaderIntegrationTest` found this, with a stall twice the
+  idle timeout in each direction. The paused side still can't notice its peer dying until it reads
+  again, which is what the visitor or local service it waits on decides.
 - **15 and 45 seconds** match `PROJECT.md` §The life of a tunnel, and keep the connection well
   inside ingress and NAT idle timeouts, which are minutes at the shortest. The server announces them
   in its `HELLO` (`jburrow.edge.ping-interval`, `jburrow.edge.idle-timeout`) instead of both sides
@@ -1023,6 +1030,12 @@ allocation error instead of growing until the pod is killed.
 connections add at most about 5 MiB. Watermarks are soft limits: one write can pass the high
 watermark by at most one frame, which the table already counts.
 
+The table counts the bytes buffers hold. `jburrow_netty_direct_memory_bytes` reports more: Netty's
+allocator reserves memory in chunks (512 KiB at a time in the end-to-end tests) and keeps freed
+chunks to reuse, so the gauge moves in steps and sits a few MiB above what is held. Read it for
+growth over time, not against the table. `SlowReaderIntegrationTest` bounds both: the bytes held,
+through the leak detector's count, and the gauge, loosely.
+
 ## Security and threat model
 
 | Threat | Mitigation | Proven by |
@@ -1075,8 +1088,9 @@ watermark by at most one frame, which the table already counts.
 | `TcpTunnelIntegrationTest` | real edge, `ScriptedPeer` client, real visitor sockets | `OPEN`, relay, half-close both ways, reset both ways, refused second stream, port release |
 | `ClientSessionIntegrationTest` | real client, `ScriptedPeer` server | the client's state machine and its reactions to every server behaviour |
 | `TunnelEndToEndIntegrationTest` | full server context (Testcontainers Postgres) + real client | bytes through a real tunnel: echo, 64 MiB with a checksum, half-close, local service down, bad token, server shutdown |
-| `SlowReaderIntegrationTest` | full server + real client | a visitor that stops reading: direct memory stays under the per-session budget |
-| `HeartbeatIntegrationTest` | full server + `ScriptedPeer` | a client that goes silent is dropped within the idle timeout and its port is free again |
+| `SlowReaderIntegrationTest` | full server + real client | a slow reader on either end: the direct memory buffers hold stays under the per-session budget, and the session outlives a stall twice the idle timeout |
+| `HeartbeatIntegrationTest` | full server + `ScriptedPeer`, and real client | a client that goes silent is dropped within the idle timeout and its port is free again; an idle real client stays connected |
+| `TunnelMetricsIntegrationTest`, `LogHygieneIntegrationTest` | full server + real client + `ScriptedPeer` | every metric and log line in [Observability](#observability) moves and carries its fields; no label is an identifier; no token, hash of one, payload byte or client `HELLO` text is logged outside its line |
 | `TcpCommandTest` | unit, CLI against a `ScriptedPeer` server | output, JSON events, exit codes |
 | `ErrorCodeSpaceTest` | unit | the protocol and REST enums overlap exactly in the declared set |
 | architecture tests | ArchUnit | the rules in [Layer rules](#layer-rules), each with a failing fixture |
@@ -1089,14 +1103,20 @@ misbehaving server, without either side's own implementation hiding a bug.
 **Leak detection.** The protocol test-jar installs a `ResourceLeakDetectorFactory` before any test
 runs (through a JUnit `LauncherSessionListener`) whose detectors record every leak report instead
 of only logging it. Netty's detector runs at `PARANOID`. An extension fails the test class if any
-leak was recorded. Netty's `LeakListener` is per detector instance, which is why the factory is
+leak was recorded. A leak's trace keeps where the buffer was allocated, retained, released and
+touched, but not every read and write (`io.netty.leakDetection.acquireAndReleaseOnly`): WebSocket
+masking reads and writes eight bytes at a time, and capturing a stack for each made the end-to-end
+suite fifty times slower. Pass `-Dio.netty.leakDetection.acquireAndReleaseOnly=false` to record every
+access while chasing a leak. The same factory counts the direct bytes live buffers hold, which is
+how the slow-reader test measures memory without the allocator's chunk reservations. Netty's `LeakListener` is per detector instance, which is why the factory is
 installed rather than a listener attached.
 
 **End to end.** `TunnelEndToEndIntegrationTest` and its neighbours live in `jburrow-server`'s test
 sources, with `jburrow-client-core` as a **test-scoped** dependency. That is the only place a server
 module sees client code, and the architecture tests don't import test classes. Tunnel listeners in
-these tests use a high port range; the pool's quarantine-and-retry makes an occasional collision
-with another process harmless.
+these tests use a high port range, one per test class; the pool's quarantine-and-retry makes an
+occasional collision with another process harmless. Liveness tests use the protocol's shortest
+timings, a 1-second ping interval and a 2-second idle timeout.
 
 **Fuzzing.** Jazzer (`com.code-intelligence:jazzer-junit`) `@FuzzTest`s in `jburrow-protocol`. In
 an ordinary build they replay their seed corpus (the conformance vectors plus every past finding)

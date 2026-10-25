@@ -147,7 +147,8 @@ final class EdgeChannelInitializer extends ChannelInitializer<SocketChannel> {
                                 () -> {
                                     log.debug(
                                             "Upgrade request timed out: client {}",
-                                            ClientAddressResolver.clientAddress(ctx.channel()));
+                                            ClientAddressResolver.clientAddress(ctx.channel())
+                                                    .getHostAddress());
                                     ctx.close();
                                 },
                                 timeoutNanos,
@@ -171,7 +172,8 @@ final class EdgeChannelInitializer extends ChannelInitializer<SocketChannel> {
                 upgraded(ctx, complete.selectedSubprotocol());
             } else if (event == ServerHandshakeStateEvent.HANDSHAKE_TIMEOUT) {
                 log.debug(
-                        "WebSocket handshake timed out: client {}", ClientAddressResolver.clientAddress(ctx.channel()));
+                        "WebSocket handshake timed out: client {}",
+                        ClientAddressResolver.clientAddress(ctx.channel()).getHostAddress());
                 ctx.close();
             } else {
                 super.userEventTriggered(ctx, event);
@@ -182,7 +184,7 @@ final class EdgeChannelInitializer extends ChannelInitializer<SocketChannel> {
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             log.debug(
                     "Edge connection failed before its session began: client {}",
-                    ClientAddressResolver.clientAddress(ctx.channel()),
+                    ClientAddressResolver.clientAddress(ctx.channel()).getHostAddress(),
                     cause);
             ctx.close();
         }
@@ -201,7 +203,7 @@ final class EdgeChannelInitializer extends ChannelInitializer<SocketChannel> {
             try {
                 sessions.initialize(ctx.channel(), subprotocol, clientAddress, ticket);
             } catch (RuntimeException e) {
-                log.error("Could not start a session: client {}", clientAddress, e);
+                log.error("Could not start a session: client {}", clientAddress.getHostAddress(), e);
                 ctx.channel().close();
             }
         }

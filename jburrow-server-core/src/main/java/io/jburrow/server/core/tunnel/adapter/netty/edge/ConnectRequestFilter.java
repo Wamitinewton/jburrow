@@ -139,7 +139,10 @@ final class ConnectRequestFilter extends ChannelInboundHandlerAdapter {
 
     private boolean refused(ChannelHandlerContext ctx, ErrorCode code) {
         metrics.handshakeFailed(code);
-        log.info("Upgrade refused: client {} code {}", ClientAddressResolver.clientAddress(ctx.channel()), code);
+        log.info(
+                "upgrade refused: client={} code={}",
+                ClientAddressResolver.clientAddress(ctx.channel()).getHostAddress(),
+                code);
         return false;
     }
 

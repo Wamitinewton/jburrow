@@ -66,7 +66,10 @@ final class ClientLivenessHandler extends ChannelInboundHandlerAdapter {
         reschedule();
     }
 
-    /** Stops the clock while the connection isn't read, for backpressure. */
+    /**
+     * Stops the clock while the connection isn't read, for backpressure, and keeps sending {@code PING}s so the server
+     * still hears from this client.
+     */
     void pause() {
         if (liveness != null) {
             liveness.pause();
@@ -152,9 +155,6 @@ final class ClientLivenessHandler extends ChannelInboundHandlerAdapter {
         }
         long now = nanoTime.getAsLong();
         long deadline = liveness.nextDeadlineNanos(now);
-        if (deadline == Liveness.NO_DEADLINE) {
-            return;
-        }
         timer = ctx.executor().schedule(this::onTimer, deadline - now, TimeUnit.NANOSECONDS);
     }
 

@@ -5,20 +5,21 @@ package io.jburrow.protocol.liveness;
  * Every received frame is proof of life, not only a {@code PONG}, and at most one {@code PING} is outstanding.
  *
  * <p>While reading is paused for backpressure the clock stops: nothing can arrive, so silence proves nothing. On
- * resume it restarts from zero.
+ * resume it restarts from zero. A paused side still proves its own life: a {@code PING} is due at once if this side
+ * has never sent one, and then one ping interval after the last, so the peer, whose reading isn't paused, keeps
+ * hearing from it.
  *
  * <p>Times are {@code System.nanoTime()} readings passed in by the caller and are only ever subtracted, so the rules
  * hold across the {@code long} wrap. Not thread-safe; confined to the thread that owns its connection.
  */
 public final class Liveness {
 
-    /** {@link #nextDeadlineNanos} while paused: nothing is due until {@link #resume}. */
-    public static final long NO_DEADLINE = Long.MAX_VALUE;
-
     private long pingIntervalNanos;
     private long idleTimeoutNanos;
     private long lastReceivedNanos;
     private boolean pingOutstanding;
+    private boolean pingEverSent;
+    private long lastPingSentNanos;
     private boolean pongAwaited;
     private long awaitedOpaque;
     private boolean paused;
@@ -48,6 +49,8 @@ public final class Liveness {
             throw new IllegalStateException("No PING is due");
         }
         pingOutstanding = true;
+        pingEverSent = true;
+        lastPingSentNanos = nowNanos;
         pongAwaited = true;
         awaitedOpaque = opaque;
     }
@@ -64,7 +67,10 @@ public final class Liveness {
         return true;
     }
 
-    /** Stops the clock because the caller stopped reading the connection. Pausing while paused does nothing. */
+    /**
+     * Stops the clock because the caller stopped reading the connection; {@code PING}s stay due on their own schedule
+     * while paused. Pausing while paused does nothing.
+     */
     public void pause() {
         paused = true;
     }
@@ -91,7 +97,7 @@ public final class Liveness {
 
     public LivenessAction check(long nowNanos) {
         if (paused) {
-            return LivenessAction.NONE;
+            return isPausedPingDue(nowNanos) ? LivenessAction.SEND_PING : LivenessAction.NONE;
         }
         long silent = nowNanos - lastReceivedNanos;
         if (silent >= idleTimeoutNanos) {
@@ -105,15 +111,21 @@ public final class Liveness {
 
     /**
      * The earliest moment {@link #check} can return something other than {@link LivenessAction#NONE}, so the caller
-     * keeps exactly one timer. Returns {@code nowNanos} when an action is already due, and {@link #NO_DEADLINE} while
-     * paused.
+     * keeps exactly one timer. Returns {@code nowNanos} when an action is already due.
      */
     public long nextDeadlineNanos(long nowNanos) {
-        if (paused) {
-            return NO_DEADLINE;
+        if (paused && !pingEverSent) {
+            return nowNanos;
         }
-        long deadline = lastReceivedNanos + (pingOutstanding ? idleTimeoutNanos : pingIntervalNanos);
+        long deadline = paused
+                ? lastPingSentNanos + pingIntervalNanos
+                : lastReceivedNanos + (pingOutstanding ? idleTimeoutNanos : pingIntervalNanos);
         return deadline - nowNanos <= 0 ? nowNanos : deadline;
+    }
+
+    /** While paused, a {@code PING} is due at once if none was ever sent, then one ping interval after the last. */
+    private boolean isPausedPingDue(long nowNanos) {
+        return !pingEverSent || nowNanos - lastPingSentNanos >= pingIntervalNanos;
     }
 
     private void setIntervals(long pingIntervalNanos, long idleTimeoutNanos) {
