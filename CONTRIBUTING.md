@@ -1,8 +1,8 @@
 # Contributing to JBurrow
 
 JBurrow is a build-in-public project. People follow along and, once a piece gets interesting, send
-pull requests. This document is how the build fits together and what a change needs before it
-merges.
+pull requests. This document explains how the build fits together and what a change needs before
+it merges.
 
 Some sections describe tooling that doesn't exist yet. They are marked *added in phase 0* and
 become true as phase 0 lands; until then, the repository holds documentation only.
@@ -11,7 +11,7 @@ become true as phase 0 lands; until then, the repository holds documentation onl
 
 - JDK 21 (Temurin recommended).
 - Docker, for the local Postgres and Mailpit and for the integration tests (Testcontainers).
-- Nothing else. The Maven wrapper (`./mvnw`) is committed, so Maven doesn't need to be installed.
+- Nothing else. The Maven wrapper (`./mvnw`) is committed, so you don't need to install Maven.
 
 ## The build: one reactor
 
@@ -30,9 +30,9 @@ make down        # stop the local dependencies (make reset also deletes their da
 ```
 
 The local profile connects to the compose Postgres as `jburrow`/`jburrow`. Those credentials only
-unlock the local container. Flyway migrates the `jburrow` schema on startup; migrations live in
-`jburrow-server-api/src/main/resources/db/migration` and are never edited once applied. Add a new
-one instead.
+unlock the local container. Flyway migrates the `jburrow` schema on startup. Migrations live in
+`jburrow-server-api/src/main/resources/db/migration`, and once one has been applied, nobody edits
+it. Add a new one instead.
 
 The `instance` feature in `jburrow-server-api` (`server_instance`, `GET /api/v1/meta`) is the
 reference slice: domain, use cases, ports, a JPA adapter, a web adapter, and wiring in
@@ -87,8 +87,8 @@ Every server and client module is organised by feature first, then by layer
 - Netty lives only in `adapter.netty`, Spring MVC only in `adapter.web`, JPA only in
   `adapter.persistence`.
 - A feature reaches another feature only through that feature's `application.port` interfaces.
-- No cycles between features. No `@Transactional` in `application` code; transactions are applied
-  in the composition root.
+- No cycles between features. No `@Transactional` in `application` code; the composition root
+  applies transactions.
 
 *Added in phase 0:* each rule is an ArchUnit test, so breaking one fails `./mvnw verify`, not a
 review. If a rule is in your way, the change probably belongs in a different layer. If you think
@@ -115,7 +115,8 @@ machine) has [Jazzer](https://github.com/CodeIntelligenceTesting/jazzer) fuzz ta
 modes:
 
 - **Regression**, in every build: each target replays the files in its inputs directory,
-  `src/test/resources/io/jburrow/protocol/fuzz/<Class>Inputs/<method>/`. Nothing to do.
+  `src/test/resources/io/jburrow/protocol/fuzz/<Class>Inputs/<method>/`. You don't need to do
+  anything.
 - **Fuzzing**, with `make fuzz`: each target runs for its `@FuzzTest(maxDuration)`, two minutes,
   in its own JVM, since Jazzer fuzzes one target per JVM. The `fuzz` CI job runs the same command
   on every pull request. For a longer local run, raise `maxDuration` temporarily and don't commit
@@ -144,7 +145,7 @@ directory (or into `jburrow-protocol/` if it can't find the source tree). In CI 
 - *Added in phase 0:* Java is formatted with [Palantir Java Format](https://github.com/palantir/palantir-java-format)
   through the Spotless Maven plugin. `spotless:check` is bound to `verify`; `make format` fixes
   drift. Don't hand-format around it.
-- Whitespace, line endings and charset are defined once in `.editorconfig`.
+- `.editorconfig` defines whitespace, line endings and charset.
 - No comments that restate the code. Keep them for a hidden constraint, a workaround or a
   non-obvious invariant.
 - Prefer editing an existing class over a new abstraction for a one-off need.
@@ -203,15 +204,15 @@ parts of the change an AI tool wrote, and what you did to check them. Editor aut
 finishes a line or a call doesn't count. Code you had a tool write for you does: a class, a
 handler, a test suite, a feature, or a large rewrite.
 
-Here's why we ask. Most of JBurrow sits on the byte path of an internet-facing server. The frame
-codec reads untrusted bytes. The session state is kept unsynchronised and confined to one event
-loop ([ADR-0008](docs/adr/0008-byte-path-concurrency-model.md)). Flow control, port release and
-session teardown all depend on events happening in a fixed order, and the authtoken checks decide
-who can open a public port on someone else's server. In code like this, a bug often looks like
-working code: a buffer that's never released, a callback that runs on the wrong thread, a check
-that runs one step too late. Tests catch some of these. Review catches the rest, and it only works
-when the reviewer knows which code nobody has reasoned through line by line. Disclosure tells us
-where to look hardest. It doesn't count against a pull request.
+We ask because most of JBurrow sits on the byte path of an internet-facing server. The frame codec
+reads untrusted bytes. Session state has no locks and stays on one event loop
+([ADR-0008](docs/adr/0008-byte-path-concurrency-model.md)). Flow control, port release and session
+teardown depend on events happening in a fixed order, and the authtoken checks decide who can open
+a public port on someone else's server. A bug in code like this often looks like working code: a
+buffer that's never released, a callback on the wrong thread, a check one step too late. Tests
+catch some of these and review catches the rest, but review only works when the reviewer knows
+which code nobody has reasoned through line by line. Disclosure tells us where to look hardest,
+and it doesn't count against your pull request.
 
 ## Pull requests
 
@@ -223,4 +224,4 @@ where to look hardest. It doesn't count against a pull request.
 
 ## Code of conduct
 
-Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
