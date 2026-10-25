@@ -140,6 +140,71 @@ directory (or into `jburrow-protocol/` if it can't find the source tree). In CI 
    update the receiver rules in `docs/protocol.md` §12.
 3. Keep the finding in the corpus.
 
+### The native CLI binary
+
+`jburrow` ships as a GraalVM native binary ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)),
+and every pull request proves it still builds and still tunnels bytes. You don't need GraalVM for
+day-to-day work; you need it when the `native` CI job fails on your change.
+
+```bash
+sdk install java 21-graalce      # or any GraalVM for JDK 21, as the JDK Maven runs on
+make native                      # jburrow-cli/target/jburrow, beside the fat JAR
+./jburrow-cli/target/jburrow version
+make native-smoke                # builds the server JAR too, then runs scripts/native-smoke.sh
+```
+
+`scripts/native-smoke.sh` is what CI runs (Linux; needs Docker, `python3`, `jq` and `curl`). It
+starts Postgres and the server from its JVM build with the `local` profile, on ports of its own
+(edge 17080, API 17090, management 17091, tunnels 21100-21199) so it runs beside `make run`. It
+then starts `scripts/echo-server.py` on port 9000, opens a tunnel to it with the native binary
+using the development token, pushes 4 MiB of random bytes through the tunnel, and compares SHA-256
+of what went out and what came back. Finally it stops the CLI with `SIGINT`, as Ctrl-C would, and
+expects exit status 0 and a final `closed` event with reason `USER_CLOSED`. Logs land in
+`target/native-smoke/` and are printed on failure. `JBURROW_BIN=<path>` runs the same scenario
+against another binary.
+
+Native-image configuration lives with the code that needs it, and is picked up from each jar:
+
+| Need | Where |
+|---|---|
+| picocli's commands and options | generated at compile time by `picocli-codegen` |
+| Netty | Netty's own jars ship their configuration; add nothing for Netty unless a build or the smoke test proves it necessary |
+| Jackson reading and writing protocol payloads | `jburrow-protocol/.../reflect-config.json`, checked against the records by its `NativeImageMetadataTest` |
+| Jackson writing the CLI's `--output json` events | `jburrow-cli/.../reflect-config.json`, checked by the CLI's `NativeImageMetadataTest` |
+| `client.properties` (client version) | `jburrow-client-core/.../resource-config.json` |
+| `jburrow-cli.properties`, `git.properties` (build info), `simplelogger.properties` | `jburrow-cli/.../resource-config.json` |
+| Class initialization and signal handling | `jburrow-cli/.../native-image.properties`, each flag with the reason for it |
+
+(`...` is `src/main/resources/META-INF/native-image/io.jburrow/<module>`.) GraalVM's reachability
+metadata repository is off in the `native` profile: the plugin's current repository needs a newer
+GraalVM than the last Community build for JDK 21, and it only holds metadata for older versions of
+Netty and Jackson.
+
+Netty's own configuration initializes all of `io.netty` at build time. That is why
+`native-image.properties` moves single classes back to run time, and initializes the SLF4J
+classes that Netty's static loggers bind to at build time. If a change adds a Netty class whose
+static initializer does I/O or allocates buffers, the build fails with "Classes that should be
+initialized at run time got initialized during image building". Rerun the `native-image`
+command from the failed build's log with `--trace-class-initialization=<class>`, and move the
+class the trace points at to run time.
+
+**When the native build or the smoke test fails on missing metadata** (a `ClassNotFoundException`,
+a missing resource, or an empty JSON event in the native binary only), record what the JVM build
+does under GraalVM's tracing agent, running the same scenario:
+
+```bash
+java -agentlib:native-image-agent=config-output-dir=jburrow-cli/target/agent-config \
+     -jar jburrow-cli/target/jburrow-cli-*.jar tcp 9000 --server ws://localhost:7080/v1/connect --output json
+```
+
+Then copy **only** the entries that explain the failure into the right module's file above, and
+extend that module's `NativeImageMetadataTest` if the entry belongs to a family it checks. Never
+commit the agent's whole output: it records everything the run touched, including JDK internals
+and test-only paths, and turns the configuration into something nobody can review. Don't silence
+an initialization error with `--initialize-at-build-time` for a whole package; find the class.
+Don't add `netty-tcnative` or the epoll transport to the client to help native-image: the client
+is NIO with the JDK's TLS everywhere.
+
 ## Code style
 
 - *Added in phase 0:* Java is formatted with [Palantir Java Format](https://github.com/palantir/palantir-java-format)
@@ -173,8 +238,10 @@ Two systems build this code ([ADR-0005](docs/adr/0005-ci-trust-boundary-public-r
   pull request, including from forks, and on every push to `main`. The `verify` job runs
   `./mvnw verify` and uploads the test reports; the `image` job then builds the server image from
   `jburrow-server/Dockerfile` and discards it. The `fuzz` job runs `make fuzz` (see
-  [Fuzzing](#fuzzing)) and uploads any crashing input. All three must pass before a pull request
-  merges. The workflow has a read-only token and no secrets.
+  [Fuzzing](#fuzzing)) and uploads any crashing input. The `native` job builds the CLI as a
+  GraalVM native binary and runs `scripts/native-smoke.sh` with it (see
+  [The native CLI binary](#the-native-cli-binary)), uploading the logs if it fails. All four must
+  pass before a pull request merges. The workflow has a read-only token and no secrets.
 - **The maintainers' pipeline** builds and deploys `main` only, and never runs code from a pull
   request. Its deployment details are configured on the job, not in this repository.
 

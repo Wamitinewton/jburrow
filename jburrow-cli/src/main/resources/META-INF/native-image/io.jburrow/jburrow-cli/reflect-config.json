@@ -1,0 +1,37 @@
+[
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$Closed",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$Registered",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$StreamClosed",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$StreamOpened",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$Tunnel",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  }
+]

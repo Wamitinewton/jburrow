@@ -1,0 +1,15 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "\\Qjburrow-cli.properties\\E"
+      },
+      {
+        "pattern": "\\Qgit.properties\\E"
+      },
+      {
+        "pattern": "\\Qsimplelogger.properties\\E"
+      }
+    ]
+  }
+}

@@ -2,6 +2,7 @@ package io.jburrow.server.e2e;
 
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.RegisteredTunnel;
@@ -51,26 +52,33 @@ class HeartbeatIntegrationTest extends TunnelTestSupport {
     }
 
     /**
-     * Nothing but liveness crosses the connection for several idle timeouts. The server's clock fires first, so the
-     * server pings and the client answers; neither side times out.
+     * Nothing but liveness crosses the connection for several idle timeouts, and neither side times out.
+     *
+     * <p>Both sides run the same clock (protocol.md §10), so which one pings is a race. Answering a {@code PING} resets
+     * the answerer's clock a round trip before the {@code PONG} resets the pinger's, so the pinging side tends to
+     * alternate. The test counts liveness in both directions, never one side's {@code PING}s.
      */
     @Test
     void anIdleRealClientStaysConnected() throws Exception {
         LocalService echo = closeAfterTest(LocalService.echo());
         Tunnel tunnel = openTunnel(echo);
-        double pingsBefore = counter("jburrow.frames", "type", "ping", "direction", "sent");
-        double pongsBefore = counter("jburrow.frames", "type", "pong", "direction", "received");
+        double pingsBefore = framesBothWays("ping");
+        double pongsBefore = framesBothWays("pong");
 
         Thread.sleep(IDLE_TIMEOUT.multipliedBy(2).plus(PING_INTERVAL));
 
         assertOpen(tunnel.handle());
-        assertThat(counter("jburrow.frames", "type", "ping", "direction", "sent") - pingsBefore)
-                .as("PINGs sent to the client")
-                .isGreaterThanOrEqualTo(3);
-        assertThat(counter("jburrow.frames", "type", "pong", "direction", "received") - pongsBefore)
-                .as("PONGs from the client")
-                .isGreaterThanOrEqualTo(3);
+        double pings = framesBothWays("ping") - pingsBefore;
+        double pongs = framesBothWays("pong") - pongsBefore;
+        assertThat(pings).as("PINGs either way").isGreaterThanOrEqualTo(3);
+        // One exchange can straddle each end of the window.
+        assertThat(pongs).as("PONGs either way, one per PING").isCloseTo(pings, within(1.0));
         byte[] message = "still here".getBytes(US_ASCII);
         assertThat(roundTrip(visit(tunnel.port()), message)).isEqualTo(message);
+    }
+
+    private double framesBothWays(String type) {
+        return counter("jburrow.frames", "type", type, "direction", "sent")
+                + counter("jburrow.frames", "type", type, "direction", "received");
     }
 }
