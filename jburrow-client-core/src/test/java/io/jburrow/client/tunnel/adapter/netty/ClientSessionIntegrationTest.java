@@ -434,6 +434,9 @@ class ClientSessionIntegrationTest {
         establish(localTarget());
         peer.send(open(1, TUNNEL_ID));
         Socket service = accept();
+        // accept() returns before the client has seen its connect complete; a byte relayed proves it has.
+        service.getOutputStream().write('x');
+        assertThat(readData(1, 1)).isEqualTo(ascii("x"));
 
         service.setSoLinger(true, 0);
         service.close();

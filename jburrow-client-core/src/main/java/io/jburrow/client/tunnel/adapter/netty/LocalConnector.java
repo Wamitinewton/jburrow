@@ -404,8 +404,7 @@ final class LocalConnector {
      * local connection can't take more. The control connection is read again once no stream holds it.
      */
     private void reassess(LocalRelayHandler stream) {
-        boolean holds = stream.isPendingOverLimit()
-                || (stream.isConnected() && !stream.channel().isWritable());
+        boolean holds = stream.isPendingOverLimit() || (stream.isConnected() && isFull(stream.channel()));
         if (holds) {
             if (pausing.add(stream) && pausing.size() == 1) {
                 control.config().setAutoRead(false);
@@ -424,6 +423,15 @@ final class LocalConnector {
     }
 
     // Connection handling.
+
+    /**
+     * Whether a local connection can't take more. Netty reports a channel whose output is shut down as unwritable for
+     * good, but it holds nothing back, so it doesn't count: otherwise the control connection would stay unread until
+     * the local target closed.
+     */
+    private static boolean isFull(DuplexChannel channel) {
+        return !channel.isOutputShutdown() && !channel.isWritable();
+    }
 
     /** Gives up on a connection being made, or cuts one that is made. */
     private static void resetConnection(LocalRelayHandler stream) {

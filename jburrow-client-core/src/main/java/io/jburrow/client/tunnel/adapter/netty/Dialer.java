@@ -3,6 +3,7 @@ package io.jburrow.client.tunnel.adapter.netty;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoop;
 import io.netty.util.NetUtil;
 import io.netty.util.concurrent.Future;
@@ -35,7 +36,7 @@ final class Dialer {
     /**
      * Connects {@code bootstrap}, whose group must be {@code loop}, to {@code host:port}. The future completes on
      * {@code loop} with the connected channel, or fails with the resolution failure or the last connect failure.
-     * Cancelling it abandons the attempt: a channel that connects afterwards is closed.
+     * Cancelling it abandons the attempt: a channel that connects afterwards is reset.
      */
     Future<Channel> dial(Bootstrap bootstrap, EventLoop loop, String host, int port) {
         Promise<Channel> result = loop.newPromise();
@@ -77,7 +78,7 @@ final class Dialer {
         connect.addListener((ChannelFuture done) -> {
             if (done.isSuccess()) {
                 if (!result.trySuccess(done.channel())) {
-                    done.channel().close();
+                    reset(done.channel());
                 }
             } else if (index + 1 < addresses.size() && !result.isDone()) {
                 attempt(bootstrap, addresses, index + 1, port, result);
@@ -85,5 +86,14 @@ final class Dialer {
                 result.tryFailure(done.cause());
             }
         });
+    }
+
+    /**
+     * Closes an abandoned connection with a TCP {@code RST}: the other side has already accepted it, and a {@code FIN}
+     * would read there as a clean end of stream.
+     */
+    private static void reset(Channel channel) {
+        channel.config().setOption(ChannelOption.SO_LINGER, 0);
+        channel.close();
     }
 }
