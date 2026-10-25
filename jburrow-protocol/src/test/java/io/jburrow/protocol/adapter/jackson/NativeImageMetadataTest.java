@@ -3,6 +3,7 @@ package io.jburrow.protocol.adapter.jackson;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.jburrow.protocol.control.ControlMessage;
+import io.jburrow.protocol.control.UpgradeRefusal;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.ParameterizedType;
@@ -66,13 +67,18 @@ class NativeImageMetadataTest {
         assertThat(payloadTypes())
                 .extracting(Class::getSimpleName)
                 .contains("Hello", "ClientInfo", "SessionLimits", "TunnelRequest", "RemoteAddress", "TunnelKind")
+                .contains("UpgradeRefusal")
                 .contains("ErrorCode");
     }
 
-    /** The payload records, and every protocol record or enum reachable through their components. */
+    /**
+     * The payload records, the refused-upgrade body (which a client reads too), and every protocol record or enum
+     * reachable through their components.
+     */
     private static Set<Class<?>> payloadTypes() {
         Set<Class<?>> found = new LinkedHashSet<>();
         Deque<Type> pending = new ArrayDeque<>(List.of(ControlMessage.class.getPermittedSubclasses()));
+        pending.add(UpgradeRefusal.class);
         while (!pending.isEmpty()) {
             Type type = pending.pop();
             if (type instanceof ParameterizedType parameterized) {

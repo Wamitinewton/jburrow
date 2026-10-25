@@ -13,3 +13,4 @@ these capture *why* a choice was made so it isn't silently reversed later. See
 | [0005](0005-ci-trust-boundary-public-repository.md) | CI trust boundary for a public repository | accepted |
 | [0006](0006-cli-distribution-native-binaries.md) | CLI distribution: native binaries released through JReleaser | accepted |
 | [0007](0007-wire-protocol-v1.md) | Wire protocol v1: WebSocket transport, frame registry, versioning, strict receivers, one error code space, a pure protocol model | accepted |
+| [0008](0008-byte-path-concurrency-model.md) | Byte-path concurrency: one event loop per session, confined state, blocking work on virtual threads, epoll on Linux, a zero-copy single-owner relay | accepted |

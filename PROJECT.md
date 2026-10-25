@@ -439,4 +439,4 @@ Nothing in either public repository may reference the private GitOps repository,
 
 **Name of the web repository.** `jburrow-web` is proposed.
 
-Next step: build phase 1 as designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md), once phase 0's exit criteria hold in production. ADR-0001 to ADR-0007 are written; ADR-0008 is written during phase 1.
+Next step: build phase 1 as designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md), once phase 0's exit criteria hold in production. ADR-0001 to ADR-0008 are written.

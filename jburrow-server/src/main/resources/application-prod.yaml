@@ -25,6 +25,16 @@ jburrow:
     from-name: ${JBURROW_MAIL_FROM_NAME:JBurrow}
     ses-configuration-set: ${JBURROW_MAIL_SES_CONFIGURATION_SET:}
     smoke-test-recipient: ${JBURROW_MAIL_SMOKE_TEST_RECIPIENT:}
+  auth:
+    # Comma-separated name:sha256hex entries from make authtoken; the deployment holds hashes, never tokens.
+    static-tokens: ${JBURROW_AUTH_STATIC_TOKENS}
+  edge:
+    connect-host: ${JBURROW_EDGE_CONNECT_HOST}
+    # The ingress controller's pod network; X-Forwarded-For from anyone else is ignored.
+    trusted-proxies: ${JBURROW_EDGE_TRUSTED_PROXIES}
+  tcp:
+    port-range: ${JBURROW_TCP_PORT_RANGE}
+    public-host: ${JBURROW_TCP_PUBLIC_HOST}
 
 logging:
   structured:

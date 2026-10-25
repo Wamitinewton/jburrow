@@ -58,6 +58,7 @@ public final class RegisterTunnels {
                     "This server allows at most " + policy.maxTunnels() + " tunnels per session.");
         }
         Principal principal = verifier.verify(request.authtoken())
+                .map(Principal::new)
                 .orElseThrow(
                         () -> ProtocolException.session(ErrorCode.AUTHTOKEN_INVALID, "The authtoken is not valid."));
         admission.admit(ticket, principal);

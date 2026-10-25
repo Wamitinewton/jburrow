@@ -13,3 +13,4 @@
 - [ ] An architecture-changing decision has an ADR in `docs/adr/`, added to the index.
 - [ ] A user-visible change has an entry under `## [Unreleased]` in `CHANGELOG.md`.
 - [ ] No secret, credential, or real hostname of a deployment is in the diff.
+- [ ] Code an AI tool wrote, beyond editor autocompletion, is disclosed above (see `CONTRIBUTING.md` §Using AI tools).

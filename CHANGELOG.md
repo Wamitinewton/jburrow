@@ -37,3 +37,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `Jenkinsfile` that verifies `main`, pushes the server image and commits its tag to a GitOps
   repository, reading every deployment value from job parameters and failing fast on a missing
   one.
+- The edge listener on `:7080`: clients connect over WebSocket at `/v1/connect`, register TCP
+  tunnels and get a public port from `jburrow.tcp.port-range`, with session, handshake and
+  per-owner caps, liveness, backpressure and graceful drain
+  ([ADR-0008](docs/adr/0008-byte-path-concurrency-model.md)). Tunnel metrics and an `edge` health
+  indicator.
+- Static authtokens from `jburrow.auth.static-tokens` (`name:sha256hex`, so configuration never
+  holds a usable token), and `make authtoken NAME=<name>` to mint one.

@@ -3,6 +3,9 @@ package io.jburrow.server.config;
 import io.jburrow.server.api.instance.application.port.BuildIdentitySource;
 import io.jburrow.server.api.instance.domain.BuildIdentity;
 import io.jburrow.server.api.instance.domain.InstanceId;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
+import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.observability.EdgeHealthIndicator;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -37,16 +40,26 @@ class ObservabilityConfiguration {
         };
     }
 
+    /** Shown as {@code edge}; the readiness group lists its members, so this stays out of it. */
     @Bean
-    ApplicationListener<ApplicationStartedEvent> startupLine(BuildIdentitySource identity, InstanceId instanceId) {
+    EdgeHealthIndicator edgeHealthIndicator(EdgeServer edge, SessionAdmission admission) {
+        return new EdgeHealthIndicator(edge, admission);
+    }
+
+    /** Logged once the context has started, so the edge is bound and its port is known. */
+    @Bean
+    ApplicationListener<ApplicationStartedEvent> startupLine(
+            BuildIdentitySource identity, InstanceId instanceId, EdgeServer edge) {
         return event -> {
             BuildIdentity build = identity.current();
             log.info(
-                    "jburrow-server {} ({}) instance {} profiles {}",
+                    "jburrow-server {} ({}) instance {} profiles {} edge :{} ({})",
                     build.version(),
                     build.commit(),
                     instanceId,
-                    String.join(",", build.profiles()));
+                    String.join(",", build.profiles()),
+                    edge.boundPort(),
+                    edge.transportName());
         };
     }
 }

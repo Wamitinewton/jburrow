@@ -84,6 +84,13 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "io.jburrow.protocol.control.UpgradeRefusal",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
     "name": "io.jburrow.protocol.control.TunnelKind",
     "allDeclaredFields": true,
     "allDeclaredMethods": true

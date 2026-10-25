@@ -10,3 +10,14 @@ spring:
 jburrow:
   mail:
     from-address: no-reply@jburrow.localhost
+  auth:
+    # The documented development token jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00 (CONTRIBUTING.md).
+    # It unlocks a server on this machine and nothing else.
+    static-tokens:
+      - local:4e17d8906601750429e1cb705e2457eb786a348254390c98f634325c899d825f
+  # Browsers and curl resolve *.localhost to loopback, so no DNS is needed.
+  edge:
+    connect-host: localhost
+  tcp:
+    port-range: 21000-21099
+    public-host: localhost

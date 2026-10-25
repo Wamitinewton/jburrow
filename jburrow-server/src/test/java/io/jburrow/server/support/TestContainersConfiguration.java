@@ -32,4 +32,10 @@ public class TestContainersConfiguration {
             registry.add("spring.mail.port", mailpit::smtpPort);
         };
     }
+
+    /** An ephemeral edge port, so test contexts never collide with each other or a server running locally. */
+    @Bean
+    DynamicPropertyRegistrar edgeProperties() {
+        return registry -> registry.add("jburrow.edge.port", () -> 0);
+    }
 }

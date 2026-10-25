@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.annotation.Nulls;
 import io.jburrow.protocol.control.ControlMessage;
+import io.jburrow.protocol.control.UpgradeRefusal;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -118,6 +119,26 @@ public final class ControlJson {
                     + " bytes, over the " + MAX_DOCUMENT_LENGTH + "-byte control payload limit");
         }
         return json;
+    }
+
+    /** Encodes the body of a refused upgrade as compact UTF-8 JSON, omitting {@code supported} when it is absent. */
+    public byte[] writeRefusal(UpgradeRefusal refusal) {
+        return mapper.writeValueAsBytes(Objects.requireNonNull(refusal, "refusal"));
+    }
+
+    /**
+     * Parses the body of a refused upgrade. The body is not a control payload, so only the mapper's own limits apply,
+     * not the UTF-8 and syntax checks of {@link #read}. Unknown keys are ignored.
+     *
+     * @throws ProtocolException if the body is not a readable refusal; a client treats that as a failure to connect
+     */
+    public UpgradeRefusal readRefusal(byte[] utf8) {
+        Objects.requireNonNull(utf8, "utf8");
+        try {
+            return mapper.readValue(utf8, UpgradeRefusal.class);
+        } catch (JacksonException e) {
+            throw translate(e);
+        }
     }
 
     JsonMapper mapper() {

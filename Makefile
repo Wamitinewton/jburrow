@@ -28,6 +28,11 @@ reset: ## Stop the local dependencies and delete their data
 run: ## Run the server with the local profile (API :7090, management :7091)
 	$(MVNW) -pl jburrow-server -am spring-boot:run
 
+.PHONY: authtoken
+authtoken: ## Print a new authtoken and its jburrow.auth.static-tokens entry: make authtoken NAME=alice
+	@test -n "$(NAME)" || (echo "usage: make authtoken NAME=<name>" >&2; exit 2)
+	@python3 -c 'import hashlib,secrets,sys; t="jb_"+secrets.token_urlsafe(32); print("token: "+t); print("entry: "+sys.argv[1]+":"+hashlib.sha256(t.encode()).hexdigest())' "$(NAME)"
+
 .PHONY: verify
 verify: ## Unit, architecture and integration tests (Docker required)
 	$(MVNW) clean verify

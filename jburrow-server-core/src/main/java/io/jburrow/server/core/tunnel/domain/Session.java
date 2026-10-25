@@ -11,7 +11,9 @@ import static io.jburrow.protocol.wire.FrameType.REGISTER;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.stream.StreamEvent;
+import io.jburrow.protocol.stream.StreamLifecycle;
 import io.jburrow.protocol.stream.StreamOutcome;
+import io.jburrow.protocol.stream.StreamState;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameType;
@@ -189,6 +191,15 @@ public final class Session {
     /** Every stream not yet closed, in increasing order: what teardown resets. */
     public List<Integer> openStreamIds() {
         return streams.openIds();
+    }
+
+    /**
+     * Where stream {@code streamId} is, or empty once it has closed.
+     *
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened
+     */
+    public Optional<StreamState> streamState(int streamId) {
+        return streams.lookup(streamId).map(StreamLifecycle::state);
     }
 
     public Optional<Tunnel> tunnel(TunnelId id) {
