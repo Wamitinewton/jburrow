@@ -161,8 +161,14 @@ public final class JBurrowArchitectureRules {
                 .allowEmptyShould(true);
     }
 
+    /**
+     * The feature a package belongs to. The protocol module belongs to none, adapters included: it is the contract both
+     * sides share (ADR-0007), so an engine adapter uses its codec and JSON mapper directly, not through a port.
+     */
     static Optional<String> featureOf(String packageName) {
-        if (!packageName.startsWith("io.jburrow.")) {
+        if (!packageName.startsWith("io.jburrow.")
+                || packageName.equals(PROTOCOL_ROOT)
+                || packageName.startsWith(PROTOCOL_ROOT + ".")) {
             return Optional.empty();
         }
         String[] segments = packageName.split("\\.");

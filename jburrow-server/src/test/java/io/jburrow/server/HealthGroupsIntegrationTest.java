@@ -46,7 +46,7 @@ class HealthGroupsIntegrationTest {
     void fullHealthIncludesTheDependencies() {
         JsonNode all = health("").getBody();
 
-        assertThat(all.get("components").propertyNames()).contains("db", "mail", "diskSpace");
+        assertThat(all.get("components").propertyNames()).contains("db", "mail", "diskSpace", "edge");
     }
 
     @Test

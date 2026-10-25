@@ -25,6 +25,7 @@ make run         # the server with the local profile: API on :7090, management o
 make verify      # ./mvnw clean verify: unit, architecture and integration tests (Docker required)
 make test        # unit and architecture tests only, no containers
 make format      # apply Spotless formatting
+make authtoken NAME=alice   # print a new authtoken and its jburrow.auth.static-tokens entry
 make down        # stop the local dependencies (make reset also deletes their data)
 ```
 
@@ -36,6 +37,23 @@ one instead.
 The `instance` feature in `jburrow-server-api` (`server_instance`, `GET /api/v1/meta`) is the
 reference slice: domain, use cases, ports, a JPA adapter, a web adapter, and wiring in
 `jburrow-server`'s `config` package. A new feature copies its shape.
+
+### Authtokens in development
+
+Until accounts arrive (phase 5), the server accepts a fixed list of named tokens from
+`jburrow.auth.static-tokens`. Each entry is `name:sha256hex`, the SHA-256 of the full token, so
+configuration never holds a usable token. The `local` profile configures one entry, `local`, for
+the documented development token:
+
+```
+jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00
+```
+
+It unlocks a server on your own machine and nothing else. Never use it anywhere else, and never
+commit any other token. For a server that others can reach, `make authtoken NAME=<name>` prints a
+new random token and its entry: hand the token to its owner (it is shown once and stored nowhere)
+and add the entry to the deployment's `JBURROW_AUTH_STATIC_TOKENS`, comma-separated. The `prod`
+profile has no default; with an empty list, every registration is refused.
 
 Run `./mvnw clean verify` yourself before opening a pull request, and confirm it's green.
 
@@ -178,9 +196,27 @@ Never add a secret, a registry login, a deploy step or a `pull_request_target` t
 workflow. Third-party actions are pinned to full commit SHAs with the version in a comment, and
 Dependabot opens the pull requests that move them.
 
+## Using AI tools
+
+You may use AI tools. If you do, say where and how in the pull request description: which files or
+parts of the change an AI tool wrote, and what you did to check them. Editor autocompletion that
+finishes a line or a call doesn't count. Code you had a tool write for you does: a class, a
+handler, a test suite, a feature, or a large rewrite.
+
+Here's why we ask. Most of JBurrow sits on the byte path of an internet-facing server. The frame
+codec reads untrusted bytes. The session state is kept unsynchronised and confined to one event
+loop ([ADR-0008](docs/adr/0008-byte-path-concurrency-model.md)). Flow control, port release and
+session teardown all depend on events happening in a fixed order, and the authtoken checks decide
+who can open a public port on someone else's server. In code like this, a bug often looks like
+working code: a buffer that's never released, a callback that runs on the wrong thread, a check
+that runs one step too late. Tests catch some of these. Review catches the rest, and it only works
+when the reviewer knows which code nobody has reasoned through line by line. Disclosure tells us
+where to look hardest. It doesn't count against a pull request.
+
 ## Pull requests
 
 - Branch off `main`. Keep a pull request to one change.
+- Disclose substantial AI-written code in the description (see [Using AI tools](#using-ai-tools)).
 - Run `./mvnw clean verify` locally first, with Docker running.
 - Never commit a real secret. See [`SECURITY.md`](SECURITY.md).
 - Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for a user-visible change.

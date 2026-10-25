@@ -265,6 +265,19 @@ class SessionTest {
     }
 
     @Test
+    void reportsAStreamsStateUntilItCloses() {
+        Session session = sessionIn(SessionState.ESTABLISHED, 1);
+        int id = open(session);
+
+        assertThat(session.streamState(id)).contains(StreamState.OPEN);
+        session.onStreamFrame(id, CLOSE_RECEIVED);
+        assertThat(session.streamState(id)).contains(StreamState.HALF_CLOSED_REMOTE);
+        session.onStreamSent(id, CLOSE_SENT);
+        assertThat(session.streamState(id)).isEmpty();
+        assertProtocolError(() -> session.streamState(id + 1));
+    }
+
+    @Test
     void aClosedStreamsSlotIsReusedByTheNextStream() {
         Session session = sessionIn(SessionState.ESTABLISHED, 1);
         int first = open(session);

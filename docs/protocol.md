@@ -51,6 +51,7 @@ Section numbers refer to the document of the draft in the same row.
 | Draft | Date | Sections | Change |
 |---|---|---|---|
 | `jburrow.v1-draft.1` | 2026-10-19 | 1–16 | First draft: WebSocket transport, the frame format and type registry, `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR`, one stream at a time, TCP tunnels only. `HEADERS`, `WINDOW_UPDATE` and `GOAWAY` are assigned type codes but may not be sent. |
+| `jburrow.v1-draft.1` | 2026-10-25 | 3.3, 3.5 | Clarified, not a wire change: a request that isn't valid HTTP/1.1 is refused with `PROTOCOL_ERROR` before the checks; `SERVER_SHUTTING_DOWN` refusals carry `Retry-After` too. |
 
 ## 2. Conventions
 
@@ -161,6 +162,9 @@ described in §3.5:
 | 6 | The server has room for another session. | `SERVER_AT_CAPACITY` |
 | 7 | The request is a valid RFC 6455 opening handshake. | `PROTOCOL_ERROR` |
 
+A request that is not valid HTTP/1.1 at all has no method, path or headers to check, and is
+refused with `PROTOCOL_ERROR` before check 1.
+
 ### 3.4 The upgrade response
 
 A server that accepts the request answers `101 Switching Protocols` as RFC 6455 §4.2.2 describes.
@@ -197,8 +201,8 @@ A server refuses an upgrade with an ordinary HTTP response: the status that §11
 }
 ```
 
-A `SERVER_AT_CAPACITY` refusal also carries a `Retry-After` header (RFC 9110 §10.2.3), a number
-of seconds after which the client may try again.
+A `SERVER_AT_CAPACITY` or `SERVER_SHUTTING_DOWN` refusal also carries a `Retry-After` header
+(RFC 9110 §10.2.3), a number of seconds after which the client may try again.
 
 The body is not a control payload, and the rules of §7 don't apply to it. A client ignores fields
 it doesn't know, decides on `code` alone, and treats a refusal it can't read a known code from (no

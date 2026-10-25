@@ -139,5 +139,16 @@ class JBurrowArchitectureTest {
                 .isEmpty();
         assertThat(JBurrowArchitectureRules.featureOf("org.springframework.data.domain"))
                 .isEmpty();
+        assertThat(JBurrowArchitectureRules.featureOf("io.jburrow.protocol.adapter.netty"))
+                .isEmpty();
+    }
+
+    @Test
+    void engineAdaptersMayUseTheProtocolAdapters() {
+        JavaClasses fixtureClasses = new ClassFileImporter().importPackages(FIXTURES + "protocoladapterinengine");
+        assertThat(fixtureClasses).isNotEmpty();
+
+        JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS.check(fixtureClasses);
+        JBurrowArchitectureRules.NO_FEATURE_CYCLES.check(fixtureClasses);
     }
 }

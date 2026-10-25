@@ -433,8 +433,11 @@ jburrow-server-core/                   io.jburrow.server.core
 │   └── adapter/netty/
 │       ├── edge/     EdgeServer, EdgeSettings, EdgeTransport, EdgeChannelInitializer,
 │       │             ConnectRequestFilter, ClientAddressResolver, UpgradeErrorResponses
-│       ├── control/  ControlSessionHandler, SessionContext, LivenessHandler, SessionRegistry
-│       └── tcp/      TunnelListener, VisitorHandler, StreamRelay
+│       ├── control/  ControlSessionInitializer, ControlSessionHandler, SessionContext,
+│       │             LivenessHandler, SessionCloser, SessionRegistry, TunnelListeners,
+│       │             SessionStreams
+│       └── tcp/      NettyTunnelListeners, TunnelListener, VisitorHandler, StreamRelay,
+│                     Backpressure
 └── portpool/
     ├── domain/       PortRange, PortPool
     └── application/  PortReservationService
@@ -480,7 +483,8 @@ a Postgres one, and `jburrow-server-core` implements no ports.
 
 ## Concurrency model
 
-This is the most important decision in the server, recorded in ADR-0008. It is what makes the
+This is the most important decision in the server, recorded in
+[ADR-0008](../adr/0008-byte-path-concurrency-model.md). It is what makes the
 engine both fast and free of locks.
 
 **Transport.** On Linux the server uses Netty's native epoll transport
@@ -533,18 +537,20 @@ an accepted connection, in order:
 
 | Handler | Job |
 |---|---|
-| `ReadTimeoutHandler` (request phase) | The upgrade request must arrive within 10 seconds (slow-loris protection). Removed after the upgrade. |
+| Request deadline | The upgrade must complete within 10 seconds of the connection opening (`jburrow.edge.request-timeout`, slow-loris protection). A deadline for the whole request, not a read timeout, which a client sending a byte at a time would reset for ever. Removed after the upgrade. |
 | `HttpServerCodec` | Initial line ≤ 4,096 bytes, headers ≤ 8,192 bytes. |
 | `HttpObjectAggregator` | ≤ 1,024 bytes of body. An upgrade request has none. |
 | `ClientAddressResolver` | Resolves the client's address (below) and stores it on the channel. |
-| `ConnectRequestFilter` | Refuses anything that isn't a valid connect request, with the [refused-upgrade JSON](../protocol.md#35-a-refused-upgrade). Checks, in order: method `GET`, path `/v1/connect`, `Host` equals `jburrow.edge.connect-host` (case-insensitive, port ignored), no `Origin`, an offered subprotocol is supported, the server isn't shutting down, and the session and handshake caps have room. |
+| `ConnectRequestFilter` | Refuses anything that isn't a valid connect request, with the [refused-upgrade JSON](../protocol.md#35-a-refused-upgrade). Checks, in the order of [protocol.md §3.3](../protocol.md#33-the-upgrade-request): method `GET`, path `/v1/connect` (query ignored, path undecoded), `Host` equals `jburrow.edge.connect-host` (ASCII case-insensitive, port ignored), no `Origin`, an offered subprotocol is supported, the server isn't shutting down, the session and handshake caps have room, and the request is a valid RFC 6455 opening handshake, so Netty never answers with its own plain-text error. A request that isn't valid HTTP/1.1 is refused with `PROTOCOL_ERROR` first. A passing request takes a `HandshakeTicket`, released by the channel's close future and nowhere else. |
 | `WebSocketServerProtocolHandler` | The upgrade. Subprotocol `jburrow.v1-draft.1`, extensions off, masked client frames required, mask mismatch refused, maximum frame payload 65,546, handshake timeout 10 s, close on protocol violation, `Pong` frames dropped. |
 | `WebSocketFrameAggregator` | Reassembles fragmented messages, ≤ 65,546 bytes. |
 | `WebSocketFrameDecoder` / `WebSocketFrameEncoder` | Binary message ↔ `Frame` (`jburrow-protocol`). |
 | `LivenessHandler` | [Liveness](#liveness) for this session. |
 | `ControlSessionHandler` | The session. |
 
-The last four are added when Netty fires the handshake-complete event. Channel options on accepted
+The upgrade-phase handlers (deadline, client address, filter) are removed and the aggregator added
+when Netty fires the handshake-complete event; the last three are the session's own (see
+[Control sessions](#control-sessions)). Channel options on accepted
 connections: `TCP_NODELAY` on (interactive protocols like SSH depend on it), write-buffer
 watermarks from [Backpressure](#backpressure-in-phase-1).
 
@@ -597,8 +603,24 @@ handler releases the registration's ports when the result comes back.
 its code and closes the session. Any other exception becomes `ERROR INTERNAL_ERROR`, is logged with
 the session id, and closes the session. A message from a peer never reaches a log in full.
 
-`SessionRegistry` keeps every live `SessionContext` by session id, for the session gauge, the
-shutdown sweep and, in phase 6, the admin API.
+**Ending a session.** `SessionCloser` is the one place a session ends, so every path behaves the
+same. A session error resets each open stream with `CLOSE RST CANCELLED`, sends `ERROR`, then the
+code's WebSocket close frame, and the connection closes when the client answers with its own close
+frame, or after 2 seconds if it doesn't (a client that stopped reading can't keep a session alive by
+never taking the `ERROR`). An `ERROR` from the
+client is logged with its code, its message cut to 200 characters with control characters
+replaced, and the session closes without an `ERROR` in reply; it counts as `client_closed`, with the
+client's code in `jburrow_protocol_errors_total{side=remote}`. A message longer than 65,546 bytes is
+refused by Netty's WebSocket decoder with status 1009 and no `ERROR`, as protocol.md §3.6 allows.
+Teardown runs when the connection closes, whatever ended it: the tunnel listeners are closed first,
+and the registration's ports are released only once every listener has closed.
+
+**Liveness starts with the server's `HELLO`.** Until then the client has no intervals, and a
+server `PING` before its `HELLO` would break the frame order, so the handshake deadline is the only
+clock for a session that hasn't said `HELLO`.
+
+`SessionRegistry` keeps every live `SessionContext` by session id, for the shutdown sweep and, in
+phase 6, the admin API.
 
 ## TCP tunnels
 
@@ -632,7 +654,14 @@ in `TIME_WAIT` from its previous tunnel can be bound again), **never `SO_REUSEPO
 a second listener share the port and receive its connections), backlog 128, bound to
 `jburrow.tcp.bind-address`. Binding is asynchronous. If a bind fails with "address in use" and the
 port wasn't explicitly requested, the port is quarantined and the session reserves another, up to 3
-attempts; a requested port fails with `PORT_UNAVAILABLE`.
+attempts; a requested port fails with `PORT_UNAVAILABLE`. On Linux the epoll transport reports
+"address in use" as its errno (`EADDRINUSE`) rather than as a `java.net.BindException`, so both are
+recognised.
+
+The control session and the TCP side meet at two interfaces in `control`, so neither sub-package
+depends on the other's classes: `TunnelListeners` (bind, unbind), which `NettyTunnelListeners`
+implements, and `SessionStreams` (the client's `DATA` and `CLOSE`, read-batch completion,
+writability, cancelling every stream), which the session's `StreamRelay` implements.
 
 **Accepting a visitor.** A `VisitorHandler` on the accepted channel (`TCP_NODELAY`, half-closure
 allowed, `autoRead` off until the stream exists):
@@ -729,6 +758,16 @@ a handful of named testers in and keep everyone else out.
 `StaticAuthtokenVerifier` implements `AuthtokenVerifier`. Phase 5 adds a Postgres-backed verifier
 and removes the static one; the engine doesn't change.
 
+The port returns the owner's name (`Optional<String>`), not a `Principal`, and `RegisterTunnels`
+builds the `Principal`. The verifier lives in another feature, features reach each other only
+through ports, and `Principal` is engine domain that `Session` uses, so it can't move into the
+port package. This is the same shape as the port pool, whose `Reservation` lives in its port.
+
+Each entry is checked when `AuthConfiguration` builds the verifier, not by a `@Pattern` on the
+property: a bind failure prints the rejected value, and an operator who pasted a token where its
+entry belongs would find it in the startup log. The failure names the key and the entry's
+position, never its value.
+
 ## Admission and limits
 
 Per-IP rate limits are phase 6. Phase 1 still faces the internet, so it bounds everything with
@@ -758,7 +797,7 @@ connection, and the handshake cap bounds how many at once. With a token, a princ
 - **Stop** first, before the web server:
   1. Close the edge's server channel. New connections are refused by the kernel; upgrades already
      in progress get `503 SERVER_SHUTTING_DOWN`.
-  2. Every session sends `ERROR SERVER_SHUTTING_DOWN`, resets its streams with `CANCELLED`, closes
+  2. Every session resets its streams with `CANCELLED`, sends `ERROR SERVER_SHUTTING_DOWN`, closes
      its tunnel listeners and releases its ports.
   3. Wait up to 5 seconds for all session channels to close.
   4. Shut down the event loop groups (no quiet period, 5-second timeout).
@@ -868,6 +907,7 @@ changes and their fixtures land with the checkpoint that first needs them, and A
 | `DOMAIN_IS_PURE`, `APPLICATION_IS_PURE` (server and client) | May also depend on the protocol model (the classes `PROTOCOL_MODEL_IS_PURE` covers). It is pure Java and the shared vocabulary of both sides; mapping it into a second copy in each core would duplicate the protocol for nothing. |
 | `NETTY_ONLY_IN_ADAPTERS` | Added to the client rules (`ClientArchitectureTest`), which phase 0 didn't need. |
 | Importer | Both architecture tests also exclude `*-tests.jar` from the imported classes. The protocol test-jar contains Netty test support that would otherwise be checked as production code. |
+| `FEATURES_TALK_VIA_PORTS`, `NO_FEATURE_CYCLES` | `io.jburrow.protocol` is no feature, adapters included. It is the contract both sides share, so an engine adapter uses `FrameCodec` and `ControlJson` directly rather than through a port. A fixture proves it is allowed. |
 
 Domain and application code doesn't log. Adapters do, through SLF4J, which both core modules gain
 as a dependency.
@@ -887,6 +927,7 @@ New `jburrow.*` keys, bound into `JBurrowProperties` and validated at startup:
 | `jburrow.edge.max-sessions` | | `200` | `200` |
 | `jburrow.edge.max-handshaking` | | `64` | `64` |
 | `jburrow.edge.max-sessions-per-principal` | | `3` | `3` |
+| `jburrow.edge.request-timeout` | | `10s` | `10s` |
 | `jburrow.edge.handshake-timeout` | | `10s` | `10s` |
 | `jburrow.edge.ping-interval` / `idle-timeout` | | `15s` / `45s` | same |
 | `jburrow.edge.session-write-buffer` | | `128KB-512KB` (low-high) | same |
@@ -897,9 +938,12 @@ New `jburrow.*` keys, bound into `JBurrowProperties` and validated at startup:
 | `jburrow.tcp.reuse-delay` | | `60s` | `60s` |
 | `jburrow.auth.static-tokens` | `JBURROW_AUTH_STATIC_TOKENS` | the `local` entry | required, comma-separated `name:sha256hex` |
 
-Validation rules include: `idle-timeout` at least twice `ping-interval`; low watermark below high;
-a port range inside `1024-65535` that doesn't contain the edge, API or management port; unique
-static token names; hashes of exactly 64 lower-case hex characters.
+Validation rules include: `idle-timeout` at least twice `ping-interval`, and `ping-interval` at
+least 1 second; low watermark below high; `max-handshaking` at most `max-sessions`; a port range
+inside `1024-65535` that doesn't contain the edge, API or management port; bind addresses and
+trusted proxies as IP literals and CIDRs, never names; unique static token names; hashes of exactly
+64 lower-case hex characters. Rules within `jburrow.*` are checked by the binder; the API and
+management ports are Spring's own keys, so `EdgeConfiguration` checks the range against them.
 
 The JVM settings gain `-Dio.netty.maxDirectMemory` (see [Memory budget](#memory-budget)), set by
 the deployment, not the image.
