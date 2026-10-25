@@ -54,6 +54,9 @@ pipeline {
                     }
                     env.SHORT_SHA = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
                     env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.SHORT_SHA}"
+                    // Stage containers run as the agent's uid without its supplementary groups, so
+                    // they join the socket's group explicitly. Its id differs from host to host.
+                    env.DOCKER_SOCKET_GID = sh(script: 'stat -c %g /var/run/docker.sock', returnStdout: true).trim()
                 }
             }
         }
@@ -62,7 +65,7 @@ pipeline {
             agent {
                 docker {
                     image "${MAVEN_IMAGE}"
-                    args "--network host -v /var/run/docker.sock:/var/run/docker.sock -v ${env.HOME}/.m2:/root/.m2"
+                    args "--network host --group-add ${env.DOCKER_SOCKET_GID} -v /var/run/docker.sock:/var/run/docker.sock -v ${env.HOME}/.m2:/root/.m2"
                     reuseNode true
                 }
             }
@@ -90,7 +93,7 @@ pipeline {
             agent {
                 docker {
                     image "${DOCKER_CLI_IMAGE}"
-                    args '-v /var/run/docker.sock:/var/run/docker.sock'
+                    args "--group-add ${env.DOCKER_SOCKET_GID} -v /var/run/docker.sock:/var/run/docker.sock"
                     reuseNode true
                 }
             }
