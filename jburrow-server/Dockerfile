@@ -35,5 +35,5 @@ COPY --from=build /extracted/spring-boot-loader/ ./
 COPY --from=build /extracted/snapshot-dependencies/ ./
 COPY --from=build /extracted/application/ ./
 USER 10001
-EXPOSE 7090 7091
+EXPOSE 7080 7090 7091
 ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
