@@ -81,19 +81,28 @@ class TunnelListenerTest {
     }
 
     @Test
-    void thePortIsFreeOnceTheCloseCompletes() throws Exception {
-        TunnelListener listener = TunnelListener.bind(
-                loop(NioIoHandler.newFactory()), new InetSocketAddress(LOOPBACK, 0), WATERMARKS, recorder(null));
-        listener.bindFuture().syncUninterruptibly();
-        int port = port(listener);
+    void theEpollTransportFreesThePortOnceTheCloseCompletes() throws Exception {
+        assumeTrue(Epoll.isAvailable(), "epoll is unavailable on this host");
+        int port = bindThenClose(EpollIoHandler.newFactory());
 
-        listener.close().syncUninterruptibly();
+        assertThat(canBind(port)).isTrue();
+    }
 
-        try (ServerSocket next = new ServerSocket()) {
-            next.setReuseAddress(true);
-            next.bind(new InetSocketAddress(LOOPBACK, port));
-            assertThat(next.isBound()).isTrue();
+    /**
+     * The JDK defers closing a NIO channel's socket while the channel is registered with a selector, until the event
+     * loop's next select deregisters it, so the port can stay bound briefly after the close future completes.
+     */
+    @Test
+    void theNioTransportFreesThePortShortlyAfterTheClose() throws Exception {
+        int port = bindThenClose(NioIoHandler.newFactory());
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        boolean free = canBind(port);
+        while (!free && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+            free = canBind(port);
         }
+        assertThat(free).isTrue();
     }
 
     @ParameterizedTest
@@ -124,6 +133,25 @@ class TunnelListenerTest {
     private EventLoop loop(IoHandlerFactory handlers) {
         group = new MultiThreadIoEventLoopGroup(1, handlers);
         return group.next();
+    }
+
+    private int bindThenClose(IoHandlerFactory handlers) {
+        TunnelListener listener =
+                TunnelListener.bind(loop(handlers), new InetSocketAddress(LOOPBACK, 0), WATERMARKS, recorder(null));
+        listener.bindFuture().syncUninterruptibly();
+        int port = port(listener);
+        listener.close().syncUninterruptibly();
+        return port;
+    }
+
+    private static boolean canBind(int port) throws Exception {
+        try (ServerSocket next = new ServerSocket()) {
+            next.setReuseAddress(true);
+            next.bind(new InetSocketAddress(LOOPBACK, port));
+            return true;
+        } catch (BindException e) {
+            return false;
+        }
     }
 
     private static int port(TunnelListener listener) {
