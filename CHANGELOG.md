@@ -49,3 +49,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line, ending with a `closed` event. Exit codes 2 to 6 tell usage errors, a refused authtoken, a
   lost connection, a refused registration and a protocol mismatch apart. The authtoken comes from
   `JBURROW_AUTHTOKEN` or `--authtoken`.
+- A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
+  x64 and pushes 4 MiB through a real tunnel with it, publishing nothing
+  ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)). `make native` builds the binary
+  locally and `make native-smoke` runs the same test.

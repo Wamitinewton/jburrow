@@ -54,6 +54,15 @@ fuzz: ## Fuzz each protocol target for its maxDuration (2 min); findings land in
 	    -DargLine="-Xmx1g -Xss1m" || status=1; \
 	done; exit $$status
 
+.PHONY: native
+native: ## Build the native CLI binary jburrow-cli/target/jburrow (GraalVM for JDK 21 as the JDK)
+	$(MVNW) -Pnative -pl jburrow-cli -am package -DskipTests
+
+.PHONY: native-smoke
+native-smoke: native ## Run a real tunnel through the native CLI against the JVM server (Docker required)
+	$(MVNW) -pl jburrow-server -am package -DskipTests
+	scripts/native-smoke.sh
+
 .PHONY: format
 format: ## Apply Spotless formatting
 	$(MVNW) spotless:apply

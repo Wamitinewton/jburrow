@@ -61,6 +61,37 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # ADR-0006: every pull request builds the native CLI and runs a real tunnel through it. Parallel to
+  # verify, so its slower build doesn't hold up the main report. Publishes nothing.
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git-commit-id-maven-plugin needs history
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1.6.7
+        with:
+          java-version: '21'
+          distribution: graalvm-community
+          cache: maven
+          # Posting the build report needs a token with write access; this job has none.
+          native-image-job-reports: 'false'
+      - run: ./mvnw -B --no-transfer-progress -pl jburrow-server,jburrow-cli -am package -DskipTests
+      - run: ./mvnw -B --no-transfer-progress -Pnative -pl jburrow-cli -am package -DskipTests
+      - run: ./jburrow-cli/target/jburrow version
+      - run: scripts/native-smoke.sh
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-smoke-logs
+          path: |
+            target/native-smoke/*.log
+            target/native-smoke/*.jsonl
+          retention-days: 7
+          if-no-files-found: ignore
+
   image:
     runs-on: ubuntu-24.04
     needs: verify

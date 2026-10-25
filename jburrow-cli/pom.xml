@@ -107,4 +107,46 @@
         </plugins>
     </build>
 
+    <profiles>
+        <!-- Adds the native binary target/jburrow beside the fat JAR. Needs GraalVM for JDK 21 as the build JDK. -->
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <extensions>true</extensions>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <goals>
+                                    <goal>compile-no-fork</goal>
+                                </goals>
+                                <phase>package</phase>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <imageName>jburrow</imageName>
+                            <mainClass>${start-class}</mainClass>
+                            <!-- Off: plugin 1.1.14's repository needs a newer GraalVM than the last Community
+                                 build for JDK 21, and holds only older versions' metadata for Netty 4.2 and
+                                 Jackson 3. Netty ships its own; the protocol and CLI jars carry the rest. -->
+                            <metadataRepository>
+                                <enabled>false</enabled>
+                            </metadataRepository>
+                            <buildArgs>
+                                <!-- Fail rather than produce a JVM launcher in disguise. -->
+                                <buildArg>--no-fallback</buildArg>
+                                <!-- Runs on older x86-64 CPUs, which testers' laptops and CI runners may have. -->
+                                <buildArg>-march=compatibility</buildArg>
+                                <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                            </buildArgs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>
