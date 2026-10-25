@@ -80,6 +80,28 @@
             <artifactId>archunit-junit5</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+            The end-to-end suite runs the real client against the real server in one JVM. This is the one place a
+            server module sees client code, and only in tests: the architecture tests import production classes only,
+            so the rule that the server never sees the client still holds.
+        -->
+        <dependency>
+            <groupId>io.jburrow</groupId>
+            <artifactId>jburrow-client-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- ScriptedPeer, and the Netty leak detection that fails any test class that leaks a buffer. -->
+        <dependency>
+            <groupId>io.jburrow</groupId>
+            <artifactId>jburrow-protocol</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

@@ -52,6 +52,7 @@ Section numbers refer to the document of the draft in the same row.
 |---|---|---|---|
 | `jburrow.v1-draft.1` | 2026-10-19 | 1–16 | First draft: WebSocket transport, the frame format and type registry, `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR`, one stream at a time, TCP tunnels only. `HEADERS`, `WINDOW_UPDATE` and `GOAWAY` are assigned type codes but may not be sent. |
 | `jburrow.v1-draft.1` | 2026-10-25 | 3.3, 3.5 | Clarified, not a wire change: a request that isn't valid HTTP/1.1 is refused with `PROTOCOL_ERROR` before the checks; `SERVER_SHUTTING_DOWN` refusals carry `Retry-After` too. |
+| `jburrow.v1-draft.1` | 2026-10-25 | 10 | A side that has paused reading keeps sending `PING` every `pingIntervalMs`, so its peer doesn't end a healthy session during a long stall. Not a wire change: every peer already answers a `PING`. |
 
 ## 2. Conventions
 
@@ -1054,6 +1055,13 @@ the announced ones.
   restart the count from zero when it reads again. Without this rule, a visitor that stops reading
   would make the server stop reading the client, miss the client's `PONG`, and end a healthy
   session.
+- **A paused side keeps sending `PING`.** While it isn't reading, a side MUST send a `PING` at
+  once if it has never sent one, and then each time `pingIntervalMs` has passed since its last
+  `PING`, answered or not. Its peer may still be reading, and counts each one as proof of life.
+  Without this rule the peer hears nothing and ends the session after `idleTimeoutMs`: a local
+  service that stops reading makes the client stop reading the server, and a visitor that stops
+  reading leaves the client waiting on a server whose clock is paused. Under these rules a side's
+  `PING`s are never less than `pingIntervalMs` apart.
 - Before the server's `HELLO` arrives, the client has no intervals; the client's handshake timeout
   applies instead (§8.3).
 - A side SHOULD NOT send `PING` other than as these rules say.

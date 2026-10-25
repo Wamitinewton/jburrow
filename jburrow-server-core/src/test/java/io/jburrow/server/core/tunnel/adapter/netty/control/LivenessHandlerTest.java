@@ -125,12 +125,17 @@ class LivenessHandlerTest {
     }
 
     @Test
-    void pauseStopsPingsAndTimeoutsAndResumeRestartsTheClock() {
+    void pauseStopsTimeoutsKeepsPingingAndResumeRestartsTheClock() {
         start();
         advance(Duration.ofMillis(500));
 
         liveness.pause();
-        advance(IDLE_TIMEOUT.multipliedBy(5));
+        advance(Duration.ZERO);
+        assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(1));
+        for (int ping = 2; ping <= 6; ping++) {
+            advance(PING_INTERVAL);
+            assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(ping));
+        }
         assertThat((Object) channel.readOutbound()).isNull();
         assertThat(session.state()).isNotEqualTo(SessionState.CLOSING);
 
@@ -138,7 +143,7 @@ class LivenessHandlerTest {
         advance(PING_INTERVAL.minusMillis(1));
         assertThat((Object) channel.readOutbound()).isNull();
         advance(Duration.ofMillis(1));
-        assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(1));
+        assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(7));
         advance(IDLE_TIMEOUT.minus(PING_INTERVAL));
         assertHeartbeatTimeout();
     }

@@ -17,9 +17,14 @@ class LeakDetectionTest {
     void runsAtParanoidWithTheRecordingFactory() {
         assertThat(ResourceLeakDetector.getLevel()).isEqualTo(ResourceLeakDetector.Level.PARANOID);
         assertThat(LeakRecordingFactory.detects(ByteBuf.class)).isTrue();
+        assertThat(System.getProperty(LeakDetectionSessionListener.ACQUIRE_AND_RELEASE_ONLY))
+                .isEqualTo("true");
     }
 
-    /** The leak is cleared once seen, so the class-level check doesn't fail this class for it. */
+    /**
+     * Recording only acquire and release still names where a leaked buffer was allocated. The leak is cleared once
+     * seen, so the class-level check doesn't fail this class for it.
+     */
     @Test
     void recordsABufferThatWasNeverReleased() throws InterruptedException {
         leakOneBuffer();
@@ -27,6 +32,23 @@ class LeakDetectionTest {
         List<String> leaks = awaitLeaks();
 
         assertThat(leaks).anySatisfy(leak -> assertThat(leak).contains("leakOneBuffer"));
+    }
+
+    @Test
+    void countsTheDirectBytesALiveBufferHoldsUntilItsRelease() {
+        long before = LeakRecordingFactory.heldDirectBytes();
+
+        ByteBuf direct = ByteBufAllocator.DEFAULT.directBuffer(4096);
+        ByteBuf slice = direct.retainedSlice(0, 16);
+        assertThat(LeakRecordingFactory.heldDirectBytes() - before).isEqualTo(4096);
+
+        direct.release();
+        assertThat(LeakRecordingFactory.heldDirectBytes() - before).isEqualTo(4096);
+        slice.release();
+        assertThat(LeakRecordingFactory.heldDirectBytes()).isEqualTo(before);
+
+        ByteBufAllocator.DEFAULT.heapBuffer(4096).release();
+        assertThat(LeakRecordingFactory.heldDirectBytes()).isEqualTo(before);
     }
 
     private static void leakOneBuffer() {
