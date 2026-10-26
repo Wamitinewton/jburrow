@@ -20,6 +20,10 @@ import java.util.Objects;
  * {@link Discard}. An event from this side that the state forbids is a bug in the caller and throws
  * {@link IllegalStateException}.
  *
+ * <p>A {@link StreamEvent#WINDOW_UPDATE_RECEIVED} accepted in {@link StreamState#HALF_CLOSED_LOCAL} carries credit this
+ * side can't use, since it sends no more {@code DATA}: the caller ignores the increment. One accepted in any other
+ * state adds it. Flow accounting itself is {@code io.jburrow.protocol.flow}'s, held next to the lifecycle.
+ *
  * <p>Not thread-safe. Confined to the thread that owns its session.
  */
 public final class StreamLifecycle {
@@ -51,22 +55,23 @@ public final class StreamLifecycle {
                 switch (state) {
                     case OPEN ->
                         switch (event) {
-                            case DATA_RECEIVED, DATA_SENT -> accept(OPEN);
+                            case DATA_RECEIVED, DATA_SENT, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> accept(OPEN);
                             case CLOSE_RECEIVED -> accept(HALF_CLOSED_REMOTE);
                             case CLOSE_SENT -> accept(HALF_CLOSED_LOCAL);
                             case RST_RECEIVED, RST_SENT -> accept(CLOSED);
                         };
                     case HALF_CLOSED_LOCAL ->
                         switch (event) {
-                            case DATA_RECEIVED -> accept(HALF_CLOSED_LOCAL);
+                            case DATA_RECEIVED, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> accept(HALF_CLOSED_LOCAL);
                             case CLOSE_RECEIVED, RST_RECEIVED, RST_SENT -> accept(CLOSED);
                             case DATA_SENT, CLOSE_SENT -> throw forbidden(event);
                         };
                     case HALF_CLOSED_REMOTE ->
                         switch (event) {
                             case DATA_RECEIVED, CLOSE_RECEIVED -> RESET_STREAM_CLOSED;
-                            case DATA_SENT -> accept(HALF_CLOSED_REMOTE);
+                            case DATA_SENT, WINDOW_UPDATE_RECEIVED -> accept(HALF_CLOSED_REMOTE);
                             case RST_RECEIVED, CLOSE_SENT, RST_SENT -> accept(CLOSED);
+                            case WINDOW_UPDATE_SENT -> throw forbidden(event);
                         };
                     case CLOSED -> {
                         if (!event.isReceived()) {
