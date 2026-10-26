@@ -10,12 +10,14 @@ import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -115,10 +117,25 @@ class BackpressureIntegrationTest {
                     .doesNotContain("sessionEnded HEARTBEAT_TIMEOUT");
             assertThat(harness.sessions.registry().active()).isOne();
 
-            byte[] received = visitor.getInputStream().readNBytes(TRANSFER);
+            byte[] received = readFully(visitor, TRANSFER);
             download.get(30, TimeUnit.SECONDS);
             assertThat(received).hasSize(TRANSFER);
             assertThat(sha256(received)).isEqualTo(sha256(payload));
+        }
+    }
+
+    /**
+     * Reads {@code length} bytes from the visitor. A reset alone doesn't say why the server ended the stream, so a failed
+     * read reports what the server recorded, leaving out the per-frame and byte-count events.
+     */
+    private byte[] readFully(Socket visitor, int length) throws IOException {
+        try {
+            return visitor.getInputStream().readNBytes(length);
+        } catch (IOException e) {
+            List<String> recorded = harness.metrics.events().stream()
+                    .filter(event -> !event.startsWith("frame ") && !event.startsWith("tunnelBytes "))
+                    .toList();
+            throw new AssertionError("The visitor's connection failed; the server recorded " + recorded, e);
         }
     }
 
