@@ -37,6 +37,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `Jenkinsfile` that verifies `main`, pushes the server image and commits its tag to a GitOps
   repository, reading every deployment value from job parameters and failing fast on a missing
   one.
+- The wire protocol, `jburrow.v1-draft.1`, specified in [`docs/protocol.md`](docs/protocol.md)
+  with valid and invalid conformance vectors: a 10-byte frame header over one binary WebSocket
+  message per frame, strict JSON control payloads, and one error code space shared with the REST
+  API ([ADR-0007](docs/adr/0007-wire-protocol-v1.md)). `jburrow-protocol` holds the pure-Java
+  model, the stream and liveness rules, and the Netty codec.
+- Jazzer fuzz targets for the frame codec, the control JSON and the stream rules, run by
+  `make fuzz` and by a `fuzz` check on every pull request.
+- `JBurrowClient` in `jburrow-client-core`: the client agent, embeddable in a test or another
+  Java program without the CLI.
 - The edge listener on `:7080`: clients connect over WebSocket at `/v1/connect`, register TCP
   tunnels and get a public port from `jburrow.tcp.port-range`, with session, handshake and
   per-owner caps, liveness, backpressure and graceful drain

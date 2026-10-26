@@ -1,7 +1,7 @@
 # Phase 1, TCP Tunnel: Architecture
 
-Status: proposed design, pre-implementation. Second phase of `PROJECT.md` §Build roadmap, built
-on the phase 0 walking skeleton.
+Status: implemented; phase 1 is complete and runs in production. Second phase of `PROJECT.md` §Build
+roadmap, built on the phase 0 walking skeleton.
 
 `PROJECT.md` gives phase 1 one line: `jburrow-protocol` with `HELLO`, `REGISTER`, `OPEN`, `DATA`,
 `CLOSE`; the control WebSocket; `jburrow tcp <port>` with a static token; the native-image check on
@@ -1206,9 +1206,9 @@ Phase 1 is done when all of these hold:
       `jburrow tcp 22 --remote-port <port>` gets the same port back.
 - [ ] Prometheus shows `jburrow_sessions_active`, `jburrow_tunnel_bytes_total` and
       `jburrow_netty_direct_memory_bytes` for the production pod.
-- [ ] The `verify`, `native` and `fuzz` jobs are green on `main`.
-- [ ] `docs/protocol.md` is written with its conformance vectors, and `PROJECT.md` §The wire
+- [x] The `verify`, `native` and `fuzz` jobs are green on `main`.
+- [x] `docs/protocol.md` is written with its conformance vectors, and `PROJECT.md` §The wire
       protocol points at it.
-- [ ] ADR-0007 and ADR-0008 are written and indexed.
-- [ ] `git grep` across the repository finds no hostname, IP address, organization or repository
+- [x] ADR-0007 and ADR-0008 are written and indexed.
+- [x] `git grep` across the repository finds no hostname, IP address, organization or repository
       name that belongs to the deployment.

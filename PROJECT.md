@@ -2,7 +2,7 @@
 
 An open-source, self-hostable tunneling server (an ngrok-style service) written in Java. One command on a developer's machine turns a local port into a public HTTPS URL or a public TCP port. Built in public, one capability at a time.
 
-Status: design only; license settled (Apache-2.0); phase 0 (foundation) is designed in [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md) and built; phase 1 (TCP tunnel and the wire protocol) is designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md). Phase 0 is a walking skeleton: a Maven reactor and a server connected to its production database and mail provider, carried all the way through the real pipeline (Jenkins, image registry, GitOps commit, ArgoCD, Kubernetes) before any tunnel code is written. The deployment path is proven first so every later step deploys the same way.
+Status: phase 1 complete, phase 2 in progress. License settled (Apache-2.0). Phase 0 (foundation), designed in [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md), was a walking skeleton: a Maven reactor and a server connected to its production database and mail provider, carried all the way through the real pipeline (Jenkins, image registry, GitOps commit, ArgoCD, Kubernetes) before any tunnel code was written, so every later step deploys the same way. Phase 1 (TCP tunnel and the wire protocol), designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md), runs in production: `jburrow tcp <port>` exposes a local port on `tcp.cloudnativehub.app`, one stream per session, over the protocol specified in [`docs/protocol.md`](docs/protocol.md). Phase 2 (multiplexing and flow control) is next.
 
 ## Contents
 
@@ -439,4 +439,4 @@ Nothing in either public repository may reference the private GitOps repository,
 
 **Name of the web repository.** `jburrow-web` is proposed.
 
-Next step: build phase 1 as designed in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md), once phase 0's exit criteria hold in production. ADR-0001 to ADR-0008 are written.
+Next step: design and build phase 2, many streams per session with per-stream flow control, starting from the extension points in [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md) §Extension points. ADR-0001 to ADR-0008 are written.
