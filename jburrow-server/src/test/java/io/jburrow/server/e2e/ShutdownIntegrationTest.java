@@ -26,7 +26,7 @@ import org.springframework.test.context.TestPropertySource;
  * shutdown says. The test runs and closes a second application against this class's Postgres and Mailpit, so the
  * cached test context is never closed under the context cache.
  */
-@TestPropertySource(properties = "jburrow.tcp.port-range=41300-41349")
+@TestPropertySource(properties = "jburrow.tcp.port-range=31300-31349")
 class ShutdownIntegrationTest extends TunnelTestSupport {
 
     private static final Duration CONTEXT_CLOSE_LIMIT = Duration.ofSeconds(10);
@@ -46,7 +46,7 @@ class ShutdownIntegrationTest extends TunnelTestSupport {
                                 "--server.port=0",
                                 "--management.server.port=0",
                                 "--jburrow.edge.port=0",
-                                "--jburrow.tcp.port-range=41350-41399"));
+                                "--jburrow.tcp.port-range=31350-31399"));
         URI server = URI.create(
                 "ws://localhost:" + context.getBean(EdgeServer.class).boundPort() + ScriptedPeer.CONNECT_PATH);
         LocalService echo = closeAfterTest(LocalService.echo());

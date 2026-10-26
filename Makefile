@@ -43,7 +43,7 @@ test: ## Unit and architecture tests only, no containers
 
 # Jazzer fuzzes only one @FuzzTest per JVM, so each target gets its own run.
 FUZZ_TARGETS := FrameCodecFuzzTest\#decodeAsServer FrameCodecFuzzTest\#decodeAsClient \
-	ControlJsonFuzzTest\#read StreamLifecycleFuzzTest\#events
+	ControlJsonFuzzTest\#read StreamLifecycleFuzzTest\#events SessionFlowFuzzTest\#peers
 
 .PHONY: fuzz
 fuzz: ## Fuzz each protocol target for its maxDuration (2 min); findings land in its inputs directory

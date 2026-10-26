@@ -250,6 +250,11 @@ public final class EdgeServer {
                 : -1;
     }
 
+    /** Connections accepted and not yet closed. A connection still in the kernel's accept queue isn't counted. */
+    int openConnections() {
+        return connections.size();
+    }
+
     private static CompletableFuture<Void> shutDown(EventLoopGroup group) {
         return completion(group.shutdownGracefully(0, GROUP_SHUTDOWN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS));
     }

@@ -6,6 +6,8 @@ import static io.jburrow.protocol.stream.StreamEvent.DATA_RECEIVED;
 import static io.jburrow.protocol.stream.StreamEvent.DATA_SENT;
 import static io.jburrow.protocol.stream.StreamEvent.RST_RECEIVED;
 import static io.jburrow.protocol.stream.StreamEvent.RST_SENT;
+import static io.jburrow.protocol.stream.StreamEvent.WINDOW_UPDATE_RECEIVED;
+import static io.jburrow.protocol.stream.StreamEvent.WINDOW_UPDATE_SENT;
 import static io.jburrow.protocol.stream.StreamState.CLOSED;
 import static io.jburrow.protocol.stream.StreamState.HALF_CLOSED_LOCAL;
 import static io.jburrow.protocol.stream.StreamState.HALF_CLOSED_REMOTE;
@@ -42,24 +44,32 @@ class StreamLifecycleTest {
                 arguments(OPEN, DATA_SENT, accept(OPEN)),
                 arguments(OPEN, CLOSE_SENT, accept(HALF_CLOSED_LOCAL)),
                 arguments(OPEN, RST_SENT, accept(CLOSED)),
+                arguments(OPEN, WINDOW_UPDATE_RECEIVED, accept(OPEN)),
+                arguments(OPEN, WINDOW_UPDATE_SENT, accept(OPEN)),
                 arguments(HALF_CLOSED_LOCAL, DATA_RECEIVED, accept(HALF_CLOSED_LOCAL)),
                 arguments(HALF_CLOSED_LOCAL, CLOSE_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_LOCAL, RST_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_LOCAL, DATA_SENT, null),
                 arguments(HALF_CLOSED_LOCAL, CLOSE_SENT, null),
                 arguments(HALF_CLOSED_LOCAL, RST_SENT, accept(CLOSED)),
+                arguments(HALF_CLOSED_LOCAL, WINDOW_UPDATE_RECEIVED, accept(HALF_CLOSED_LOCAL)),
+                arguments(HALF_CLOSED_LOCAL, WINDOW_UPDATE_SENT, accept(HALF_CLOSED_LOCAL)),
                 arguments(HALF_CLOSED_REMOTE, DATA_RECEIVED, RESET),
                 arguments(HALF_CLOSED_REMOTE, CLOSE_RECEIVED, RESET),
                 arguments(HALF_CLOSED_REMOTE, RST_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_REMOTE, DATA_SENT, accept(HALF_CLOSED_REMOTE)),
                 arguments(HALF_CLOSED_REMOTE, CLOSE_SENT, accept(CLOSED)),
                 arguments(HALF_CLOSED_REMOTE, RST_SENT, accept(CLOSED)),
+                arguments(HALF_CLOSED_REMOTE, WINDOW_UPDATE_RECEIVED, accept(HALF_CLOSED_REMOTE)),
+                arguments(HALF_CLOSED_REMOTE, WINDOW_UPDATE_SENT, null),
                 arguments(CLOSED, DATA_RECEIVED, DISCARD),
                 arguments(CLOSED, CLOSE_RECEIVED, DISCARD),
                 arguments(CLOSED, RST_RECEIVED, DISCARD),
                 arguments(CLOSED, DATA_SENT, null),
                 arguments(CLOSED, CLOSE_SENT, null),
-                arguments(CLOSED, RST_SENT, null));
+                arguments(CLOSED, RST_SENT, null),
+                arguments(CLOSED, WINDOW_UPDATE_RECEIVED, DISCARD),
+                arguments(CLOSED, WINDOW_UPDATE_SENT, null));
     }
 
     @ParameterizedTest(name = "{0} + {1} -> {2}")
@@ -125,6 +135,27 @@ class StreamLifecycleTest {
     }
 
     @Test
+    void creditKeepsFlowingToASideThatHasFinishedSending() {
+        StreamLifecycle server = new StreamLifecycle();
+
+        assertThat(server.on(CLOSE_SENT)).isEqualTo(accept(HALF_CLOSED_LOCAL));
+        assertThat(server.on(DATA_RECEIVED)).isEqualTo(accept(HALF_CLOSED_LOCAL));
+        assertThat(server.on(WINDOW_UPDATE_SENT)).isEqualTo(accept(HALF_CLOSED_LOCAL));
+        assertThat(server.on(WINDOW_UPDATE_RECEIVED)).isEqualTo(accept(HALF_CLOSED_LOCAL));
+    }
+
+    @Test
+    void noCreditGoesBackOnceThePeerHasFinishedSending() {
+        StreamLifecycle server = new StreamLifecycle();
+        server.on(CLOSE_RECEIVED);
+
+        assertThatIllegalStateException().isThrownBy(() -> server.on(WINDOW_UPDATE_SENT));
+        assertThat(server.state()).isEqualTo(HALF_CLOSED_REMOTE);
+        assertThat(server.on(WINDOW_UPDATE_RECEIVED)).isEqualTo(accept(HALF_CLOSED_REMOTE));
+        assertThat(server.on(DATA_SENT)).isEqualTo(accept(HALF_CLOSED_REMOTE));
+    }
+
+    @Test
     void resetStreamLeavesTheStreamClosed() {
         StreamLifecycle stream = in(HALF_CLOSED_REMOTE);
 
@@ -149,7 +180,8 @@ class StreamLifecycleTest {
             }
         }
 
-        assertThat(received).containsExactlyInAnyOrder(DATA_RECEIVED, CLOSE_RECEIVED, RST_RECEIVED);
+        assertThat(received)
+                .containsExactlyInAnyOrder(DATA_RECEIVED, CLOSE_RECEIVED, RST_RECEIVED, WINDOW_UPDATE_RECEIVED);
     }
 
     private static Accept accept(StreamState next) {

@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.context.TestPropertySource;
 
 /** Real bytes through real tunnels, in every TCP shape phase 1 supports. */
-@TestPropertySource(properties = {"jburrow.tcp.port-range=41000-41099", "jburrow.edge.max-sessions-per-principal=2"})
+@TestPropertySource(properties = {"jburrow.tcp.port-range=31000-31099", "jburrow.edge.max-sessions-per-principal=2"})
 class TunnelEndToEndIntegrationTest extends TunnelTestSupport {
 
     private static final long LARGE = 64L * 1024 * 1024;
@@ -31,7 +31,7 @@ class TunnelEndToEndIntegrationTest extends TunnelTestSupport {
 
         assertThat(tunnel.registered().kind()).isEqualTo(TunnelKind.TCP);
         assertThat(tunnel.registered().url()).isEqualTo("tcp://localhost:" + tunnel.port());
-        assertThat(tunnel.port()).isBetween(41000, 41099);
+        assertThat(tunnel.port()).isBetween(31000, 31099);
 
         Socket visitor = visit(tunnel.port());
         for (int i = 0; i < 10; i++) {
@@ -169,7 +169,7 @@ class TunnelEndToEndIntegrationTest extends TunnelTestSupport {
     @Test
     void aRequestedPortIsGrantedAgainAfterItsTunnelCloses() throws Exception {
         LocalService echo = closeAfterTest(LocalService.echo());
-        int requested = 41042;
+        int requested = 31042;
 
         Tunnel first = openTunnel(ALICE_TOKEN, tcp(echo.port()).remotePort(requested));
         assertThat(first.port()).isEqualTo(requested);

@@ -44,6 +44,7 @@ class ExitCodesTest {
         "UNSUPPORTED_PROTOCOL_VERSION, 6",
         "PROTOCOL_ERROR, 6",
         "FRAME_SIZE_ERROR, 6",
+        "FLOW_CONTROL_ERROR, 6",
         "FORBIDDEN_ORIGIN, 6",
         "PING_RATE_EXCEEDED, 6",
         "PEER_RESET, 1",

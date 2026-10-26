@@ -59,8 +59,12 @@ final class ExitCodes {
                     SESSION_LIMIT_EXCEEDED,
                     PORT_UNAVAILABLE,
                     PORT_POOL_EXHAUSTED -> REGISTRATION_REFUSED;
-            case UNSUPPORTED_PROTOCOL_VERSION, PROTOCOL_ERROR, FRAME_SIZE_ERROR, FORBIDDEN_ORIGIN, PING_RATE_EXCEEDED ->
-                PROTOCOL_MISMATCH;
+            case UNSUPPORTED_PROTOCOL_VERSION,
+                    PROTOCOL_ERROR,
+                    FRAME_SIZE_ERROR,
+                    FLOW_CONTROL_ERROR,
+                    FORBIDDEN_ORIGIN,
+                    PING_RATE_EXCEEDED -> PROTOCOL_MISMATCH;
             // Stream codes never end a session; seeing one here is a bug.
             case PEER_RESET, LOCAL_SERVICE_UNREACHABLE, STREAM_CLOSED, CANCELLED -> ExitCodes.INTERNAL_ERROR;
         };

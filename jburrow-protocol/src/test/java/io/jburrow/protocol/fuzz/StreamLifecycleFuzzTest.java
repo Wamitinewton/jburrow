@@ -52,22 +52,23 @@ class StreamLifecycleFuzzTest {
         return switch (state) {
             case OPEN ->
                 switch (event) {
-                    case DATA_RECEIVED, DATA_SENT -> new Accept(OPEN);
+                    case DATA_RECEIVED, DATA_SENT, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> new Accept(OPEN);
                     case CLOSE_RECEIVED -> new Accept(HALF_CLOSED_REMOTE);
                     case CLOSE_SENT -> new Accept(HALF_CLOSED_LOCAL);
                     case RST_RECEIVED, RST_SENT -> new Accept(CLOSED);
                 };
             case HALF_CLOSED_LOCAL ->
                 switch (event) {
-                    case DATA_RECEIVED -> new Accept(HALF_CLOSED_LOCAL);
+                    case DATA_RECEIVED, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> new Accept(HALF_CLOSED_LOCAL);
                     case CLOSE_RECEIVED, RST_RECEIVED, RST_SENT -> new Accept(CLOSED);
                     case DATA_SENT, CLOSE_SENT -> null;
                 };
             case HALF_CLOSED_REMOTE ->
                 switch (event) {
                     case DATA_RECEIVED, CLOSE_RECEIVED -> new ResetStream(ErrorCode.STREAM_CLOSED);
-                    case DATA_SENT -> new Accept(HALF_CLOSED_REMOTE);
+                    case DATA_SENT, WINDOW_UPDATE_RECEIVED -> new Accept(HALF_CLOSED_REMOTE);
                     case RST_RECEIVED, CLOSE_SENT, RST_SENT -> new Accept(CLOSED);
+                    case WINDOW_UPDATE_SENT -> null;
                 };
             case CLOSED -> event.isReceived() ? new Discard() : null;
         };

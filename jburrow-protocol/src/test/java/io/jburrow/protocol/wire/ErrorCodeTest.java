@@ -29,6 +29,7 @@ class ErrorCodeTest {
                 arguments(ErrorCode.SERVER_SHUTTING_DOWN, Set.of(UPGRADE, SESSION), 503, 1001),
                 arguments(ErrorCode.PROTOCOL_ERROR, Set.of(UPGRADE, SESSION), 400, 1002),
                 arguments(ErrorCode.FRAME_SIZE_ERROR, Set.of(SESSION), NONE, 1002),
+                arguments(ErrorCode.FLOW_CONTROL_ERROR, Set.of(SESSION), NONE, 1002),
                 arguments(ErrorCode.HANDSHAKE_TIMEOUT, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.AUTHTOKEN_INVALID, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.VALIDATION_FAILED, Set.of(SESSION), NONE, 1008),
@@ -77,7 +78,7 @@ class ErrorCodeTest {
         assertThat(ErrorCode.fromCode("Not_Found")).isEmpty();
         assertThat(ErrorCode.fromCode(" NOT_FOUND")).isEmpty();
         assertThat(ErrorCode.fromCode("NOT_FOUND ")).isEmpty();
-        assertThat(ErrorCode.fromCode("FLOW_CONTROL_ERROR")).isEmpty();
+        assertThat(ErrorCode.fromCode("NO_SUCH_CODE")).isEmpty();
         assertThat(ErrorCode.fromCode("")).isEmpty();
         assertThat(ErrorCode.fromCode(null)).isEmpty();
     }
