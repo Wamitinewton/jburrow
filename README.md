@@ -12,10 +12,11 @@ dashboard.
 
 ## Status
 
-**Pre-alpha, phase 0: foundation.** Nothing runs yet. Phase 0 is a walking skeleton (the Maven
-reactor, a server connected to its database and mail provider, the container image and the
-delivery pipeline) built before any tunnel code. JBurrow is built in public, one capability at a
-time; [`ROADMAP.md`](ROADMAP.md) lists the features and [`PROJECT.md`](PROJECT.md) §Build roadmap
+**Pre-alpha, phase 1 complete: TCP tunnels.** `jburrow tcp <port>` exposes a local TCP port on a
+public port of the server, over the wire protocol in [`docs/protocol.md`](docs/protocol.md). Each
+session carries one connection at a time; multiplexing and flow control (phase 2), HTTP tunnels
+(phase 3) and automatic reconnect (phase 4) come next. JBurrow is built in public, one capability at
+a time; [`ROADMAP.md`](ROADMAP.md) lists the features and [`PROJECT.md`](PROJECT.md) §Build roadmap
 gives the order.
 
 ## Quick start
@@ -34,6 +35,28 @@ make verify                               # unit, architecture and integration t
 deletes their data.
 
 ## Try it
+
+### Against the hosted server
+
+The hosted server at `connect.cloudnativehub.app` is open to testers. Accounts arrive in phase 5;
+until then, ask the maintainer for an authtoken. There are no release binaries yet, so build the
+CLI from this repository (JDK 21; `make native` builds a native binary instead, with GraalVM for
+JDK 21 as the JDK):
+
+```bash
+./mvnw -q -pl jburrow-cli -am package -DskipTests
+JBURROW_AUTHTOKEN=<your token> java -jar jburrow-cli/target/jburrow-cli-*.jar tcp 22
+# Forwarding  tcp://tcp.cloudnativehub.app:20417 -> localhost:22
+
+ssh -p 20417 you@tcp.cloudnativehub.app   # from anywhere, with the port printed above
+```
+
+The tunnel exposes the local service to the whole internet for as long as it runs: use key
+authentication for SSH, and stop the tunnel with Ctrl-C when you're done. If the connection drops
+or the server restarts, the CLI exits with code 4; run the command again, with
+`--remote-port <port>` to ask for the same port.
+
+### Against a server on your machine
 
 With the server running (`make run`, above), expose a local echo service through a TCP tunnel. The
 token is the development token from [`CONTRIBUTING.md`](CONTRIBUTING.md); it only unlocks a server on
@@ -59,8 +82,10 @@ user of the machine.
 
 - [`PROJECT.md`](PROJECT.md): the project brief, architecture, tech stack and module layout.
 - [`ROADMAP.md`](ROADMAP.md): the feature list, staged as MVP, v1 and Later.
-- [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md): the
-  detailed design of the current phase.
+- [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md): the
+  detailed design of the latest phase, TCP tunnels and the wire protocol;
+  [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md) is the one
+  before it.
 - [`docs/protocol.md`](docs/protocol.md): the wire protocol specification, for anyone writing a
   client or a server.
 - [`docs/adr/`](docs/adr/): architecture decision records.
