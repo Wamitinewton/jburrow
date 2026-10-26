@@ -182,6 +182,8 @@ class EdgeServerIntegrationTest {
         int port = edge.boundPort();
 
         try (Socket early = socket()) {
+            // Closing the listener resets a connection the edge hasn't accepted yet.
+            awaitTrue(() -> edge.openConnections() == 1);
             edge.beginShutdown();
             awaitTrue(() -> !edge.isAccepting());
             write(early, upgradeRequest(ProtocolVersion.CURRENT, ""));
