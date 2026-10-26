@@ -20,7 +20,7 @@ import org.springframework.test.context.TestPropertySource;
  */
 @TestPropertySource(
         properties = {
-            "jburrow.tcp.port-range=41500-41599",
+            "jburrow.tcp.port-range=31500-31599",
             "jburrow.edge.ping-interval=1s",
             "jburrow.edge.idle-timeout=2s"
         })
