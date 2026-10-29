@@ -7,6 +7,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Decides when each local connection of one session is read, {@code docs/phase-2-multiplexing/ARCHITECTURE.md} §The
@@ -20,16 +21,18 @@ import java.util.Set;
  * connections that actually have data pay for a pause, and idle ones are never touched.
  *
  * <p>A connection blocked by its own stream's credit is resumed by that stream's {@code WINDOW_UPDATE}. One blocked by
- * the session's credit or headroom joins the line in {@link #blockedOnSession}, and every connection in line is resumed,
- * in line order, when stream 0's {@code WINDOW_UPDATE} arrives or the control channel becomes writable again. Neither
- * event touches connections that aren't waiting.
+ * the session's credit or headroom joins the line in {@link #blockedOnSession}. When stream 0's {@code WINDOW_UPDATE}
+ * arrives or the control channel becomes writable again, connections in line are resumed, in line order, until those
+ * resumed may send all the session can. Neither event touches connections that aren't waiting.
  *
- * <p>Streams share the session's credit. When the line is resumed, each stream in it may take at most an equal share of
- * the credit there is, for its first read, since NIO reads ready channels in no order the gate controls. The share
- * lifts once that read is sent or held, so credit a stream leaves unused goes to the others in later reads, and every
- * stream in line is resumed, so none waits while credit sits unused. A stream keeps its place in line, through any
- * number of resumes and one-byte pauses, until a read of its own is sent; then it leaves, and rejoins at the back if
- * that read spent what it may send.
+ * <p>Streams share the session's credit. Each stream resumed from the line may take at most a share of the credit there
+ * is, for its first read, since NIO reads ready channels in no order the gate controls: an equal share, but never less
+ * than {@link #SHARE_FLOOR}, so frames stay large when hundreds of streams wait. Streams the credit doesn't cover stay
+ * paused rather than each giving up a byte to a read that can't be sent. The share lifts once that read is sent or
+ * held. Credit that resumed streams leave unused goes to the next ones in line after {@link #RECHECK_NANOS}, so none
+ * waits while credit sits unused. A stream keeps its place in line, through any number of resumes and one-byte pauses,
+ * until a read of its own is sent; then it leaves, and rejoins at the back if that read spent what it may send, or if
+ * it was resumed from the line and others there are still paused: one read per turn.
  *
  * <p>A stream whose local connection is still being made is never read, and the gate ignores it until
  * {@link #onConnected}.
@@ -41,6 +44,12 @@ import java.util.Set;
  */
 final class ReadGate {
 
+    /** The smallest share of the session's credit a resumed stream is offered, unless less credit is left. */
+    static final int SHARE_FLOOR = 16_384;
+
+    /** How long after a partial resume the gate looks for credit resumed streams didn't use. */
+    static final long RECHECK_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
+
     /** Why a local connection isn't read. */
     enum Wait {
         /** Its stream's credit ran out. */
@@ -48,7 +57,9 @@ final class ReadGate {
         /** The session's credit ran out. */
         SESSION,
         /** The control channel's outbound buffer is at its high watermark. */
-        HEADROOM
+        HEADROOM,
+        /** It had its turn at the session's credit, and others in line go first. */
+        TURN
     }
 
     /** What the gate asks of the connector when carried bytes can go out. */
@@ -59,6 +70,9 @@ final class ReadGate {
 
         /** Sends the {@code CLOSE} the local {@code FIN} was holding back until the carried bytes went out. */
         void sendDeferredClose(LocalRelayHandler stream);
+
+        /** Flushes carried bytes sent outside a read batch, which no read-complete will flush. */
+        void flushCarried();
     }
 
     private final ClientSession session;
@@ -66,6 +80,8 @@ final class ReadGate {
     private final Output output;
     /** The line: insertion order is the order streams joined it, which is the order they are resumed in. */
     private final Set<LocalRelayHandler> blockedOnSession = new LinkedHashSet<>();
+
+    private boolean recheckPending;
 
     ReadGate(ClientSession session, Channel control, Output output) {
         this.session = Objects.requireNonNull(session, "session");
@@ -96,13 +112,26 @@ final class ReadGate {
 
     /**
      * A read from the local connection went out as {@code DATA}: the stream has had its turn and leaves the line. If
-     * that spent what it may send, it stops being read now, and rejoins at the back if it waits for the session.
+     * that spent what it may send, it stops being read now, and rejoins at the back if it waits for the session. If it
+     * was resumed from the line and others there still wait, it rejoins at the back anyway, so the streams resumed with
+     * it get their reads before it takes a second.
+     *
+     * <p>A paused connection can be read too, when the transport had already found it readable, so whatever it waited
+     * for is over: left waiting, it would be out of the line and never resumed.
      */
     void afterSend(LocalRelayHandler stream) {
-        blockedOnSession.remove(stream);
+        boolean resumedFromLine = stream.share() > 0;
+        leaveLine(stream);
         stream.share(0);
         if (sendable(stream) == 0) {
             block(stream);
+        } else if (resumedFromLine && anyPausedInLine()) {
+            setAutoRead(stream, false);
+            stream.waiting(Wait.TURN);
+            blockedOnSession.add(stream);
+            scheduleRecheck();
+        } else if (!stream.channel().isInputShutdown()) {
+            setAutoRead(stream, true);
         }
     }
 
@@ -136,24 +165,63 @@ final class ReadGate {
     }
 
     /**
-     * Resumes the streams in line, in line order, each with an equal share of the credit for its first read and keeping
-     * its place until a read of its own is sent. Stops once the session can't send again: the streams it hasn't reached
-     * stay paused.
+     * Resumes paused streams in line, in line order, each with its share of the credit for its first read and keeping
+     * its place until a read of its own is sent, until those resumed may send all the session can. Streams it doesn't
+     * reach stay paused, and are looked at again shortly in case the resumed ones leave credit unused.
      */
     private void resumeBlockedOnSession() {
-        if (blockedOnSession.isEmpty()) {
+        if (blockedOnSession.isEmpty() || sessionLimit() == 0) {
             return;
         }
         List<LocalRelayHandler> line = List.copyOf(blockedOnSession);
-        int share = Math.max(1, sessionLimit() / line.size());
+        int share = share(sessionLimit(), line.size());
+        long promised = 0;
         for (LocalRelayHandler stream : line) {
-            if (sessionLimit() == 0) {
+            int left = sessionLimit();
+            if (left == 0) {
                 return;
             }
-            if (blockedOnSession.contains(stream)) {
+            if (promised >= left) {
+                scheduleRecheck();
+                return;
+            }
+            // A stream in line with nothing to wait for was resumed already and hasn't been read yet.
+            if (blockedOnSession.contains(stream) && stream.waiting() != null) {
                 stream.share(share);
                 reassess(stream);
+                promised += sendable(stream);
             }
+        }
+    }
+
+    /** Whether a stream in line is paused; those that were resumed and not yet read are already being served. */
+    private boolean anyPausedInLine() {
+        for (LocalRelayHandler waiting : blockedOnSession) {
+            if (waiting.waiting() != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** An equal share of {@code limit} among {@code streams}, but at least the floor, or all of it if less. */
+    static int share(int limit, int streams) {
+        return Math.max(Math.min(SHARE_FLOOR, limit), limit / streams);
+    }
+
+    private void scheduleRecheck() {
+        if (recheckPending) {
+            return;
+        }
+        recheckPending = true;
+        control.eventLoop().schedule(this::recheck, RECHECK_NANOS, TimeUnit.NANOSECONDS);
+    }
+
+    private void recheck() {
+        recheckPending = false;
+        if (!session.isClosing()) {
+            resumeBlockedOnSession();
+            output.flushCarried();
         }
     }
 

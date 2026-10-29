@@ -86,7 +86,8 @@ public record JBurrowProperties(
      *     client can make the server hold
      * @param maxConcurrentStreams streams one session may have open, announced as
      *     {@code limits.maxConcurrentStreams}
-     * @param maxStreams streams open across every session
+     * @param maxStreams streams open across every session; with {@code jburrow.tcp.visitor-receive-buffer}, what sets
+     *     the kernel memory visitors held back by credit can park
      */
     public record Edge(
             @Min(0) @Max(65_535) @DefaultValue("7080") int port,
@@ -109,7 +110,7 @@ public record JBurrowProperties(
             @NotNull @DefaultValue("256KB") DataSize streamWindow,
             @NotNull @DefaultValue("512KB") DataSize sessionWindow,
             @Positive @DefaultValue("1000") int maxConcurrentStreams,
-            @Positive @DefaultValue("20000") int maxStreams) {
+            @Positive @DefaultValue("4000") int maxStreams) {
 
         /** The protocol's floor for the announced ping interval ({@code docs/protocol.md} §11). */
         static final Duration MIN_PING_INTERVAL = Duration.ofSeconds(1);
@@ -203,12 +204,20 @@ public record JBurrowProperties(
      * @param bindAddress an IP literal tunnel listeners bind to; a name is never resolved
      * @param publicHost the host name tunnel addresses are given under
      * @param reuseDelay how long a released port rests before it is handed to someone else
+     * @param visitorReceiveBuffer {@code SO_RCVBUF} for visitor connections, which caps what a visitor held back by
+     *     credit parks in the server's kernel; {@code 0} leaves it to the kernel's own sizing
      */
     public record Tcp(
             @NotBlank String portRange,
             @NotBlank @DefaultValue("0.0.0.0") String bindAddress,
             @NotBlank String publicHost,
-            @NotNull @DefaultValue("60s") Duration reuseDelay) {
+            @NotNull @DefaultValue("60s") Duration reuseDelay,
+            @NotNull @DefaultValue("32KB") DataSize visitorReceiveBuffer) {
+
+        /** The kernel caps {@code SO_RCVBUF} at {@code net.core.rmem_max}; outside these a value is a mistake. */
+        static final long MIN_VISITOR_RECEIVE_BUFFER = 4 * 1024;
+
+        static final long MAX_VISITOR_RECEIVE_BUFFER = 4 * 1024 * 1024;
 
         @AssertTrue(message = "jburrow.tcp.port-range must be <first>-<last> within 1024-65535, such as 20000-20999")
         public boolean isPortRangeValid() {
@@ -218,6 +227,16 @@ public record JBurrowProperties(
         @AssertTrue(message = "jburrow.tcp.reuse-delay must not be negative")
         public boolean isReuseDelayValid() {
             return reuseDelay == null || !reuseDelay.isNegative();
+        }
+
+        @AssertTrue(
+                message = "jburrow.tcp.visitor-receive-buffer must be 0, for the kernel's sizing, or from 4KB to 4MB")
+        public boolean isVisitorReceiveBufferValid() {
+            if (visitorReceiveBuffer == null) {
+                return true;
+            }
+            long bytes = visitorReceiveBuffer.toBytes();
+            return bytes == 0 || (bytes >= MIN_VISITOR_RECEIVE_BUFFER && bytes <= MAX_VISITOR_RECEIVE_BUFFER);
         }
 
         /** The port range, or empty if it is missing or malformed. */

@@ -575,5 +575,10 @@ final class StreamRelay implements SessionStreams {
         public void sendDeferredClose(VisitorHandler visitor) {
             halfClose(visitor);
         }
+
+        @Override
+        public void flushCarried() {
+            StreamRelay.this.flushCarried();
+        }
     }
 }

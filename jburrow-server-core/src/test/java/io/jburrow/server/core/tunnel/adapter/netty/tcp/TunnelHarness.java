@@ -157,7 +157,13 @@ final class TunnelHarness implements AutoCloseable {
                 ports,
                 new RegistrationPolicy(1, PUBLIC_HOST));
         EngineDependencies deps = new EngineDependencies(
-                register, admission, streamQuota, ports, metrics, blocking, new TcpSettings("127.0.0.1", PUBLIC_HOST));
+                register,
+                admission,
+                streamQuota,
+                ports,
+                metrics,
+                blocking,
+                new TcpSettings("127.0.0.1", PUBLIC_HOST, 32 * 1024));
         sessions = new ControlSessionInitializer(settings, deps, new NettyTunnelListeners(settings, deps));
         edge = new EdgeServer(settings, deps, sessions);
         edge.start();

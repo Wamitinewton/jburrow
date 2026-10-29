@@ -1,6 +1,7 @@
 # 9. Flow control
 
-- Status: accepted
+- Status: accepted; the share each resumed source takes, the server-wide stream cap and kernel socket memory are amended by
+  [ADR-0010](0010-share-floor-and-visitor-receive-buffers.md)
 - Date: 2026-10-26
 
 ## Context

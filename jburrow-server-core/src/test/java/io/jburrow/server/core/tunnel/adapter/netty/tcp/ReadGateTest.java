@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -139,7 +140,8 @@ class ReadGateTest {
         read(second, oneByte);
 
         assertThat(dataSent()).isEmpty();
-        assertThat(oneByte.refCnt()).as("carried, not released").isOne();
+        assertThat(oneByte.refCnt()).as("copied onto the heap and released").isZero();
+        assertThat(handler(second).carried()).isOne();
         assertThat(second.config().isAutoRead()).isFalse();
         assertThat(handler(second).waiting()).isEqualTo(ReadGate.Wait.SESSION);
         assertThat(relay.gate().blockedOnSession()).containsExactly(handler(second));
@@ -175,67 +177,135 @@ class ReadGateTest {
 
     @Test
     void eachVisitorResumedFromTheLineMayTakeAnEqualShareOfTheCreditForItsFirstRead() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel visitor : waiting) {
-            read(visitor, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
 
-        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 102));
+        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
         relay.onReadComplete();
 
         assertThat(dataSent()).containsExactly(1, 1, 1);
         for (DuplexEmbeddedChannel visitor : waiting) {
-            assertThat(relay.gate().sendable(handler(visitor))).isEqualTo(34);
+            assertThat(relay.gate().sendable(handler(visitor))).isEqualTo(WINDOW / 3);
         }
-        read(waiting.get(0), 34);
+        read(waiting.get(0), WINDOW / 3);
         assertThat(relay.gate().sendable(handler(waiting.get(0))))
                 .as("the share lifts once its read is sent")
-                .isEqualTo(99 - 34);
-        assertThat(relay.gate().sendable(handler(waiting.get(1)))).isEqualTo(34);
+                .isEqualTo(WINDOW - 3 - WINDOW / 3);
+        assertThat(relay.gate().sendable(handler(waiting.get(1)))).isEqualTo(WINDOW / 3);
+    }
+
+    @Test
+    void aShareIsNeverBelowTheFloorAndOnlyTheVisitorsTheCreditCoversAreResumed() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+
+        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        relay.onReadComplete();
+
+        assertThat(dataSent()).containsExactly(1, 1, 1, 1);
+        for (DuplexEmbeddedChannel visitor : waiting.subList(0, 4)) {
+            assertThat(visitor.config().isAutoRead()).isTrue();
+            assertThat(relay.gate().sendable(handler(visitor))).isEqualTo(ReadGate.SHARE_FLOOR);
+        }
+        assertThat(waiting.get(4).config().isAutoRead())
+                .as("four floors cover the credit")
+                .isFalse();
+        assertThat(handler(waiting.get(4)).hasCarry()).isTrue();
+        assertThat(relay.gate().blockedOnSession()).hasSize(5);
+    }
+
+    @Test
+    void creditTheResumedVisitorsLeaveUnusedGoesToTheNextInLineShortlyAfter() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        relay.onReadComplete();
+        for (DuplexEmbeddedChannel visitor : waiting.subList(0, 4)) {
+            read(visitor, 100);
+        }
+        drain();
+
+        recheck();
+
+        assertThat(dataSent()).as("the last visitor's carried byte, flushed").containsExactly(1);
+        assertThat(waiting.get(4).config().isAutoRead()).isTrue();
+    }
+
+    @Test
+    void aVisitorResumedFromTheLineGetsOneReadThenWaitsBehindThoseStillPaused() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        relay.onReadComplete();
+        drain();
+        int pausesCounted = metrics.events().size();
+
+        read(waiting.get(0), 100);
+
+        assertThat(dataSent()).containsExactly(100);
+        assertThat(waiting.get(0).config().isAutoRead())
+                .as("credit is left, but the last visitor hasn't had a turn")
+                .isFalse();
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.TURN);
+        assertThat(relay.gate().blockedOnSession()).endsWith(handler(waiting.get(0)));
+        assertThat(metrics.events()).as("a turn isn't a pause for credit").hasSize(pausesCounted);
+
+        recheck();
+
+        assertThat(waiting.get(4).config().isAutoRead()).isTrue();
+    }
+
+    @Test
+    void aPausedVisitorReadAnywayWaitsForNothingOrRejoinsTheLine() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        relay.onReadComplete();
+        read(waiting.get(0), ReadGate.SHARE_FLOOR);
+        drain();
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.TURN);
+
+        read(waiting.get(0), 100);
+
+        assertThat(dataSent()).as("the transport had found it readable").containsExactly(100);
+        assertThat(handler(waiting.get(0)).waiting()).isNull();
+        assertThat(waiting.get(0).config().isAutoRead()).isTrue();
+
+        read(waiting.get(0), WINDOW - 4 - ReadGate.SHARE_FLOOR - 100);
+
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.SESSION);
+        assertThat(relay.gate().blockedOnSession())
+                .as("back in line, where credit will find it")
+                .endsWith(handler(waiting.get(0)));
     }
 
     @Test
     void aVisitorWhoseReadSpendsTheCreditLeavesTheLineAndRejoinsAtTheBack() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel visitor : waiting) {
-            read(visitor, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
 
         relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 4));
         relay.onReadComplete();
-        assertThat(dataSent()).containsExactly(1, 1, 1);
-        read(waiting.get(0), 1);
-        read(waiting.get(1), ascii("y"));
-        read(waiting.get(2), ascii("z"));
-
         assertThat(dataSent()).containsExactly(1);
+        read(waiting.get(0), 3);
+
+        assertThat(dataSent()).containsExactly(3);
         assertThat(relay.gate().blockedOnSession())
                 .containsExactly(handler(waiting.get(1)), handler(waiting.get(2)), handler(waiting.get(0)));
     }
 
     @Test
     void visitorsInLineResumeInLineOrderUntilTheSessionRunsOutAgain() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel visitor : waiting) {
-            read(visitor, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
         assertThat(relay.gate().blockedOnSession())
                 .containsExactly(handler(waiting.get(0)), handler(waiting.get(1)), handler(waiting.get(2)));
 
         relay.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 2));
         relay.onReadComplete();
 
-        assertThat(dataSent()).containsExactly(1, 1);
+        assertThat(dataSent()).containsExactly(1);
         assertThat(waiting.get(0).config().isAutoRead()).isTrue();
+        assertThat(waiting.get(1).config().isAutoRead())
+                .as("the first visitor may send the rest")
+                .isFalse();
+
+        recheck();
+
+        assertThat(dataSent()).as("the first visitor left its credit unused").containsExactly(1);
         assertThat(waiting.get(1).config().isAutoRead())
                 .as("its byte took the last credit")
                 .isFalse();
@@ -386,6 +456,25 @@ class ReadGateTest {
 
         assertThat(late.config().isAutoRead()).isFalse();
         assertThat(relay.gate().blockedOnSession()).containsExactly(handler(late));
+    }
+
+    /** {@code count} visitors in line behind one that spent the session's credit, each carrying a byte. */
+    private List<DuplexEmbeddedChannel> waitingInLine(int count) {
+        read(connect(), WINDOW);
+        drain();
+        List<DuplexEmbeddedChannel> waiting = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            DuplexEmbeddedChannel visitor = connect();
+            read(visitor, ascii("x"));
+            waiting.add(visitor);
+        }
+        return waiting;
+    }
+
+    /** Runs the gate's look for unused credit after a partial resume. */
+    private void recheck() {
+        sessionChannel.advanceTimeBy(ReadGate.RECHECK_NANOS, TimeUnit.NANOSECONDS);
+        sessionChannel.runScheduledPendingTasks();
     }
 
     private DuplexEmbeddedChannel connect() {

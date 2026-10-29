@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -197,67 +198,133 @@ class ReadGateTest {
 
     @Test
     void eachConnectionResumedFromTheLineMayTakeAnEqualShareOfTheCreditForItsFirstRead() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel local : waiting) {
-            read(local, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
 
-        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 102));
+        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
         connector.onReadComplete();
 
         assertThat(dataSent()).containsExactly(1, 1, 1);
         for (DuplexEmbeddedChannel local : waiting) {
-            assertThat(gate().sendable(handler(local))).isEqualTo(34);
+            assertThat(gate().sendable(handler(local))).isEqualTo(WINDOW / 3);
         }
-        read(waiting.get(0), 34);
+        read(waiting.get(0), WINDOW / 3);
         assertThat(gate().sendable(handler(waiting.get(0))))
                 .as("the share lifts once its read is sent")
-                .isEqualTo(99 - 34);
-        assertThat(gate().sendable(handler(waiting.get(1)))).isEqualTo(34);
+                .isEqualTo(WINDOW - 3 - WINDOW / 3);
+        assertThat(gate().sendable(handler(waiting.get(1)))).isEqualTo(WINDOW / 3);
+    }
+
+    @Test
+    void aShareIsNeverBelowTheFloorAndOnlyTheConnectionsTheCreditCoversAreResumed() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+
+        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        connector.onReadComplete();
+
+        assertThat(dataSent()).containsExactly(1, 1, 1, 1);
+        for (DuplexEmbeddedChannel local : waiting.subList(0, 4)) {
+            assertThat(local.config().isAutoRead()).isTrue();
+            assertThat(gate().sendable(handler(local))).isEqualTo(ReadGate.SHARE_FLOOR);
+        }
+        assertThat(waiting.get(4).config().isAutoRead())
+                .as("four floors cover the credit")
+                .isFalse();
+        assertThat(handler(waiting.get(4)).hasCarry()).isTrue();
+        assertThat(gate().blockedOnSession()).hasSize(5);
+    }
+
+    @Test
+    void creditTheResumedConnectionsLeaveUnusedGoesToTheNextInLineShortlyAfter() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        connector.onReadComplete();
+        for (DuplexEmbeddedChannel local : waiting.subList(0, 4)) {
+            read(local, 100);
+        }
+        drain();
+
+        recheck();
+
+        assertThat(dataSent()).as("the last connection's carried byte, flushed").containsExactly(1);
+        assertThat(waiting.get(4).config().isAutoRead()).isTrue();
+    }
+
+    @Test
+    void aConnectionResumedFromTheLineGetsOneReadThenWaitsBehindThoseStillPaused() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        connector.onReadComplete();
+        drain();
+
+        read(waiting.get(0), 100);
+
+        assertThat(dataSent()).containsExactly(100);
+        assertThat(waiting.get(0).config().isAutoRead())
+                .as("credit is left, but the last connection hasn't had a turn")
+                .isFalse();
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.TURN);
+        assertThat(gate().blockedOnSession()).endsWith(handler(waiting.get(0)));
+
+        recheck();
+
+        assertThat(waiting.get(4).config().isAutoRead()).isTrue();
+    }
+
+    @Test
+    void aPausedConnectionReadAnywayWaitsForNothingOrRejoinsTheLine() {
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(5);
+        connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, WINDOW));
+        connector.onReadComplete();
+        read(waiting.get(0), ReadGate.SHARE_FLOOR);
+        drain();
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.TURN);
+
+        read(waiting.get(0), 100);
+
+        assertThat(dataSent()).as("the transport had found it readable").containsExactly(100);
+        assertThat(handler(waiting.get(0)).waiting()).isNull();
+        assertThat(waiting.get(0).config().isAutoRead()).isTrue();
+
+        read(waiting.get(0), WINDOW - 4 - ReadGate.SHARE_FLOOR - 100);
+
+        assertThat(handler(waiting.get(0)).waiting()).isEqualTo(ReadGate.Wait.SESSION);
+        assertThat(gate().blockedOnSession())
+                .as("back in line, where credit will find it")
+                .endsWith(handler(waiting.get(0)));
     }
 
     @Test
     void aConnectionWhoseReadSpendsTheCreditLeavesTheLineAndRejoinsAtTheBack() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel local : waiting) {
-            read(local, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
 
         connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 4));
         connector.onReadComplete();
-        assertThat(dataSent()).containsExactly(1, 1, 1);
-        read(waiting.get(0), 1);
-        read(waiting.get(1), ascii("y"));
-        read(waiting.get(2), ascii("z"));
-
         assertThat(dataSent()).containsExactly(1);
+        read(waiting.get(0), 3);
+
+        assertThat(dataSent()).containsExactly(3);
         assertThat(gate().blockedOnSession())
                 .containsExactly(handler(waiting.get(1)), handler(waiting.get(2)), handler(waiting.get(0)));
     }
 
     @Test
     void connectionsInLineResumeInLineOrderUntilTheSessionRunsOutAgain() {
-        DuplexEmbeddedChannel first = connect();
-        read(first, WINDOW);
-        drain();
-        List<DuplexEmbeddedChannel> waiting = List.of(connect(), connect(), connect());
-        for (DuplexEmbeddedChannel local : waiting) {
-            read(local, ascii("x"));
-        }
+        List<DuplexEmbeddedChannel> waiting = waitingInLine(3);
         assertThat(gate().blockedOnSession())
                 .containsExactly(handler(waiting.get(0)), handler(waiting.get(1)), handler(waiting.get(2)));
 
         connector.onWindowUpdate(new Frame.WindowUpdate(StreamIds.CONTROL, 2));
         connector.onReadComplete();
 
-        assertThat(dataSent()).containsExactly(1, 1);
+        assertThat(dataSent()).containsExactly(1);
         assertThat(waiting.get(0).config().isAutoRead()).isTrue();
+        assertThat(waiting.get(1).config().isAutoRead())
+                .as("the first connection may send the rest")
+                .isFalse();
+
+        recheck();
+
+        assertThat(dataSent()).as("the first connection left its credit unused").containsExactly(1);
         assertThat(waiting.get(1).config().isAutoRead())
                 .as("its byte took the last credit")
                 .isFalse();
@@ -459,6 +526,25 @@ class ReadGateTest {
     }
 
     /** Opens the next stream, whose local connection is made at once. */
+    /** {@code count} connections in line behind one that spent the session's credit, each carrying a byte. */
+    private List<DuplexEmbeddedChannel> waitingInLine(int count) {
+        read(connect(), WINDOW);
+        drain();
+        List<DuplexEmbeddedChannel> waiting = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            DuplexEmbeddedChannel local = connect();
+            read(local, ascii("x"));
+            waiting.add(local);
+        }
+        return waiting;
+    }
+
+    /** Runs the gate's look for unused credit after a partial resume. */
+    private void recheck() {
+        control.advanceTimeBy(ReadGate.RECHECK_NANOS, TimeUnit.NANOSECONDS);
+        control.runScheduledPendingTasks();
+    }
+
     private DuplexEmbeddedChannel connect() {
         DuplexEmbeddedChannel local = local();
         dials.add(control.eventLoop().newSucceededFuture(local));

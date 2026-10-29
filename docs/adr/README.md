@@ -14,4 +14,5 @@ these capture *why* a choice was made so it isn't silently reversed later. See
 | [0006](0006-cli-distribution-native-binaries.md) | CLI distribution: native binaries released through JReleaser | accepted |
 | [0007](0007-wire-protocol-v1.md) | Wire protocol v1: WebSocket transport, frame registry, versioning, strict receivers, one error code space, a pure protocol model | accepted |
 | [0008](0008-byte-path-concurrency-model.md) | Byte-path concurrency: one event loop per session, confined state, blocking work on virtual threads, epoll on Linux, a zero-copy single-owner relay | accepted |
-| [0009](0009-flow-control.md) | Flow control: stream and session credit windows announced by each receiver, credit returned for released bytes at half the window, every overrun a session error, sources read only as far as they can be sent, protocol draft 2 | accepted |
+| [0009](0009-flow-control.md) | Flow control: stream and session credit windows announced by each receiver, credit returned for released bytes at half the window, every overrun a session error, sources read only as far as they can be sent, protocol draft 2 | accepted; amended by 0010 |
+| [0010](0010-share-floor-and-visitor-receive-buffers.md) | A floor on the read gate's share, resuming only the visitors the credit covers, bounded visitor receive buffers, 4,000 streams per server, a 30% heap | accepted |

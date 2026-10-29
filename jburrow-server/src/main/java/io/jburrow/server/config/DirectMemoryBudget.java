@@ -35,15 +35,14 @@ record DirectMemoryBudget(long perSession, int sessions, int handshakes, long li
 
     /**
      * Per session: the session window (client {@code DATA} not yet written to visitors), one message that overruns it
-     * and is held until it is rejected, the session channel's high watermark plus the one frame a capped read can pass
-     * it by, and one carried byte per stream.
+     * and is held until it is rejected, and the session channel's high watermark plus the one frame a capped read can
+     * pass it by. Carried bytes are on the heap.
      */
     static DirectMemoryBudget of(JBurrowProperties.Edge edge, long maxDirectMemory) {
         long perSession = edge.sessionWindow().toBytes()
                 + FRAME
                 + edge.sessionWatermarks().high()
-                + FRAME
-                + edge.maxConcurrentStreams();
+                + FRAME;
         return new DirectMemoryBudget(perSession, edge.maxSessions(), edge.maxHandshaking(), maxDirectMemory);
     }
 
@@ -60,7 +59,7 @@ record DirectMemoryBudget(long perSession, int sessions, int handshakes, long li
         return share() > WARN_SHARE;
     }
 
-    /** For example {@code 200 sessions × 897 KiB + 64 handshakes × 64 KiB = 179 MiB of 256 MiB (70%)}. */
+    /** For example {@code 200 sessions × 896 KiB + 64 handshakes × 64 KiB = 179 MiB of 256 MiB (70%)}. */
     String describe() {
         return String.format(
                 Locale.ROOT,

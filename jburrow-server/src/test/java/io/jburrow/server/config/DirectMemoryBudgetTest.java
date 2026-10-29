@@ -19,14 +19,14 @@ class DirectMemoryBudgetTest {
     void theDefaultsMatchTheArchitecture() {
         DirectMemoryBudget budget = DirectMemoryBudget.of(edge(DataSize.ofKilobytes(512)), LIMIT);
 
-        assertThat(budget.perSession()).isEqualTo(512 * 1024 + 64 * 1024 + 256 * 1024 + 64 * 1024 + 1_000);
+        assertThat(budget.perSession()).isEqualTo(512 * 1024 + 64 * 1024 + 256 * 1024 + 64 * 1024);
         assertThat(budget.sessions()).isEqualTo(200);
         assertThat(budget.handshakes()).isEqualTo(64);
         assertThat(budget.total()).isEqualTo(200 * budget.perSession() + 64 * 64 * 1024);
         assertThat(budget.share()).isBetween(0.69, 0.71);
         assertThat(budget.exceedsWarnShare()).isFalse();
         assertThat(budget.describe())
-                .isEqualTo("200 sessions × 897 KiB + 64 handshakes × 64 KiB = 179 MiB of 256 MiB (70%)");
+                .isEqualTo("200 sessions × 896 KiB + 64 handshakes × 64 KiB = 179 MiB of 256 MiB (70%)");
     }
 
     @Test
@@ -48,7 +48,7 @@ class DirectMemoryBudgetTest {
 
         assertThat(budget.exceedsWarnShare()).isTrue();
         assertThat(budget.share()).isGreaterThan(1);
-        assertThat(budget.describe()).startsWith("200 sessions × 65921 KiB").endsWith("%)");
+        assertThat(budget.describe()).startsWith("200 sessions × 65920 KiB").endsWith("%)");
     }
 
     @Test
@@ -75,6 +75,6 @@ class DirectMemoryBudgetTest {
                 DataSize.ofKilobytes(256),
                 sessionWindow,
                 1_000,
-                20_000);
+                4_000);
     }
 }

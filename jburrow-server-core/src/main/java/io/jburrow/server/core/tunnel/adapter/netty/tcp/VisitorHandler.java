@@ -4,6 +4,7 @@ import io.jburrow.protocol.adapter.netty.CreditBoundedRecvByteBufAllocator;
 import io.jburrow.server.core.tunnel.domain.Tunnel;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
@@ -176,16 +177,23 @@ final class VisitorHandler extends ChannelInboundHandlerAdapter {
         return carry != null;
     }
 
-    /** Takes over {@code bytes}, behind whatever is already carried. */
+    /**
+     * Takes over {@code bytes}, behind whatever is already carried, copied onto the heap. On epoll a visitor that sends
+     * {@code FIN} while held back is drained of its whole receive buffer at once, and with many such visitors that
+     * would put the kernel's memory into direct memory, past the per-session budget; the heap has room for it
+     * ({@code docs/phase-2-multiplexing/ARCHITECTURE.md} §Memory budget). Unpooled, so it is freed once sent.
+     */
     void carry(ByteBuf bytes) {
+        ByteBuf onHeap = Unpooled.copiedBuffer(bytes);
+        bytes.release();
         if (carry == null) {
-            carry = bytes;
+            carry = onHeap;
             return;
         }
         if (!(carry instanceof CompositeByteBuf)) {
             carry = channel.alloc().compositeBuffer().addComponent(true, carry);
         }
-        ((CompositeByteBuf) carry).addComponent(true, bytes);
+        ((CompositeByteBuf) carry).addComponent(true, onHeap);
     }
 
     int carried() {

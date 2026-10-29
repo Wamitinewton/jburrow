@@ -1,5 +1,6 @@
 package io.jburrow.server.core.tunnel.adapter.netty.tcp;
 
+import static io.jburrow.server.core.tunnel.adapter.netty.edge.TcpSettings.KERNEL_SIZED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -45,7 +46,8 @@ class TunnelListenerTest {
     void visitorsRunOnTheListenersEventLoopWithTheirOptions() throws Exception {
         EventLoop loop = loop(NioIoHandler.newFactory());
         CompletableFuture<Channel> accepted = new CompletableFuture<>();
-        TunnelListener listener = TunnelListener.bind(loop, new InetSocketAddress(LOOPBACK, 0), recorder(accepted));
+        TunnelListener listener =
+                TunnelListener.bind(loop, new InetSocketAddress(LOOPBACK, 0), KERNEL_SIZED, recorder(accepted));
         listener.bindFuture().syncUninterruptibly();
 
         try (Socket visitor = new Socket(LOOPBACK, port(listener))) {
@@ -60,10 +62,28 @@ class TunnelListenerTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"nio", "epoll"})
+    void eachVisitorInheritsTheListenersReceiveBuffer(String transport) throws Exception {
+        int receiveBuffer = 32 * 1024;
+        CompletableFuture<Channel> accepted = new CompletableFuture<>();
+        TunnelListener listener = TunnelListener.bind(
+                loop(handlers(transport)), new InetSocketAddress(LOOPBACK, 0), receiveBuffer, recorder(accepted));
+        listener.bindFuture().syncUninterruptibly();
+
+        try (Socket visitor = new Socket(LOOPBACK, port(listener))) {
+            assertThat(accepted.get(5, TimeUnit.SECONDS).config().getOption(ChannelOption.SO_RCVBUF))
+                    .as("what was asked for, which Linux doubles")
+                    .isBetween(receiveBuffer, 2 * receiveBuffer);
+        } finally {
+            listener.close().syncUninterruptibly();
+        }
+    }
+
     @Test
     void noSecondSocketCanShareTheTunnelPortWhileItIsOpen() throws Exception {
         TunnelListener listener = TunnelListener.bind(
-                loop(NioIoHandler.newFactory()), new InetSocketAddress(LOOPBACK, 0), recorder(null));
+                loop(NioIoHandler.newFactory()), new InetSocketAddress(LOOPBACK, 0), KERNEL_SIZED, recorder(null));
         listener.bindFuture().syncUninterruptibly();
         int port = port(listener);
 
@@ -104,17 +124,13 @@ class TunnelListenerTest {
     @ParameterizedTest
     @ValueSource(strings = {"nio", "epoll"})
     void aPortInUseOnTheHostIsRecognisedOnEveryTransport(String transport) throws Exception {
-        IoHandlerFactory handlers;
-        if (transport.equals("epoll")) {
-            assumeTrue(Epoll.isAvailable(), "epoll is unavailable on this host");
-            handlers = EpollIoHandler.newFactory();
-        } else {
-            handlers = NioIoHandler.newFactory();
-        }
-        EventLoop loop = loop(handlers);
+        EventLoop loop = loop(handlers(transport));
         try (ServerSocket occupant = new ServerSocket(0, 50, LOOPBACK)) {
             ChannelFuture bind = TunnelListener.bind(
-                            loop, new InetSocketAddress(LOOPBACK, occupant.getLocalPort()), recorder(null))
+                            loop,
+                            new InetSocketAddress(LOOPBACK, occupant.getLocalPort()),
+                            KERNEL_SIZED,
+                            recorder(null))
                     .bindFuture()
                     .awaitUninterruptibly();
 
@@ -126,6 +142,14 @@ class TunnelListenerTest {
         }
     }
 
+    private static IoHandlerFactory handlers(String transport) {
+        if (transport.equals("epoll")) {
+            assumeTrue(Epoll.isAvailable(), "epoll is unavailable on this host");
+            return EpollIoHandler.newFactory();
+        }
+        return NioIoHandler.newFactory();
+    }
+
     private EventLoop loop(IoHandlerFactory handlers) {
         group = new MultiThreadIoEventLoopGroup(1, handlers);
         return group.next();
@@ -133,7 +157,7 @@ class TunnelListenerTest {
 
     private int bindThenClose(IoHandlerFactory handlers) {
         TunnelListener listener =
-                TunnelListener.bind(loop(handlers), new InetSocketAddress(LOOPBACK, 0), recorder(null));
+                TunnelListener.bind(loop(handlers), new InetSocketAddress(LOOPBACK, 0), KERNEL_SIZED, recorder(null));
         listener.bindFuture().syncUninterruptibly();
         int port = port(listener);
         listener.close().syncUninterruptibly();

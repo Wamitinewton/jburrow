@@ -552,5 +552,10 @@ final class LocalConnector {
         public void sendDeferredClose(LocalRelayHandler stream) {
             halfClose(stream);
         }
+
+        @Override
+        public void flushCarried() {
+            LocalConnector.this.flushCarried();
+        }
     }
 }
