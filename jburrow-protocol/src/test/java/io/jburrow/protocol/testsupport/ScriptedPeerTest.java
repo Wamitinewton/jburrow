@@ -201,10 +201,9 @@ class ScriptedPeerTest {
         server.expect(Frame.Hello.class, TIMEOUT);
 
         server.send(new Frame.Data(1, zeros(65_536)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
         server.send(new Frame.Data(1, zeros(1)));
 
-        Frame.Data first = client.expect(Frame.Data.class, TIMEOUT);
-        first.release();
         assertThatThrownBy(() -> client.expect(Frame.Data.class, TIMEOUT))
                 .isInstanceOf(AssertionError.class)
                 .hasMessage("Flow-control violation: the implementation sent 1 bytes of DATA on stream 1 with 0 bytes"
@@ -218,9 +217,9 @@ class ScriptedPeerTest {
         server.expect(Frame.Hello.class, TIMEOUT);
 
         server.send(new Frame.Data(1, zeros(65_536)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
         server.send(new Frame.Data(3, zeros(65_536)));
 
-        client.expect(Frame.Data.class, TIMEOUT).release();
         assertThatThrownBy(() -> client.expect(Frame.Data.class, TIMEOUT))
                 .isInstanceOf(AssertionError.class)
                 .hasMessageContaining(
