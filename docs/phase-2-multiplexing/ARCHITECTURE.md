@@ -426,7 +426,25 @@ by the round-trip time:
 "Server-bound" is visitor-to-client traffic, limited by the client's windows; "client-bound" is the
 other way. Phase 1's exit test measured 0.55 MiB/s through the tunnel, set by the laptop's uplink,
 which every row above exceeds. A tester with a fast uplink and a long round trip will be limited by
-these windows, which is what auto-tuning would fix later ([Open questions](#open-questions)).
+these windows, which is what auto-tuning ([Extension points](#extension-points)) would lift.
+
+**Measured** ([Performance](#performance) has the setup): one stream echoing 64 MiB, so carrying data
+both ways at once, with `netem` delay on every hop:
+
+| Round trip | Measured, each direction | Window ÷ round trip |
+|---|---|---|
+| 0 (loopback) | 115 MiB/s | — |
+| 20 ms | 7.0 MiB/s | 12.5 MiB/s |
+| 50 ms | 3.0 MiB/s | 5 MiB/s |
+| 100 ms | 1.51 MiB/s | 2.5 MiB/s |
+| 200 ms | 0.76 MiB/s | 1.25 MiB/s |
+
+Throughput falls exactly as one over the round trip, so the stream window is the limit where
+predicted, at a steady 56–61% of window ÷ round trip for a stream busy in both directions. The
+measurements don't separate the cause of the gap, which a one-direction run would. Every row is
+still above the 0.55 MiB/s that phase 1 measured through production, so **auto-tuning is not needed
+for phase 3**. It becomes worth building when a tester's measured rate through production falls
+below what their link carries without the tunnel.
 
 **Server session, 512 KiB.** This is the number that bounds the server's memory. It is two stream
 windows, so two visitors draining at full speed don't hold each other back, and it keeps the
@@ -434,7 +452,12 @@ per-session budget at phase 1's level ([Memory budget](#memory-budget)). A large
 would let more stalled visitors sit in it before the rest of the session feels it (see
 [Head-of-line blocking and deadlock](#head-of-line-blocking-and-deadlock)), at 512 KiB of direct
 memory per session per doubling. The trade is between memory and how many stalled visitors a session
-absorbs; it isn't a throughput question at the uplink speeds above.
+absorbs; it isn't a throughput question at the uplink speeds above. The load test found the boundary
+exactly where this predicts: one visitor that never reads leaves the session's other streams
+unaffected, and two stop its client-to-visitor direction
+([Head-of-line blocking and deadlock](#head-of-line-blocking-and-deadlock)). **512 KiB stays.** 1 MiB
+would move the boundary from two stalled visitors to four, which an attacker meets as easily, at
+twice the direct memory per session. Per-source limits (phase 6) are the defence.
 
 **Client session, 1 MiB.** The client is a developer's machine with memory to spare and one session.
 A larger window lets visitor uploads to the local service run faster on long round trips, and the
@@ -470,8 +493,9 @@ jburrow-client-core/                   io.jburrow.client
 ├── ClientSettings (+ windows)
 └── tunnel/
     ├── domain/        ClientSession (+ SessionFlow, window events), PendingData (removed)
-    └── adapter/netty/ LocalConnector (read gate, credit on delivery), LocalRelayHandler (carry
-                       slot, no pending limit), ClientLivenessHandler (pause and resume removed)
+    └── adapter/netty/ ReadGate (new), LocalConnector (credit on delivery), LocalRelayHandler
+                       (carry slot, no pending limit), ClientLivenessHandler (pause and resume
+                       removed)
 
 jburrow-server/                        io.jburrow.server
 ├── config/        JBurrowProperties (+ stream window, session window, max concurrent streams,
@@ -557,10 +581,23 @@ one term of the same minimum.
   guarantee. It costs nothing measurable at 64 KiB per read, and it replaces the scheduler HTTP/2
   implementations keep for the same purpose.
 - **Who is waiting for what.** A visitor blocked by its own stream credit is resumed by its stream's
-  `WINDOW_UPDATE`. A visitor blocked by session credit or headroom is kept in the relay's
-  `blockedOnSession` set and resumed, in the order it was blocked, when stream 0's `WINDOW_UPDATE`
-  arrives or the session channel becomes writable again. Neither event scans visitors that aren't
-  waiting.
+  `WINDOW_UPDATE`. A visitor blocked by session credit or headroom joins a line, the relay's
+  `blockedOnSession` set, and every visitor in line is resumed, in line order, when stream 0's
+  `WINDOW_UPDATE` arrives or the session channel becomes writable again. Neither event scans
+  visitors that aren't waiting.
+- **An equal share.** Whoever the event loop reads first after a resume takes the credit, and the
+  others give up a byte each, so the order of reads would decide who is served. Epoll reads resumed
+  visitors in the order they were resumed; NIO reads ready channels in an order of its own, the same
+  every time, which the gate doesn't control. So when the line is resumed, each visitor in it may
+  take at most `credit / visitors in line` (at least one byte) in its first read. The cap lifts once
+  that read is sent or held, so credit a visitor leaves unused goes to the others in later reads.
+  Every visitor in line is still resumed: resuming only as many as the credit covers would leave the
+  rest waiting, with credit unused, behind a resumed visitor that turns out to have nothing to send,
+  until a `WINDOW_UPDATE` that may never come.
+- **Turns rotate.** A visitor keeps its place in line, through any number of resumes and one-byte
+  pauses, until a read of its own is sent; then it leaves, and rejoins at the back if that read spent
+  what it could send. Without this, visitors would re-block in the order they were read, and on
+  epoll the same visitor would head the line at every grant.
 
 **The one-byte carry.** A visitor can be read when its `sendable` is 0, in two ways. One is
 deliberate: when session credit or headroom runs out, pausing every visitor of the session at once
@@ -578,9 +615,20 @@ follow the same rule so behaviour doesn't depend on the transport. An integratio
 paths with a minimal session window and many visitors sending at once, on both transports, and checks
 the server never overruns a window ([Testing](#testing)).
 
-A visitor's `FIN` still becomes `CLOSE`, once any carried byte has gone out ahead of it, since a
-half-close must follow the stream's last byte. A reset discards the carried byte and needs no credit,
-so a stream can always be reset at once.
+**A `FIN` on epoll.** Netty's epoll transport reads a source that has sent `FIN` (`EPOLLRDHUP`) to
+the end of its input in one turn, whatever `autoRead` is and whatever the allocator's
+`continueReading` answers. A visitor that half-closes while held back is therefore read past its
+credit, however the gate sized the turn's first read. Those bytes are not lost or refused: they join
+its carry, in order, and go out as credit returns, ahead of its `CLOSE`. The allocator recognises
+the drain (a second read in one turn can be nothing else) and reads it in full-sized chunks rather
+than byte by byte, so it doesn't tie up the event loop. What such a visitor holds is at most what the
+kernel had already received for it, its socket receive buffer, which the pod was charged for already;
+it moves from kernel memory into direct memory ([Memory budget](#memory-budget)). NIO has no such
+drain: a paused visitor's `FIN` is read when it is next resumed.
+
+A visitor's `FIN` still becomes `CLOSE`, once any carried bytes have gone out ahead of it, since a
+half-close must follow the stream's last byte. A reset discards the carried bytes and needs no
+credit, so a stream can always be reset at once.
 
 ### Client to visitor: credit on delivery
 
@@ -608,6 +656,7 @@ one per 256 KiB per session) that coalescing their flushes would buy nothing.
 | `jburrow.edge.visitor-write-buffer` | Removed. What a visitor channel holds is bounded by the stream window, so its watermarks no longer drive anything. |
 | `LivenessHandler.pause` and `resume` | Removed, along with their callers. The server never stops reading a client for flow control any more. `Liveness`'s pausing rules stay in the protocol model, which the specification still allows. |
 | Second visitor refused (`maxConcurrentStreams` 1) | 1,000 streams per session, 20,000 per server. |
+| Tunnel listener backlog 128 | 1,024, as the edge's. A burst of visitors beyond the accept queue loses each handshake's last ACK while the visitor already thinks it is connected, and waits seconds for the kernel's retries: `ManyStreamsIntegrationTest`'s 500 connections at once found it. The kernel caps the backlog at `net.core.somaxconn` (4,096 by default since Linux 5.4). |
 
 ## The client
 
@@ -617,12 +666,14 @@ The client is the server's mirror, with "visitor" read as "local connection", as
   server's windows). Each stream's entry carries its `StreamFlow` next to its lifecycle.
 - **`HELLO`** carries `ClientSettings.windows()`, by default 256 KiB and 1 MiB. They aren't CLI flags:
   nobody running `jburrow tcp` needs to tune them, and an embedding application can set them through
-  the builder.
+  the builder (`JBurrowClient.Builder.windows`).
 - **Local reads** go through the same `CreditBoundedRecvByteBufAllocator` with the same `sendable`
   minimum (stream credit, session credit, control channel headroom, and `limits.maxFramePayload`
   instead of 65,536). Phase 1's loop that split a large read into frames goes, since no read is
-  larger than one frame. The client is always on NIO, so the one-byte carry never triggers there; the
-  code is shared and the rule is the same.
+  larger than one frame. The gate is the client's own `ReadGate`, of the same shape and rules as the
+  server's: the two sides share no module but the protocol (ADR-0002). The client is always on NIO,
+  so epoll's forced reads never happen there, but lazy pausing still gives up one byte to a carry,
+  and the rule is the same.
 - **Server `DATA`** is written to the local connection with a promise, and credit goes back on
   completion. While the local connection is still being made, payloads wait in the stream's queue as
   in phase 1. The queue is bounded by the client's stream window, because the server can't send more
@@ -651,6 +702,11 @@ enough visitor connections can always do this to one tunnel, as they can open it
 worth of connections and hold them. The defences are per-source limits on visitor connections, which
 are phase 6. What phase 2 guarantees is that this attack can't reach another session or the server's
 memory.
+
+The load test shows the boundary sharply. A probe echoing 64 bytes every 100 ms beside one visitor
+that uploads and never reads kept a p99 of 6.2 ms (5.6 ms with no stalled visitor). With two such
+visitors, the server's session window ÷ its stream window, the probe got one echo in 45 s, and the
+same with twenty. The session recovered as soon as the stalled visitors closed.
 
 ## Liveness
 
@@ -719,7 +775,7 @@ The pod limit, the JVM settings and the 256 MiB direct memory cap are phase 1's.
 | Client `DATA` received and not yet written to visitors: the server's session window | 512 KiB |
 | One message from a client that overruns its window, held until it is rejected | 64 KiB |
 | Session channel outbound buffer: high watermark plus one frame | 256 KiB + 64 KiB |
-| Carried bytes, at most one per stream | 1 KiB at 1,000 streams |
+| Carried bytes, at most one per stream (but see below) | 1 KiB at 1,000 streams |
 | **Total** | **≈ 0.88 MiB** |
 
 200 sessions use at most about 175 MiB, and 64 handshaking connections about 4 MiB more: 179 MiB of
@@ -731,18 +787,35 @@ visitors become readable at once. Phase 1's buffer could pass it by one frame pe
 in the same event-loop turn, which was harmless with one visitor and wouldn't have been with a
 thousand.
 
+**Also not in this table**: on epoll, a visitor that sends `FIN` while held back is read to the end
+at once ([A `FIN` on epoll](#visitor-to-client-the-read-gate)), and what it sent past its credit is
+carried until credit returns: at most its socket receive buffer, about 128 KiB unless the kernel has
+grown it for a fast reader (`net.ipv4.tcp_rmem`'s maximum, 6 MiB, at most). It was already in the pod's
+kernel memory, and only moves to direct memory. Many visitors doing this to a session held back at
+once is the case to watch; `SO_RCVBUF` on visitor channels caps it if the load test shows it matters.
+
 **Not in this table**: kernel socket buffers. Credit is returned when a write reaches a visitor's
 socket, so what the kernel holds for a slow visitor is outside the window. Linux sizes a socket's
 send buffer to its traffic, up to `net.ipv4.tcp_wmem`'s maximum (4 MiB by default), and cgroup v2
 charges it to the pod. A visitor that reads fast enough to grow its buffer and then stops leaves that
-buffer full. Phase 1 had the same exposure with one visitor per session; with 20,000 it matters. The
-load test measures socket memory under many stalled visitors (`ss -tm`, the pod's memory), and
-`SO_SNDBUF` on visitor channels is the lever if it has to be capped ([Open questions](#open-questions)).
+buffer full. Phase 1 had the same exposure with one visitor per session; with 20,000 it matters.
+
+**Measured**, with 1,000 visitors on one session that upload continuously and never read, after
+60 s (`ss -tm` on the tunnel port): the server's visitor sockets held **124.5 MB in their receive
+queues**, each at its default 128 KiB `rcvbuf`, and **nothing in their send queues**. A visitor
+without credit isn't read, so what it sends waits in the server's kernel. Almost nothing reaches
+such visitors: after the first two, the session window stops the client-to-visitor direction, and
+their own receive buffers took the rest. So the kernel memory that grows with stream count is the
+receive side, about 125 KB per held-back visitor, not send buffers, and **`SO_SNDBUF` isn't needed**.
+At `max-streams` (20,000) the receive side comes to about 2.3 GiB. That is over the pod's 1 GiB
+limit, so the server-wide stream cap doesn't keep the pod within its memory
+([Open questions](#open-questions)).
 
 **Heap.** Per stream the server keeps a channel, its pipeline, a `VisitorHandler`, a lifecycle and a
-`StreamFlow`, a few KiB in all, and nothing that grows with the bytes carried. The slow-client test
-measures heap after garbage collection at two points of a long transfer and requires it not to grow
-between them.
+`StreamFlow`, and nothing that grows with the bytes carried. The slow-client test measures heap
+after garbage collection at two points of a long transfer and requires it not to grow between them.
+**Measured**: 2.8 KiB of heap per open stream after a full collection (35.9 MiB idle, 38.7 MiB with
+1,000 streams open), so 20,000 streams need about 55 MiB on top of an idle server's 36 MiB.
 
 ## Performance
 
@@ -753,13 +826,33 @@ between them.
   per stream, and one per 256 KiB on stream 0. Less than 0.02% of the data.
 - **Pausing at scale.** Turning `autoRead` off and on is a system call per visitor on epoll. When a
   session's credit or headroom runs out, only the visitors that are actually read are paused (each
-  after a one-byte read), and only the ones waiting are resumed; idle visitors cost nothing. In the
-  worst case (1,000 active visitors on a session limited by its client's link) that is a few thousand
-  `epoll_ctl` calls and one-byte frames per second, a small fraction of a core. The load test
-  measures it.
+  after a one-byte read), and only the ones waiting are resumed; idle visitors cost nothing. The
+  load test found that the equal share costs more than the pausing does (below).
 - **Latency.** An interactive stream (SSH) next to bulk streams waits at most one turn of reads, each
-  at most 64 KiB, before its next frame is read. The load test reports added p99 latency for a small
-  echo stream alongside 499 bulk streams.
+  at most 64 KiB, before its next frame is read.
+
+**Measured** with [`scripts/load/StreamLoad.java`](../../scripts/load/README.md) on a laptop (Intel
+i5-8365U, 4 cores, Linux 6.19, JDK 21.0.11), with the server on epoll under phase 1's JVM settings
+(768 MiB heap, 256 MiB direct memory). The server, the JVM CLI, the echo service and the driver ran
+on loopback in one network namespace, so `tc` shaped only their traffic:
+
+| Scenario | Result |
+|---|---|
+| 500 visitors × 1 MiB each way, one session | Every checksum matched; 44.8 MiB/s both ways; connect p99 5.8 ms; completion p99 22.3 s |
+| A 64-byte echo every 100 ms, beside 0, 1, 2 and 20 visitors that never read | p99 5.6 ms, 6.2 ms, then stalled with two or more ([Head-of-line blocking and deadlock](#head-of-line-blocking-and-deadlock)) |
+| One stream at round trips of 0 to 200 ms | Throughput ∝ 1 / round trip, at 56–61% of window ÷ round trip ([Choosing the windows](#choosing-the-windows)) |
+| 1,000 visitors that never read, 60 s | 124.5 MB in the server's socket receive queues, none in send queues ([Memory budget](#memory-budget)) |
+| 1,000 visitors × 256 KiB each way, client link 20 Mbit | 1.83 MiB/s (77% of the link); server 15.2% of a core, CLI 14.0%; 1.71 million packets on the link |
+| 10 visitors × 25 MiB each way, same link | 2.36 MiB/s (99% of the link); server 1.9% of a core, CLI 2.5%; 35,000 packets |
+| 1,000 visitors held open | 2.8 KiB of heap per stream after a full collection |
+
+The two link-limited rows carry the same bytes; the difference between them is the cost of 1,000
+visitors competing for session credit. Pausing doesn't account for it. The **equal share** does:
+each visitor resumed from a line of 1,000 may take one thousandth of the credit returned, so `DATA`
+frames averaged **247 bytes** client to server and **540 bytes** server to client, against 14 KB
+and 23 KB with 10 visitors. That means 48 times the packets, a quarter of the bytes on the link spent
+on headers, and 8 times the CPU. Both sides' read gates follow the same rule, so both pay for it
+([Open questions](#open-questions)).
 - **Opening many streams at once.** The client resolves each local target on a virtual thread
   (phase 1), so 500 simultaneous `OPEN`s resolve in parallel without blocking the event loop.
 
@@ -786,11 +879,17 @@ Phase 1's threats and mitigations stand. Phase 2 changes these:
 | The client's network is slow | Session credit and the session channel's headroom run out; visitors are paused in turn and resumed as credit returns. Server memory stays at its budget. |
 | The local service stops reading an upload | The client withholds that stream's credit; the server stops reading that visitor. |
 | A buggy client sends past a window | `ERROR FLOW_CONTROL_ERROR`, the session closes, the CLI exits with code 6. |
-| A phase 1 CLI connects to the phase 2 server | `UNSUPPORTED_PROTOCOL_VERSION`, exit code 6, "upgrade jburrow". |
+| A buggy server sends past the client's window | The client sends `ERROR FLOW_CONTROL_ERROR` and closes the session; the CLI exits with code 6. |
+| A phase 1 CLI connects to the phase 2 server | `UNSUPPORTED_PROTOCOL_VERSION`, exit code 6: "This server speaks jburrow.v1-draft.2; upgrade jburrow." |
+
+`FLOW_CONTROL_ERROR` joins exit code 6 (protocol mismatch or violation: upgrade the CLI, or report a bug)
+next to `PROTOCOL_ERROR`, extending phase 1's exit code table
+([phase 1 §The CLI](../phase-1-tcp-tunnel/ARCHITECTURE.md#the-cli)), which is otherwise unchanged.
 | 1,001st visitor to a session | Closed at once, counted as `stream_limit`. |
 | 20,001st visitor to the server | Closed at once, counted as `server_stream_limit`. |
 | The session ends with many streams open | Each is reset with `CANCELLED`, as in phase 1; queued writes fail, their credit is released into a session that is gone, and nothing is sent. |
 | Many visitors become readable as session credit runs out | Each one read with no credit gives up at most one byte, is paused, and waits its turn; idle visitors aren't touched. |
+| A visitor sends the rest of an upload and `FIN` while held back | On epoll it is read to the end at once and what it sent past its credit is carried; on NIO it is read when resumed. Either way every byte goes out as credit returns, then `CLOSE`. |
 
 ## Testing
 
@@ -823,8 +922,10 @@ good as its peer's strictness.
 **Load test.** `scripts/load/StreamLoad.java` is a single-file Java program (`java StreamLoad.java`,
 no build, no dependencies) that opens N concurrent connections to a tunnel, sends a set number of
 bytes on each, reads them back from an echo service, checks each checksum, and reports connect and
-completion latency percentiles and total throughput. It runs by hand, against a local server and
-against production, and is the instrument for the exit criteria and the open questions.
+completion latency percentiles and total throughput. It can add connections that upload and never
+read, and a probe that times small echoes beside them. It runs by hand, against a local server and
+against production, and is the instrument for the exit criteria; [Performance](#performance) has
+its local results.
 
 ## Build, CI and packaging
 
@@ -866,16 +967,30 @@ The deployment runbook's phase 2 section has the steps.
 
 ## Open questions
 
-- **Auto-tuning.** At 200 ms, one stream tops out at 1.25 MiB/s. If testers with fast uplinks hit it,
-  the extension above lifts it. Decided by the load test against a real long round trip.
-- **Kernel socket memory.** Whether visitor send buffers need `SO_SNDBUF`, and at what size, depends on
-  what the load test sees with thousands of stalled visitors.
-- **Heap and direct memory split.** The pod's JVM settings give the heap 75% of 1 GiB and direct
-  memory 256 MiB. Once the load test has measured heap use with 1,000 streams per session, the split
-  may be worth rebalancing.
-- **A larger server session window.** 512 KiB lets two stalled visitors fill a session's
-  client-to-visitor direction. If phase 6's per-source limits come later than expected, 1 MiB (with
-  `max-sessions` lowered to keep the budget) is the alternative.
+The load test settled auto-tuning (not for phase 3, [Choosing the windows](#choosing-the-windows)),
+`SO_SNDBUF` (not needed, [Memory budget](#memory-budget)) and the server session window (512 KiB
+stays). It raised the first two questions below, and both need a decision before the production
+rollout.
+
+- **Visitor receive buffers against the pod's memory.** A held-back visitor parks about 125 KB in
+  the server's kernel, so 20,000 of them would need about 2.3 GiB of a 1 GiB pod. The levers can be
+  combined. `SO_RCVBUF` on visitor channels caps each visitor, but it also turns off the kernel's
+  receive auto-tuning, so it caps that visitor's upload rate at the buffer ÷ its round trip, and it
+  bounds what epoll's `FIN` drain can move into direct memory. A lower `max-streams` caps the count.
+  The heap is the third lever: 36 MiB idle plus 2.8 KiB per stream is a small fraction of the 768 MiB
+  that 75% gives it, and the slack is what kernel socket memory needs. Whatever is chosen goes into
+  [Memory budget](#memory-budget) and the startup budget check.
+- **Small frames when many visitors share a session's credit.** The equal share
+  ([The read gate](#visitor-to-client-the-read-gate)) splits returned credit into frames of a few
+  hundred bytes once hundreds of visitors are in line, which cost 8 times the CPU and 22% of the
+  link's throughput in the load test. One candidate fix is a floor on the share, say 16 KiB, while
+  still resuming every visitor in line. Fairness then holds across successive grants rather than
+  within each one, and turns already rotate. The change would apply to both read gates and to
+  `ReadGateIntegrationTest`'s fairness check.
+- **Paused readers on HTTP tunnels (phase 3).** Two visitors that stop reading are enough to stop a
+  session's client-to-visitor direction. With raw TCP that takes deliberate stalling. With HTTP it
+  happens in ordinary use: a browser stops reading a media response once it has buffered enough.
+  Phase 3's design has to answer that, because per-source limits don't.
 
 ## Exit criteria
 

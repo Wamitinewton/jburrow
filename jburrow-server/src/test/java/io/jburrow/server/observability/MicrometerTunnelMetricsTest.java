@@ -8,6 +8,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.server.core.portpool.application.port.PortPoolSnapshot;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Direction;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FlowScope;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FrameDirection;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.SessionEnd;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Side;
@@ -63,7 +64,7 @@ class MicrometerTunnelMetricsTest {
                 .map(tag -> tag.getKey())
                 .collect(Collectors.toSet());
 
-        assertThat(keys).isSubsetOf("result", "reason", "kind", "code", "side", "type", "direction", "state");
+        assertThat(keys).isSubsetOf("result", "reason", "kind", "code", "side", "type", "direction", "state", "scope");
     }
 
     @Test
@@ -103,6 +104,7 @@ class MicrometerTunnelMetricsTest {
         metrics.frame(FrameType.DATA, FrameDirection.SENT);
         metrics.protocolError(ErrorCode.FRAME_SIZE_ERROR, Side.REMOTE);
         metrics.backpressurePaused(Direction.OUTBOUND);
+        metrics.flowBlocked(FlowScope.SESSION);
         metrics.visitorRefused(StreamAdmission.Refusal.STREAM_LIMIT);
 
         assertThat(gauge("jburrow.streams.active", "kind", "tcp")).isOne();
@@ -132,11 +134,53 @@ class MicrometerTunnelMetricsTest {
                 .isOne();
         assertThat(counter("jburrow.backpressure.pauses", "direction", "outbound"))
                 .isOne();
+        assertThat(counter("jburrow.flow.blocked", "scope", "session")).isOne();
+        assertThat(counter("jburrow.flow.blocked", "scope", "stream")).isZero();
         assertThat(counter("jburrow.visitor.connections.refused", "reason", "stream_limit"))
                 .isOne();
 
         metrics.streamClosed(TunnelKind.TCP);
         assertThat(gauge("jburrow.streams.active", "kind", "tcp")).isZero();
+    }
+
+    @Test
+    void registersAndCountsTheFlowControlSeries() {
+        assertThat(counter("jburrow.flow.blocked", "scope", "stream")).isZero();
+        assertThat(counter("jburrow.flow.blocked", "scope", "session")).isZero();
+        assertThat(counter("jburrow.visitor.connections.refused", "reason", "server_stream_limit"))
+                .isZero();
+        assertThat(registry.get("jburrow.protocol.errors")
+                        .tag("code", "FLOW_CONTROL_ERROR")
+                        .counters())
+                .hasSize(Side.values().length);
+
+        metrics.flowBlocked(FlowScope.STREAM);
+        metrics.flowBlocked(FlowScope.STREAM);
+        metrics.visitorRefused(StreamAdmission.Refusal.SERVER_STREAM_LIMIT);
+        metrics.protocolError(ErrorCode.FLOW_CONTROL_ERROR, Side.LOCAL);
+        metrics.frame(FrameType.WINDOW_UPDATE, FrameDirection.RECEIVED);
+
+        assertThat(counter("jburrow.flow.blocked", "scope", "stream")).isEqualTo(2);
+        assertThat(counter("jburrow.visitor.connections.refused", "reason", "server_stream_limit"))
+                .isOne();
+        assertThat(registry.get("jburrow.protocol.errors")
+                        .tag("code", "FLOW_CONTROL_ERROR")
+                        .tag("side", "local")
+                        .counter()
+                        .count())
+                .isOne();
+        assertThat(registry.get("jburrow.frames")
+                        .tag("type", "window_update")
+                        .tag("direction", "received")
+                        .counter()
+                        .count())
+                .isOne();
+        assertThat(registry.get("jburrow.frames")
+                        .tag("type", "window_update")
+                        .tag("direction", "sent")
+                        .counter()
+                        .count())
+                .isZero();
     }
 
     @Test

@@ -90,6 +90,7 @@ final class ControlFrameHandler extends ChannelInboundHandlerAdapter {
                     handedOn = true;
                     streams.onData(data);
                 }
+                case Frame.WindowUpdate update -> streams.onWindowUpdate(update);
                 case Frame.Close close -> streams.onClose(close);
                 case Frame.Error error -> connection.peerFailed(error.body());
                 case Frame.Ping ping -> {}

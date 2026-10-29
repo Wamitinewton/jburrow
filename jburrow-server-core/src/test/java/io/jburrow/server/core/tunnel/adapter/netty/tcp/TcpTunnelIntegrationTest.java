@@ -42,7 +42,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The server half of a TCP tunnel over real sockets: real visitor connections on one side, {@link ScriptedPeer}
- * playing the client by hand on the other.
+ * playing the client by hand on the other, returning credit as a correct client does.
  */
 class TcpTunnelIntegrationTest {
 
@@ -57,6 +57,7 @@ class TcpTunnelIntegrationTest {
     void stop() throws Exception {
         if (harness != null) {
             harness.close();
+            assertThat(harness.streamQuota.inUse()).isZero();
         }
         threads.shutdownNow();
     }
@@ -65,7 +66,7 @@ class TcpTunnelIntegrationTest {
     void aVisitorBecomesAStreamOnTheSessionsEventLoopAndBytesFlowBothWays() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             Frame.Open open = peer.expect(Frame.Open.class, TIMEOUT);
@@ -93,7 +94,8 @@ class TcpTunnelIntegrationTest {
     void eightMebibytesEachWayArriveIntact() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
+        peer.ignoreWindowUpdates();
         byte[] up = randomBytes(1);
         byte[] down = randomBytes(2);
 
@@ -106,7 +108,7 @@ class TcpTunnelIntegrationTest {
             Future<?> download = threads.submit(() -> {
                 for (int offset = 0; offset < down.length; offset += FrameLimits.MAX_DATA_PAYLOAD) {
                     int length = Math.min(FrameLimits.MAX_DATA_PAYLOAD, down.length - offset);
-                    peer.send(new Frame.Data(1, Unpooled.wrappedBuffer(down, offset, length)));
+                    peer.sendData(1, Unpooled.wrappedBuffer(down, offset, length), TIMEOUT);
                 }
                 return null;
             });
@@ -125,7 +127,7 @@ class TcpTunnelIntegrationTest {
     void theVisitorClosingItsHalfFirstStillReceivesUntilTheClientCloses() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -149,7 +151,7 @@ class TcpTunnelIntegrationTest {
     void theClientClosingItsHalfFirstStillReceivesUntilTheVisitorCloses() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -169,7 +171,7 @@ class TcpTunnelIntegrationTest {
     void aVisitorResetBecomesClosePeerReset() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
         Socket visitor = visitor(tunnel);
         peer.expect(Frame.Open.class, TIMEOUT);
 
@@ -183,7 +185,7 @@ class TcpTunnelIntegrationTest {
     void aClientResetResetsTheVisitorConnection() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -200,7 +202,7 @@ class TcpTunnelIntegrationTest {
     void dataFromTheClientAfterItsOwnCloseIsResetWithStreamClosed() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -216,7 +218,7 @@ class TcpTunnelIntegrationTest {
     void dataOnAStreamNeverOpenedEndsTheSessionWithProtocolError() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -228,23 +230,26 @@ class TcpTunnelIntegrationTest {
     }
 
     @Test
-    void aSecondVisitorIsClosedAtOnceAndTheNextStreamAfterTheFirstIsTwo() throws Exception {
+    void aSecondVisitorGetsTheNextStreamAndBothRelayAtOnce() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
-        Socket first = visitor(tunnel);
-        peer.expect(Frame.Open.class, TIMEOUT);
+        RegisteredTunnel tunnel = establish(peer);
 
-        try (Socket second = visitor(tunnel)) {
-            assertThat(second.getInputStream().read()).isEqualTo(-1);
-        }
-        awaitTrue(() -> harness.metrics.events().contains("visitorRefused STREAM_LIMIT"));
-        first.setSoLinger(true, 0);
-        first.close();
-        assertThat(peer.expect(Frame.Close.class, TIMEOUT)).isEqualTo(Frame.Close.reset(1, ErrorCode.PEER_RESET));
-
-        try (Socket third = visitor(tunnel)) {
+        try (Socket first = visitor(tunnel);
+                Socket second = visitor(tunnel)) {
+            assertThat(peer.expect(Frame.Open.class, TIMEOUT).streamId()).isEqualTo(1);
             assertThat(peer.expect(Frame.Open.class, TIMEOUT).streamId()).isEqualTo(2);
+
+            write(second, "two");
+            assertThat(readData(peer, 2, 3)).isEqualTo("two".getBytes(StandardCharsets.US_ASCII));
+            write(first, "one");
+            assertThat(readData(peer, 1, 3)).isEqualTo("one".getBytes(StandardCharsets.US_ASCII));
+            peer.send(new Frame.Data(1, Unpooled.copiedBuffer("eno", StandardCharsets.US_ASCII)));
+            peer.send(new Frame.Data(2, Unpooled.copiedBuffer("owt", StandardCharsets.US_ASCII)));
+
+            assertThat(readFully(second.getInputStream(), 3)).isEqualTo("owt".getBytes(StandardCharsets.US_ASCII));
+            assertThat(readFully(first.getInputStream(), 3)).isEqualTo("eno".getBytes(StandardCharsets.US_ASCII));
+            assertThat(openVisitors()).hasSize(2);
         }
     }
 
@@ -252,7 +257,7 @@ class TcpTunnelIntegrationTest {
     void theSessionClosingResetsItsVisitorAndFreesItsPort() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -271,7 +276,7 @@ class TcpTunnelIntegrationTest {
     void shuttingDownResetsOpenStreamsWithCancelledBeforeTheError() throws Exception {
         start();
         ScriptedPeer peer = harness.connect();
-        RegisteredTunnel tunnel = harness.establish(peer, null);
+        RegisteredTunnel tunnel = establish(peer);
 
         try (Socket visitor = visitor(tunnel)) {
             peer.expect(Frame.Open.class, TIMEOUT);
@@ -287,7 +292,7 @@ class TcpTunnelIntegrationTest {
     @Test
     void noOtherSocketCanShareAnOpenTunnelPort() throws Exception {
         start();
-        RegisteredTunnel tunnel = harness.establish(harness.connect(), null);
+        RegisteredTunnel tunnel = establish(harness.connect());
 
         try (ServerSocket hijacker = new ServerSocket()) {
             hijacker.setReuseAddress(true);
@@ -307,7 +312,7 @@ class TcpTunnelIntegrationTest {
                 Duration.ofSeconds(45));
 
         try (ServerSocket occupant = new ServerSocket(occupied, 50, InetAddress.getLoopbackAddress())) {
-            RegisteredTunnel tunnel = harness.establish(harness.connect(), null);
+            RegisteredTunnel tunnel = establish(harness.connect());
 
             assertThat(tunnel.publicPort()).isEqualTo(occupied + 1);
             assertThat(harness.ports.snapshot().quarantined()).isOne();
@@ -360,13 +365,23 @@ class TcpTunnelIntegrationTest {
         return new Frame.Data(1, Unpooled.copiedBuffer(text, StandardCharsets.US_ASCII));
     }
 
-    /** Collects {@code length} payload bytes from {@code DATA} frames on stream 1, each at most 64 KiB. */
+    private RegisteredTunnel establish(ScriptedPeer peer) {
+        RegisteredTunnel tunnel = harness.establish(peer, null);
+        peer.autoGrant();
+        return tunnel;
+    }
+
     private static byte[] readData(ScriptedPeer peer, int length) {
+        return readData(peer, 1, length);
+    }
+
+    /** Collects {@code length} payload bytes from {@code DATA} frames on {@code streamId}, each at most 64 KiB. */
+    private static byte[] readData(ScriptedPeer peer, int streamId, int length) {
         ByteArrayOutputStream received = new ByteArrayOutputStream(length);
         while (received.size() < length) {
             Frame.Data data = peer.expect(Frame.Data.class, TIMEOUT);
             try {
-                assertThat(data.streamId()).isEqualTo(1);
+                assertThat(data.streamId()).isEqualTo(streamId);
                 ByteBuf payload = data.payload();
                 assertThat(payload.readableBytes()).isBetween(1, FrameLimits.MAX_DATA_PAYLOAD);
                 byte[] bytes = new byte[payload.readableBytes()];

@@ -172,7 +172,8 @@ class JBurrowClientBuilderTest {
                 new TunnelEvents() {},
                 ClientSettings.clientInfo("jburrow-cli", "0.2.0"),
                 Optional.empty(),
-                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT);
+                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+                ClientSettings.DEFAULT_WINDOWS);
 
         assertThat(settings.userAgent()).matches("jburrow-cli/0\\.2\\.0 \\([a-z0-9_]+; [a-z0-9_]+\\)");
         assertThat(settings.clientInfo().os()).matches("[a-z0-9_]{1,32}");
@@ -201,6 +202,7 @@ class JBurrowClientBuilderTest {
                 new TunnelEvents() {},
                 ClientSettings.clientInfo("jburrow-test", "1.0.0"),
                 Optional.empty(),
-                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT);
+                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+                ClientSettings.DEFAULT_WINDOWS);
     }
 }

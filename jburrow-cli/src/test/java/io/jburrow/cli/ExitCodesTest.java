@@ -24,7 +24,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import picocli.CommandLine;
 import picocli.CommandLine.ParameterException;
 
-/** ARCHITECTURE.md §The CLI's exit code table, row for row. */
+/** Phase 1 ARCHITECTURE.md §The CLI's exit code table, row for row, and phase 2's {@code FLOW_CONTROL_ERROR}. */
 class ExitCodesTest {
 
     @ParameterizedTest(name = "{0} exits {1}")

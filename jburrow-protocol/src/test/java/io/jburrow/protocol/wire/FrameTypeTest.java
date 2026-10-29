@@ -21,7 +21,7 @@ class FrameTypeTest {
                 arguments(FrameType.OPEN, 0x03, StreamKind.DATA, 16_384),
                 arguments(FrameType.HEADERS, 0x04, StreamKind.DATA, 16_384),
                 arguments(FrameType.DATA, 0x05, StreamKind.DATA, 65_536),
-                arguments(FrameType.WINDOW_UPDATE, 0x06, StreamKind.DATA, 4),
+                arguments(FrameType.WINDOW_UPDATE, 0x06, StreamKind.ANY, 4),
                 arguments(FrameType.CLOSE, 0x07, StreamKind.DATA, 64),
                 arguments(FrameType.PING, 0x08, StreamKind.CONTROL, 8),
                 arguments(FrameType.PONG, 0x09, StreamKind.CONTROL, 8),
@@ -34,9 +34,16 @@ class FrameTypeTest {
     void matchesTheArchitectureTable(FrameType type, int code, StreamKind streamKind, int maxPayload) {
         assertThat(type.code()).isEqualTo(code);
         assertThat(type.streamKind()).isEqualTo(streamKind);
-        assertThat(type.onControlStream()).isEqualTo(streamKind == StreamKind.CONTROL);
         assertThat(type.maxPayload()).isEqualTo(maxPayload);
         assertThat(FrameType.fromCode(code)).contains(type);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("registry")
+    void allowsTheStreamsOfItsKind(FrameType type, int code, StreamKind streamKind, int maxPayload) {
+        assertThat(type.allowsStream(0)).isEqualTo(streamKind != StreamKind.DATA);
+        assertThat(type.allowsStream(1)).isEqualTo(streamKind != StreamKind.CONTROL);
+        assertThat(type.allowsStream(StreamIds.MAX)).isEqualTo(streamKind != StreamKind.CONTROL);
     }
 
     @Test

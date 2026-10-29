@@ -238,13 +238,15 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
     }
 
     /**
-     * {@code WINDOW_UPDATE}: flow-control credit, from 1 to 2^31 - 1. Decoded and encodable, but no session of
-     * {@code jburrow.v1-draft.1} accepts it.
+     * {@code WINDOW_UPDATE}: flow-control credit, from 1 to 2^31 - 1, for the session window on stream 0 or for one
+     * stream's window on a data stream.
      */
     record WindowUpdate(int streamId, int increment) implements NoBuffer {
 
         public WindowUpdate {
-            requireDataStream(streamId);
+            if (streamId < StreamIds.CONTROL) {
+                throw new IllegalArgumentException("A stream id must be 0 to 2^31 - 1: " + streamId);
+            }
             if (increment < 1) {
                 throw new IllegalArgumentException("Window increment must be 1 to 2^31 - 1: " + increment);
             }
@@ -335,7 +337,7 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
 
     /**
      * A {@code HEADERS} or {@code GOAWAY} frame, decoded only as far as its header: their payloads belong to phases 3
-     * and 4. No peer of {@code jburrow.v1-draft.1} may send either, so a session treats this as
+     * and 4. No peer of {@code jburrow.v1-draft.2} may send either, so a session treats this as
      * {@code PROTOCOL_ERROR}. It is never encoded.
      */
     record Unsupported(int streamId, FrameType type) implements NoBuffer {
@@ -344,7 +346,7 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
             if (type != FrameType.HEADERS && type != FrameType.GOAWAY) {
                 throw new IllegalArgumentException(type + " is a supported frame type");
             }
-            if (type.onControlStream() != (streamId == StreamIds.CONTROL)) {
+            if (!type.allowsStream(streamId)) {
                 throw new IllegalArgumentException(type + " can't be on stream " + streamId);
             }
         }

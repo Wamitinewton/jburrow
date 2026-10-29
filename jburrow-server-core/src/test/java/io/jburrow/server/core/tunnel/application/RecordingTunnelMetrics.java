@@ -108,6 +108,11 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
     }
 
     @Override
+    public void flowBlocked(FlowScope scope) {
+        record("flowBlocked", scope);
+    }
+
+    @Override
     public void bindPortPool(Supplier<PortPoolSnapshot> snapshot) {
         portPool = snapshot;
     }

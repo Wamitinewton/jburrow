@@ -3,9 +3,16 @@ package io.jburrow.server.e2e;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.InterruptedIOException;
+import java.net.Socket;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -16,17 +23,27 @@ import org.springframework.test.context.TestPropertySource;
 
 /**
  * The log of the {@link ObservedScenario}: every line {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Observability
- * promises, with its fields, and nothing that must never be logged.
+ * promises, with its fields and those {@code docs/phase-2-multiplexing/ARCHITECTURE.md} §Observability adds, and
+ * nothing that must never be logged.
  */
 @TestPropertySource(
         properties = {
             "jburrow.tcp.port-range=31500-31599",
+            "jburrow.edge.max-concurrent-streams=1",
             "jburrow.edge.ping-interval=1s",
             "jburrow.edge.idle-timeout=2s"
         })
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @ExtendWith(OutputCaptureExtension.class)
 class LogHygieneIntegrationTest extends TunnelTestSupport {
+
+    private static final Pattern BLOCKED_MS = Pattern.compile(" blockedMs=(\\d+) ");
+    /** An echo of a few kilobytes never runs out of credit; a little over 0 allows for a scheduling hiccup. */
+    private static final Duration UNBLOCKED_BOUND = Duration.ofMillis(100);
+
+    private static final Duration UNDRAINED = Duration.ofSeconds(2);
+    /** More than the client's stream window and the local connection's socket buffers can take. */
+    private static final long HELD_BACK_UPLOAD = 8L * 1024 * 1024;
 
     private ObservedScenario scenario;
     /** The scenario's output. The extension starts a new capture for each test, so it is kept here. */
@@ -56,6 +73,7 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
                         "reason=client_closed",
                         "duration=",
                         "streams=" + ObservedScenario.STREAMS,
+                        "maxStreams=1",
                         "bytesIn=" + (scenario.echoedBytes() + scenario.resetStreamBytes()),
                         "bytesOut=" + scenario.echoedBytes());
     }
@@ -73,9 +91,41 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
                         "bytesOut=" + scenario.echoedBytes(),
                         "duration=",
                         "ending=\"closed\"");
+        assertThat(blockedMillis(streams.get(0)))
+                .as("time an echo stream waited for credit")
+                .isLessThan(UNBLOCKED_BOUND.toMillis());
         assertThat(streams.get(1))
                 .contains(
                         "stream=2", "bytesIn=" + scenario.resetStreamBytes(), "ending=\"reset by client PEER_RESET\"");
+    }
+
+    /** The client's local service reads nothing for {@link #UNDRAINED}, so the visitor waits for its stream's credit. */
+    @Test
+    void aStreamWhoseClientDoesNotDrainLogsHowLongItWaitedForCredit(CapturedOutput output) throws Exception {
+        CompletableFuture<Received> received = new CompletableFuture<>();
+        LocalService late = closeAfterTest(LocalService.start(connection -> {
+            pause(UNDRAINED);
+            received.complete(drain(connection.getInputStream()));
+        }));
+        Tunnel tunnel = openTunnel(late);
+        String sessionId = tunnel.handle().sessionId();
+
+        Socket visitor = visit(tunnel.port());
+        String sent = send(visitor.getOutputStream(), HELD_BACK_UPLOAD, 5);
+        visitor.shutdownOutput();
+        assertThat(received.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
+                .isEqualTo(new Received(HELD_BACK_UPLOAD, sent));
+        assertThat(visitor.getInputStream().read()).isEqualTo(-1);
+
+        await("the stream's closing is logged", () -> output.getAll().contains("stream closed: session=" + sessionId));
+        String closed = output.getAll()
+                .lines()
+                .filter(line -> line.contains("stream closed: session=" + sessionId))
+                .findFirst()
+                .orElseThrow();
+        assertThat(blockedMillis(closed))
+                .as("time the stream waited for credit")
+                .isGreaterThanOrEqualTo(Duration.ofSeconds(1).toMillis());
     }
 
     @Test
@@ -125,6 +175,21 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
                 .filter(line -> (line.contains(" " + level + " ") || line.contains("\"level\":\"" + level + "\""))
                         && line.contains(text))
                 .toList();
+    }
+
+    private static long blockedMillis(String streamClosed) {
+        Matcher matcher = BLOCKED_MS.matcher(streamClosed);
+        assertThat(matcher.find()).as("blockedMs in %s", streamClosed).isTrue();
+        return Long.parseLong(matcher.group(1));
+    }
+
+    private static void pause(Duration duration) throws InterruptedIOException {
+        try {
+            Thread.sleep(duration);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("interrupted");
+        }
     }
 
     private static String sha256Hex(String text) throws Exception {

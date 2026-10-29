@@ -164,7 +164,7 @@ public final class NettyTunnelClient implements JBurrowClient {
         }
     }
 
-    /** Whether the client has stopped reading the control connection, for backpressure. */
+    /** Whether the client has stopped reading the control connection, which flow control never does. */
     boolean isControlReadPaused() throws InterruptedException {
         ControlConnection session = connection;
         if (session == null) {
@@ -192,7 +192,7 @@ public final class NettyTunnelClient implements JBurrowClient {
 
     private void initControlPipeline(SocketChannel channel, ControlConnection session, ClientTls tls) {
         ClientLivenessHandler liveness = new ClientLivenessHandler(session.session(), session, nanoTime);
-        LocalConnector streams = new LocalConnector(session, channel, liveness, dialer, nanoTime);
+        LocalConnector streams = new LocalConnector(session, channel, dialer, nanoTime);
         if (tls != null) {
             channel.pipeline().addLast("tls", tls.newHandler(channel.alloc()));
         }

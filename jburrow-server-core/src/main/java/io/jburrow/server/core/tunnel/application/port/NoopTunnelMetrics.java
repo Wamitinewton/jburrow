@@ -57,6 +57,9 @@ enum NoopTunnelMetrics implements TunnelMetrics {
     public void backpressurePaused(Direction direction) {}
 
     @Override
+    public void flowBlocked(FlowScope scope) {}
+
+    @Override
     public void bindPortPool(Supplier<PortPoolSnapshot> snapshot) {}
 
     @Override

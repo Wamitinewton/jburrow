@@ -7,7 +7,6 @@
  * {@link io.jburrow.protocol.flow.SendCredit} and {@link io.jburrow.protocol.flow.ReceiveWindow} are read-only outside
  * this package, so an adapter can ask how much it may send but can't do its own arithmetic on credit.
  *
- * <p>Not thread-safe. Confined to the thread that owns its session. The normative rules are {@code docs/protocol.md}
- * §10 (flow control) from draft 2.
+ * <p>Not thread-safe. Confined to the thread that owns its session. The normative rules are {@code docs/protocol.md} §10.
  */
 package io.jburrow.protocol.flow;

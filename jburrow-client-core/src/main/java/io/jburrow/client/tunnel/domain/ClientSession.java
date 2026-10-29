@@ -8,6 +8,7 @@ import static io.jburrow.protocol.wire.FrameType.OPEN;
 import static io.jburrow.protocol.wire.FrameType.PING;
 import static io.jburrow.protocol.wire.FrameType.PONG;
 import static io.jburrow.protocol.wire.FrameType.REGISTER;
+import static io.jburrow.protocol.wire.FrameType.WINDOW_UPDATE;
 
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
@@ -16,6 +17,12 @@ import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.flow.Credit;
+import io.jburrow.protocol.flow.DataOutcome;
+import io.jburrow.protocol.flow.SessionFlow;
+import io.jburrow.protocol.flow.StreamFlow;
+import io.jburrow.protocol.flow.UpdateTarget;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamLifecycle;
 import io.jburrow.protocol.stream.StreamOutcome;
@@ -37,9 +44,10 @@ import java.util.UUID;
 
 /**
  * One control session as the client sees it: its state ({@code docs/protocol.md} §8), the tunnels the server created,
- * and the streams the server opened. The server is untrusted input here, exactly as the client is on the server: every
- * frame is checked against the session's state, and every decision is a return value or a {@link ProtocolException}
- * for the caller to act on.
+ * the streams the server opened, and their flow control (§10). The server is untrusted input here, exactly as the
+ * client is on the server: every frame is checked against the session's state and windows, and every decision is a
+ * return value or a {@link ProtocolException} for the caller to act on. The stream relay learns everything about a
+ * stream here, never from the flow model directly.
  *
  * <p>The client doesn't check {@code limits.maxConcurrentStreams}: it binds the server, and the client's view of which
  * streams are open can lag behind the server's (§8.5).
@@ -58,22 +66,30 @@ public final class ClientSession {
         ALLOWED_INBOUND.put(ClientSessionState.CONNECTING, EnumSet.noneOf(FrameType.class));
         ALLOWED_INBOUND.put(ClientSessionState.AWAITING_HELLO, EnumSet.of(HELLO, ERROR));
         ALLOWED_INBOUND.put(ClientSessionState.AWAITING_REGISTERED, EnumSet.of(REGISTER, PING, PONG, ERROR));
-        ALLOWED_INBOUND.put(ClientSessionState.ESTABLISHED, EnumSet.of(OPEN, DATA, CLOSE, PING, PONG, ERROR));
+        ALLOWED_INBOUND.put(
+                ClientSessionState.ESTABLISHED, EnumSet.of(OPEN, DATA, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR));
         ALLOWED_INBOUND.put(ClientSessionState.CLOSING, EnumSet.allOf(FrameType.class));
     }
 
     private final List<TunnelSpec> requested;
+    private final Windows own;
     /** Insertion order is opening order, so iteration is by increasing id. */
-    private final Map<Integer, StreamLifecycle> streams = new LinkedHashMap<>();
+    private final Map<Integer, Entry> streams = new LinkedHashMap<>();
 
     private ClientSessionState state = ClientSessionState.CONNECTING;
     private UUID sessionId;
     private SessionLimits limits;
     private Map<UUID, ActiveTunnel> tunnels = Map.of();
     private int highestStreamId = StreamIds.CONTROL;
+    /** Created by the server's {@code HELLO}, which carries its windows. */
+    private SessionFlow flow;
 
-    /** @param requested the tunnels to ask for, in order; at least one, with distinct refs */
-    public ClientSession(List<TunnelSpec> requested) {
+    /**
+     * @param requested the tunnels to ask for, in order; at least one, with distinct refs
+     * @param own this client's receive windows, announced in its {@code HELLO}
+     */
+    public ClientSession(List<TunnelSpec> requested, Windows own) {
+        this.own = Objects.requireNonNull(own, "own");
         this.requested = List.copyOf(Objects.requireNonNull(requested, "requested"));
         if (this.requested.isEmpty()) {
             throw new IllegalArgumentException("A session asks for at least one tunnel");
@@ -114,7 +130,7 @@ public final class ClientSession {
      * {@link ClientSessionState#CLOSING} every frame passes: the caller ignores it, releasing what it holds.
      *
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} for a frame out of order, which includes every
-     *     {@code WINDOW_UPDATE} and {@code GOAWAY} in this draft
+     *     {@code GOAWAY} in this draft
      */
     public void checkInbound(FrameType type) {
         Objects.requireNonNull(type, "type");
@@ -123,15 +139,22 @@ public final class ClientSession {
         }
     }
 
+    /** The receive windows this client announces in its {@code HELLO}. */
+    public Windows windows() {
+        return own;
+    }
+
     /**
-     * The server's {@code HELLO}: {@code AWAITING_HELLO -> AWAITING_REGISTERED}. Capabilities the server lists are
-     * ignored, since this client offered none (§4.2).
+     * The server's {@code HELLO}: {@code AWAITING_HELLO -> AWAITING_REGISTERED}. Its windows, with this client's own,
+     * set the session's flow control. Capabilities the server lists are ignored, since this client offered none (§4.2).
      *
      * @return the limits the client must stay within
      */
     public SessionLimits onServerHello(ServerHello hello) {
         Objects.requireNonNull(hello, "hello");
         require(ClientSessionState.AWAITING_HELLO, HELLO);
+        Windows remote = hello.windows();
+        flow = new SessionFlow(own.stream(), own.session(), remote.stream(), remote.session());
         sessionId = hello.sessionId();
         limits = hello.limits();
         state = ClientSessionState.AWAITING_REGISTERED;
@@ -198,43 +221,168 @@ public final class ClientSession {
             throw protocolError("OPEN on stream " + streamId + " has a kind its tunnel doesn't.");
         }
         highestStreamId = streamId;
-        streams.put(streamId, new StreamLifecycle());
+        streams.put(streamId, new Entry(new StreamLifecycle(), requireFlow().openStream()));
         return tunnel;
     }
 
     /**
-     * A {@code DATA}, {@code CLOSE} or {@code CLOSE RST} from the server on {@code streamId}. A frame for a stream that
-     * existed and closed is {@link StreamOutcome.Discard} (§9.3).
+     * The most {@code DATA} this client may send on {@code streamId} right now: the smaller of the stream's credit and
+     * the session's. 0 if the stream is closed or this client has half-closed it.
+     */
+    public int sendable(int streamId) {
+        Entry entry = streams.get(streamId);
+        if (entry == null || !sendsOn(entry.lifecycle().state())) {
+            return 0;
+        }
+        return flow.sendable(entry.flow());
+    }
+
+    /**
+     * What this client may still send on {@code streamId} by its own credit alone, ignoring the session's. 0 if the
+     * stream is closed or this client has half-closed it. Tells a sender blocked by its stream from one blocked by the
+     * session.
+     */
+    public int streamCredit(int streamId) {
+        Entry entry = streams.get(streamId);
+        if (entry == null || !sendsOn(entry.lifecycle().state())) {
+            return 0;
+        }
+        return (int) entry.flow().send().available();
+    }
+
+    /** What this client may still send on all streams together; 0 before the server's {@code HELLO}. */
+    public int sessionCredit() {
+        return flow == null ? 0 : (int) flow.sessionSend().available();
+    }
+
+    /**
+     * Records {@code DATA} of {@code bytes} sent on {@code streamId}, spending its stream and session credit.
+     *
+     * @throws IllegalStateException if the stream isn't open for sending, or {@code bytes} is more than
+     *     {@link #sendable}: a bug in the caller
+     */
+    public void onDataSent(int streamId, int bytes) {
+        Entry entry = requireOpen(streamId);
+        if (!sendsOn(entry.lifecycle().state())) {
+            throw new IllegalStateException("Stream " + streamId + " is "
+                    + entry.lifecycle().state() + " and takes no more DATA from this client");
+        }
+        flow.onSent(entry.flow(), bytes);
+        apply(streamId, entry, StreamEvent.DATA_SENT);
+    }
+
+    /**
+     * {@code DATA} of {@code bytes} from the server on {@code streamId}. The stream's lifecycle decides first, then the
+     * windows, so a frame that is a stream error is never also taken for an overrun of the stream window. Bytes it
+     * returns as {@link DataOutcome.Deliver} are held until {@link #onReleased}; the other outcomes have released them.
+     *
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened;
+     *     {@link ErrorCode#FLOW_CONTROL_ERROR} if {@code bytes} overruns the session window, or an open stream's window
+     */
+    public DataOutcome onDataReceived(int streamId, int bytes) {
+        SessionFlow flow = requireFlow();
+        Optional<Entry> entry = lookup(streamId);
+        if (entry.isEmpty()) {
+            return new DataOutcome.Discard(flow.onDiscarded(bytes));
+        }
+        StreamOutcome outcome = apply(streamId, entry.get(), StreamEvent.DATA_RECEIVED);
+        return switch (outcome) {
+            case StreamOutcome.Accept accepted -> {
+                flow.onReceived(entry.get().flow(), bytes);
+                yield DataOutcome.DELIVER;
+            }
+            case StreamOutcome.ResetStream reset -> new DataOutcome.Reset(reset.code(), flow.onDiscarded(bytes));
+            case StreamOutcome.Discard discarded -> new DataOutcome.Discard(flow.onDiscarded(bytes));
+        };
+    }
+
+    /**
+     * A {@code WINDOW_UPDATE} from the server: on stream 0 for the session, otherwise for {@code streamId}. The caller
+     * resumes senders only for {@link UpdateTarget#SESSION} and {@link UpdateTarget#STREAM}.
+     *
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened;
+     *     {@link ErrorCode#FLOW_CONTROL_ERROR} if the credit would pass 2^31 − 1
+     */
+    public UpdateTarget onWindowUpdate(int streamId, int increment) {
+        SessionFlow flow = requireFlow();
+        if (streamId == StreamIds.CONTROL) {
+            flow.onSessionUpdate(increment);
+            return UpdateTarget.SESSION;
+        }
+        Optional<Entry> entry = lookup(streamId);
+        if (entry.isEmpty()) {
+            return UpdateTarget.DISCARDED;
+        }
+        StreamOutcome outcome = apply(streamId, entry.get(), StreamEvent.WINDOW_UPDATE_RECEIVED);
+        return switch (outcome) {
+            case StreamOutcome.Accept accepted
+            when accepted.next() == StreamState.HALF_CLOSED_LOCAL -> UpdateTarget.IGNORED;
+            case StreamOutcome.Accept accepted -> {
+                flow.onStreamUpdate(entry.get().flow(), increment);
+                yield UpdateTarget.STREAM;
+            }
+            case StreamOutcome.Discard discarded -> UpdateTarget.DISCARDED;
+            case StreamOutcome.ResetStream reset ->
+                throw new IllegalStateException("A WINDOW_UPDATE reset stream " + streamId + " with " + reset.code());
+        };
+    }
+
+    /**
+     * {@code bytes} of {@code DATA} received on {@code streamId} that this client no longer holds: written to the local
+     * connection, successfully or not, or dropped before it was made. Once the stream has closed, only session credit
+     * comes back.
+     *
+     * @return the {@code WINDOW_UPDATE}s to send now
+     * @throws IllegalStateException if more is released than is held
+     */
+    public Credit onReleased(int streamId, int bytes) {
+        SessionFlow flow = requireFlow();
+        Entry entry = streams.get(streamId);
+        if (entry == null) {
+            return flow.onReleased(null, bytes);
+        }
+        Credit credit = flow.onReleased(entry.flow(), bytes);
+        if (credit.stream() > 0) {
+            apply(streamId, entry, StreamEvent.WINDOW_UPDATE_SENT);
+        }
+        return credit;
+    }
+
+    /**
+     * A {@code CLOSE} or {@code CLOSE RST} from the server on {@code streamId}. A frame for a stream that existed and
+     * closed is {@link StreamOutcome.Discard} (§9.3). {@code DATA} and {@code WINDOW_UPDATE} have their own methods,
+     * since they carry credit.
      *
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened
      */
     public StreamOutcome onStreamFrame(int streamId, StreamEvent received) {
         Objects.requireNonNull(received, "received");
-        if (!received.isReceived()) {
-            throw new IllegalArgumentException(received + " is not an event from the server");
+        if (received != StreamEvent.CLOSE_RECEIVED && received != StreamEvent.RST_RECEIVED) {
+            throw new IllegalArgumentException(received + " is not a CLOSE from the server");
         }
-        Optional<StreamLifecycle> lifecycle = lookup(streamId);
-        if (lifecycle.isEmpty()) {
+        Optional<Entry> entry = lookup(streamId);
+        if (entry.isEmpty()) {
             return DISCARD;
         }
-        return apply(streamId, lifecycle.get(), received);
+        StreamOutcome outcome = apply(streamId, entry.get(), received);
+        if (outcome instanceof StreamOutcome.Accept accepted && accepted.next() == StreamState.HALF_CLOSED_REMOTE) {
+            flow.onPeerFinished(entry.get().flow());
+        }
+        return outcome;
     }
 
     /**
-     * Records what this client sent on {@code streamId}.
+     * Records a {@code CLOSE} or {@code CLOSE RST} this client sent on {@code streamId}. {@code DATA} is recorded by
+     * {@link #onDataSent}, {@code WINDOW_UPDATE} by {@link #onReleased}.
      *
      * @throws IllegalStateException if the stream isn't open or its state forbids the send: a bug in the caller
      */
     public void onStreamSent(int streamId, StreamEvent sent) {
         Objects.requireNonNull(sent, "sent");
-        if (sent.isReceived()) {
-            throw new IllegalArgumentException(sent + " is not an event from this client");
+        if (sent != StreamEvent.CLOSE_SENT && sent != StreamEvent.RST_SENT) {
+            throw new IllegalArgumentException(sent + " is not a CLOSE from this client");
         }
-        StreamLifecycle lifecycle = streams.get(streamId);
-        if (lifecycle == null) {
-            throw new IllegalStateException("Stream " + streamId + " is not open");
-        }
-        apply(streamId, lifecycle, sent);
+        apply(streamId, requireOpen(streamId), sent);
     }
 
     /**
@@ -243,7 +391,7 @@ public final class ClientSession {
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened
      */
     public Optional<StreamState> streamState(int streamId) {
-        return lookup(streamId).map(StreamLifecycle::state);
+        return lookup(streamId).map(entry -> entry.lifecycle().state());
     }
 
     /** Every stream not yet closed, in increasing order. */
@@ -276,7 +424,7 @@ public final class ClientSession {
         return List.copyOf(tunnels.values());
     }
 
-    private Optional<StreamLifecycle> lookup(int streamId) {
+    private Optional<Entry> lookup(int streamId) {
         if (streamId <= StreamIds.CONTROL) {
             throw new IllegalArgumentException("Not a data stream id: " + streamId);
         }
@@ -286,12 +434,32 @@ public final class ClientSession {
         return Optional.ofNullable(streams.get(streamId));
     }
 
-    private StreamOutcome apply(int streamId, StreamLifecycle lifecycle, StreamEvent event) {
-        StreamOutcome outcome = lifecycle.on(event);
-        if (lifecycle.isClosed()) {
+    private Entry requireOpen(int streamId) {
+        Entry entry = streams.get(streamId);
+        if (entry == null) {
+            throw new IllegalStateException("Stream " + streamId + " is not open");
+        }
+        return entry;
+    }
+
+    private StreamOutcome apply(int streamId, Entry entry, StreamEvent event) {
+        StreamOutcome outcome = entry.lifecycle().on(event);
+        if (entry.lifecycle().isClosed()) {
             streams.remove(streamId);
         }
         return outcome;
+    }
+
+    private SessionFlow requireFlow() {
+        if (flow == null) {
+            throw new IllegalStateException("The session has no flow control before the server's HELLO");
+        }
+        return flow;
+    }
+
+    /** Whether this client may still send {@code DATA} on a stream in {@code state}. */
+    private static boolean sendsOn(StreamState state) {
+        return state == StreamState.OPEN || state == StreamState.HALF_CLOSED_REMOTE;
     }
 
     private void require(ClientSessionState expected, FrameType type) {
@@ -303,6 +471,9 @@ public final class ClientSession {
     private static ProtocolException protocolError(String message) {
         return ProtocolException.session(ErrorCode.PROTOCOL_ERROR, message);
     }
+
+    /** One open stream: where it is, and its credit both ways. */
+    private record Entry(StreamLifecycle lifecycle, StreamFlow flow) {}
 
     private static String describe(ClientSessionState state) {
         return switch (state) {

@@ -1,18 +1,19 @@
 package io.jburrow.server.core.tunnel.domain;
 
-/** Whether a visitor connection gets a stream. */
-public sealed interface StreamAdmission {
+/**
+ * Admitting a visitor connection to a stream, which is checked in three steps: the session
+ * ({@link Session#checkAdmission}), then the server-wide stream quota, then the allocation
+ * ({@link Session#openStream}). A refused visitor is closed at once; the client is not told.
+ */
+public final class StreamAdmission {
 
-    /** Send {@code OPEN} on {@code streamId}. */
-    record Admitted(int streamId) implements StreamAdmission {}
-
-    /** Close the visitor connection at once; the client is not told. */
-    record Refused(Refusal reason) implements StreamAdmission {}
+    private StreamAdmission() {}
 
     /** Why a visitor connection was refused. {@link #label()} is the metric label. */
-    enum Refusal {
+    public enum Refusal {
         NOT_ESTABLISHED("not_established"),
-        STREAM_LIMIT("stream_limit");
+        STREAM_LIMIT("stream_limit"),
+        SERVER_STREAM_LIMIT("server_stream_limit");
 
         private final String label;
 

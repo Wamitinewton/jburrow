@@ -99,7 +99,8 @@ class ClientTlsIntegrationTest {
                 SESSION_ID,
                 new ServerInfo("jburrow-server", "0.2.0"),
                 List.of(),
-                new SessionLimits(65_536, 1, 1, 15_000, 45_000))));
+                new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+                ScriptedPeer.SERVER_WINDOWS)));
         peer.send(new Frame.Registered(new Registered(
                 List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_000)))));
 

@@ -54,7 +54,7 @@ class HeartbeatIntegrationTest extends TunnelTestSupport {
     /**
      * Nothing but liveness crosses the connection for several idle timeouts, and neither side times out.
      *
-     * <p>Both sides run the same clock (protocol.md §10), so which one pings is a race. Answering a {@code PING} resets
+     * <p>Both sides run the same clock (protocol.md §11), so which one pings is a race. Answering a {@code PING} resets
      * the answerer's clock a round trip before the {@code PONG} resets the pinger's, so the pinging side tends to
      * alternate. The test counts liveness in both directions, never one side's {@code PING}s.
      */

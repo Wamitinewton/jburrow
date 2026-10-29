@@ -1,5 +1,6 @@
 package io.jburrow.server.core.tunnel.domain;
 
+import io.jburrow.protocol.flow.StreamFlow;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamLifecycle;
 import io.jburrow.protocol.stream.StreamOutcome;
@@ -9,11 +10,13 @@ import io.jburrow.protocol.wire.StreamIds;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
- * The streams of one session that are not yet closed, and the highest id it has allocated. A stream leaves the table
- * when its lifecycle reaches {@code CLOSED}; its id stays used ({@code docs/protocol.md} §9.1, §9.3).
+ * The streams of one session that are not yet closed, and the highest id it has allocated. Each stream's entry holds
+ * its lifecycle and its flow. A stream leaves the table when its lifecycle reaches {@code CLOSED}, and its flow goes
+ * with it; its id stays used ({@code docs/protocol.md} §9.1, §9.3).
  *
  * <p>Not thread-safe. Owned by its {@link Session} and confined to the session's event loop.
  */
@@ -23,9 +26,10 @@ public final class StreamTable {
 
     private final int capacity;
     /** Insertion order is allocation order, so iteration is by increasing id. */
-    private final Map<Integer, StreamLifecycle> open = new LinkedHashMap<>();
+    private final Map<Integer, Entry> open = new LinkedHashMap<>();
 
     private int highestId = StreamIds.CONTROL;
+    private int peakSize;
 
     public StreamTable(int capacity) {
         if (capacity < 1) {
@@ -50,31 +54,45 @@ public final class StreamTable {
         return highestId;
     }
 
+    /** The most streams the table has held open at once. */
+    public int peakSize() {
+        return peakSize;
+    }
+
     /**
-     * Opens a stream on the next id.
+     * Opens a stream on the next id, with {@code flow} as its accounting.
      *
      * @throws IllegalStateException if the table is full; check {@link #isFull()} first
      * @throws ProtocolException {@link ErrorCode#INTERNAL_ERROR} once every stream id is used
      */
-    public int allocate() {
+    public int allocate(StreamFlow flow) {
+        Objects.requireNonNull(flow, "flow");
         if (isFull()) {
             throw new IllegalStateException("The stream table is full: " + capacity);
         }
         highestId = StreamIds.next(highestId);
-        open.put(highestId, new StreamLifecycle());
+        open.put(highestId, new Entry(new StreamLifecycle(), flow));
+        peakSize = Math.max(peakSize, open.size());
         return highestId;
     }
 
     /**
-     * The lifecycle of stream {@code id}, or empty if the stream existed and is closed.
+     * The entry of stream {@code id}, or empty if the stream existed and is closed. For frames from the peer, which
+     * may name any id.
      *
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if {@code id} was never opened
      */
-    public Optional<StreamLifecycle> lookup(int id) {
+    public Optional<Entry> lookup(int id) {
         requireDataStream(id);
         if (id > highestId) {
             throw ProtocolException.session(ErrorCode.PROTOCOL_ERROR, "Stream " + id + " was never opened.");
         }
+        return Optional.ofNullable(open.get(id));
+    }
+
+    /** The entry of stream {@code id} if it is open. For this side's own calls, which never name an unknown id. */
+    public Optional<Entry> find(int id) {
+        requireDataStream(id);
         return Optional.ofNullable(open.get(id));
     }
 
@@ -87,11 +105,11 @@ public final class StreamTable {
         if (!event.isReceived()) {
             throw new IllegalArgumentException(event + " is not an event from the peer");
         }
-        Optional<StreamLifecycle> lifecycle = lookup(id);
-        if (lifecycle.isEmpty()) {
+        Optional<Entry> entry = lookup(id);
+        if (entry.isEmpty()) {
             return DISCARD;
         }
-        return apply(id, lifecycle.get(), event);
+        return apply(id, entry.get().lifecycle(), event);
     }
 
     /**
@@ -103,12 +121,8 @@ public final class StreamTable {
         if (event.isReceived()) {
             throw new IllegalArgumentException(event + " is not an event from this side");
         }
-        requireDataStream(id);
-        StreamLifecycle lifecycle = open.get(id);
-        if (lifecycle == null) {
-            throw new IllegalStateException("Stream " + id + " is not open");
-        }
-        apply(id, lifecycle, event);
+        Entry entry = find(id).orElseThrow(() -> new IllegalStateException("Stream " + id + " is not open"));
+        apply(id, entry.lifecycle(), event);
     }
 
     /** The ids of every stream not yet closed, in increasing order. */
@@ -122,6 +136,14 @@ public final class StreamTable {
             open.remove(id);
         }
         return outcome;
+    }
+
+    /** One open stream: where it is, and its credit both ways. */
+    public record Entry(StreamLifecycle lifecycle, StreamFlow flow) {
+        public Entry {
+            Objects.requireNonNull(lifecycle, "lifecycle");
+            Objects.requireNonNull(flow, "flow");
+        }
     }
 
     private static void requireDataStream(int id) {

@@ -43,7 +43,8 @@ class UpgradeFailuresTest {
             new TunnelEvents() {},
             new ClientInfo("jburrow-test", "1.0.0", null, null),
             Optional.empty(),
-            ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT));
+            ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+            ClientSettings.DEFAULT_WINDOWS));
     private final EmbeddedChannel channel = new EmbeddedChannel(new UpgradeFailures(connection, JSON));
 
     @Test
@@ -78,7 +79,7 @@ class UpgradeFailuresTest {
     void aRefusalIsReadFromItsBody() {
         String body = new String(
                 JSON.writeRefusal(UpgradeRefusal.unsupportedVersion(
-                        "Upgrade the jburrow CLI.", List.of("jburrow.v1-draft.2"), Instant.now(), "/v1/connect")),
+                        "Upgrade the jburrow CLI.", List.of("jburrow.v1-draft.3"), Instant.now(), "/v1/connect")),
                 StandardCharsets.UTF_8);
         FullHttpResponse refused = response(HttpResponseStatus.BAD_REQUEST, body);
 
@@ -88,7 +89,7 @@ class UpgradeFailuresTest {
         TunnelStartException failure = startFailure();
         assertThat(failure.kind()).isEqualTo(Kind.UPGRADE_REFUSED);
         assertThat(failure.code()).contains(ErrorCode.UNSUPPORTED_PROTOCOL_VERSION);
-        assertThat(failure.supportedVersions()).containsExactly("jburrow.v1-draft.2");
+        assertThat(failure.supportedVersions()).containsExactly("jburrow.v1-draft.3");
         assertThat(failure).hasMessage("Upgrade the jburrow CLI.");
         channel.finishAndReleaseAll();
     }

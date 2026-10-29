@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
+import java.lang.reflect.RecordComponent;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -66,8 +68,10 @@ class JBurrowPropertiesTest {
         assertThat(edge.handshakeTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(edge.pingInterval()).isEqualTo(Duration.ofSeconds(15));
         assertThat(edge.idleTimeout()).isEqualTo(Duration.ofSeconds(45));
-        assertThat(edge.sessionWatermarks()).isEqualTo(new JBurrowProperties.Watermarks(128 * 1024, 512 * 1024));
-        assertThat(edge.visitorWatermarks()).isEqualTo(new JBurrowProperties.Watermarks(32 * 1024, 128 * 1024));
+        assertThat(edge.sessionWatermarks()).isEqualTo(new JBurrowProperties.Watermarks(64 * 1024, 256 * 1024));
+        assertThat(edge.windows()).isEqualTo(new Windows(256 * 1024, 512 * 1024));
+        assertThat(edge.maxConcurrentStreams()).isEqualTo(1_000);
+        assertThat(edge.maxStreams()).isEqualTo(20_000);
         JBurrowProperties.Tcp tcp = properties.tcp();
         assertThat(tcp.bindAddress()).isEqualTo("0.0.0.0");
         assertThat(tcp.reuseDelay()).isEqualTo(Duration.ofSeconds(60));
@@ -119,9 +123,17 @@ class JBurrowPropertiesTest {
                         Map.of("jburrow.edge.session-write-buffer", "128KB-128KB"),
                         "jburrow.edge.session-write-buffer"),
                 arguments(Map.of("jburrow.edge.session-write-buffer", "128KB"), "jburrow.edge.session-write-buffer"),
+                arguments(Map.of("jburrow.edge.stream-window", "65535B"), "jburrow.edge.stream-window"),
+                arguments(Map.of("jburrow.edge.stream-window", "2GB"), "jburrow.edge.stream-window"),
                 arguments(
-                        Map.of("jburrow.edge.visitor-write-buffer", "lots-more"), "jburrow.edge.visitor-write-buffer"),
-                arguments(Map.of("jburrow.edge.visitor-write-buffer", "0B-1KB"), "jburrow.edge.visitor-write-buffer"),
+                        Map.of("jburrow.edge.stream-window", "1MB", "jburrow.edge.session-window", "512KB"),
+                        "jburrow.edge.session-window"),
+                arguments(Map.of("jburrow.edge.session-window", "2GB"), "jburrow.edge.session-window"),
+                arguments(Map.of("jburrow.edge.max-concurrent-streams", "0"), "edge.maxConcurrentStreams"),
+                arguments(Map.of("jburrow.edge.max-streams", "0"), "edge.maxStreams"),
+                arguments(
+                        Map.of("jburrow.edge.max-concurrent-streams", "1000", "jburrow.edge.max-streams", "999"),
+                        "jburrow.edge.max-streams"),
                 arguments(
                         Map.of("jburrow.edge.max-sessions", "10", "jburrow.edge.max-handshaking", "11"),
                         "jburrow.edge.max-handshaking"),
@@ -145,6 +157,37 @@ class JBurrowPropertiesTest {
                 bind(with(Map.of("jburrow.edge.ping-interval", "20s", "jburrow.edge.idle-timeout", "40s")));
 
         assertThat(properties.edge().idleTimeout()).isEqualTo(Duration.ofSeconds(40));
+    }
+
+    @Test
+    void windowsAtTheirBoundsBind() {
+        JBurrowProperties properties = bind(with(Map.of(
+                "jburrow.edge.stream-window", "64KB",
+                "jburrow.edge.session-window", "2147483647B",
+                "jburrow.edge.max-concurrent-streams", "7",
+                "jburrow.edge.max-streams", "7")));
+
+        assertThat(properties.edge().windows()).isEqualTo(new Windows(65_536, Integer.MAX_VALUE));
+        assertThat(properties.edge().maxStreams()).isEqualTo(7);
+    }
+
+    @Test
+    void theSessionWindowMayEqualTheStreamWindow() {
+        JBurrowProperties properties =
+                bind(with(Map.of("jburrow.edge.stream-window", "1MB", "jburrow.edge.session-window", "1MB")));
+
+        assertThat(properties.edge().windows()).isEqualTo(new Windows(1_048_576, 1_048_576));
+    }
+
+    /** The binder ignores unknown keys, so a stale value in an old environment is harmless but does nothing. */
+    @Test
+    void theRemovedVisitorWriteBufferIsNotBound() {
+        JBurrowProperties properties = bind(with(Map.of("jburrow.edge.visitor-write-buffer", "32KB-128KB")));
+
+        assertThat(properties.edge()).isNotNull();
+        assertThat(JBurrowProperties.Edge.class.getRecordComponents())
+                .extracting(RecordComponent::getName)
+                .doesNotContain("visitorWriteBuffer");
     }
 
     @Test

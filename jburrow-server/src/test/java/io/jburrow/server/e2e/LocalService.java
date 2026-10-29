@@ -1,7 +1,13 @@
 package io.jburrow.server.e2e;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
@@ -9,11 +15,17 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * The service a tunnel forwards to on the client's side: a blocking {@link ServerSocket} on loopback, with one virtual
@@ -28,7 +40,18 @@ final class LocalService implements AutoCloseable {
         void handle(Socket connection) throws IOException;
     }
 
+    /** What a visitor of {@link #bulkOnRequest} sends first to be sent the bulk. */
+    static final byte[] BULK = "BULK\n".getBytes(US_ASCII);
+
+    /**
+     * The tunnel listener's, so a burst of streams dialing at once fits. Java's default of 50 overflows under
+     * {@code ManyStreamsIntegrationTest}'s 500, and the kernel then resets local connections or loses their first
+     * segment.
+     */
+    private static final int BACKLOG = 1_024;
+
     private static final int COPY_BUFFER = 64 * 1024;
+    private static final Duration POLL = Duration.ofMillis(50);
 
     private final ServerSocket server;
     private final Handler handler;
@@ -52,7 +75,7 @@ final class LocalService implements AutoCloseable {
     static LocalService start(int port, Handler handler) {
         try {
             ServerSocket server = new ServerSocket();
-            server.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port));
+            server.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), BACKLOG);
             return new LocalService(server, handler);
         } catch (IOException e) {
             throw new UncheckedIOException("cannot listen on port " + port, e);
@@ -65,6 +88,100 @@ final class LocalService implements AutoCloseable {
             copy(connection.getInputStream(), connection.getOutputStream());
             connection.shutdownOutput();
         });
+    }
+
+    /**
+     * Reads each connection to its end and records what arrived in {@code received}, under the id the connection
+     * starts with ({@link #writeId}). Every byte after the id is added to {@code progress} as it arrives.
+     */
+    static LocalService sink(Map<Long, TunnelTestSupport.Received> received, AtomicLong progress) {
+        return start(connection -> {
+            DataInputStream in = new DataInputStream(connection.getInputStream());
+            long id = in.readLong();
+            received.put(id, TunnelTestSupport.drain(in, progress));
+        });
+    }
+
+    /**
+     * Sends each connection what it asks for with {@link #request}, then half-closes, and reads the connection to its
+     * end.
+     */
+    static LocalService source() {
+        return start(connection -> {
+            DataInputStream in = new DataInputStream(connection.getInputStream());
+            long length = in.readLong();
+            long seed = in.readLong();
+            TunnelTestSupport.send(connection.getOutputStream(), length, seed);
+            connection.shutdownOutput();
+            TunnelTestSupport.drain(in);
+        });
+    }
+
+    /** Accepts each connection and never reads from it, until the service or the tunnel closes it. */
+    static LocalService stalled() {
+        return start(connection -> {
+            while (!connection.isClosed()) {
+                pause(POLL);
+            }
+        });
+    }
+
+    /**
+     * Echoes, except that a connection whose first bytes are {@link #BULK} is sent {@code bulkBytes} generated from
+     * {@code seed} instead, then half-closed. Bulk bytes are added to {@code bulkSent} as each write completes. Every
+     * echoed message must be at least as long as {@link #BULK}.
+     */
+    static LocalService bulkOnRequest(long bulkBytes, long seed, AtomicLong bulkSent) {
+        return start(connection -> {
+            InputStream in = connection.getInputStream();
+            OutputStream out = connection.getOutputStream();
+            byte[] first = in.readNBytes(BULK.length);
+            if (Arrays.equals(first, BULK)) {
+                TunnelTestSupport.send(new CountingOutputStream(out, bulkSent), bulkBytes, seed);
+            } else {
+                out.write(first);
+                copy(in, out);
+            }
+            connection.shutdownOutput();
+            TunnelTestSupport.drain(in);
+        });
+    }
+
+    /**
+     * Two connections that depend on each other. The first one accepted, A, is not read at all until the second, B,
+     * has delivered {@code threshold} bytes; then A is echoed to its end. B is read to its end.
+     */
+    static LocalService dependentPair(int threshold) {
+        AtomicInteger order = new AtomicInteger();
+        CountDownLatch bDelivered = new CountDownLatch(1);
+        return start(connection -> {
+            if (order.getAndIncrement() == 0) {
+                while (!await(bDelivered)) {
+                    if (connection.isClosed()) {
+                        return;
+                    }
+                }
+                copy(connection.getInputStream(), connection.getOutputStream());
+                connection.shutdownOutput();
+            } else {
+                connection.getInputStream().readNBytes(threshold);
+                bDelivered.countDown();
+                TunnelTestSupport.drain(connection.getInputStream());
+            }
+        });
+    }
+
+    /** What a visitor of a {@link #sink} sends first. */
+    static void writeId(OutputStream out, long id) throws IOException {
+        new DataOutputStream(out).writeLong(id);
+    }
+
+    /** What a visitor of a {@link #source} sends to be sent {@code length} bytes generated from {@code seed}. */
+    static void request(OutputStream out, long length, long seed) throws IOException {
+        DataOutputStream request = new DataOutputStream(out);
+        request.writeLong(length);
+        request.writeLong(seed);
+        request.flush();
     }
 
     int port() {
@@ -100,6 +217,42 @@ final class LocalService implements AutoCloseable {
             copied += read;
         }
         return copied;
+    }
+
+    private static void pause(Duration duration) throws InterruptedIOException {
+        try {
+            Thread.sleep(duration);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("interrupted");
+        }
+    }
+
+    /** Waits for {@code latch} for one poll; false if it is still closed. */
+    private static boolean await(CountDownLatch latch) throws InterruptedIOException {
+        try {
+            return latch.await(POLL.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("interrupted");
+        }
+    }
+
+    /** Adds each completed write's length to a counter. */
+    private static final class CountingOutputStream extends FilterOutputStream {
+
+        private final AtomicLong written;
+
+        CountingOutputStream(OutputStream out, AtomicLong written) {
+            super(out);
+            this.written = written;
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            out.write(bytes, offset, length);
+            written.addAndGet(length);
+        }
     }
 
     private void acceptLoop() {

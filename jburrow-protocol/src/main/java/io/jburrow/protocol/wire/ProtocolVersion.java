@@ -11,7 +11,7 @@ import java.util.Set;
  */
 public final class ProtocolVersion {
 
-    public static final String CURRENT = "jburrow.v1-draft.1";
+    public static final String CURRENT = "jburrow.v1-draft.2";
 
     private static final List<String> SUPPORTED = List.of(CURRENT);
 

@@ -61,10 +61,12 @@ Phase 2 raises the limit from 1 stream per session to 1,000. Three forces shape 
 - **Sources are read only as far as they can be sent.** A visitor (or local connection) is read only
   while `min(stream credit, session credit, session channel headroom, 64 KiB)` is above zero, and each
   read is capped at that amount, so nothing read is ever left unsent. When session credit runs out,
-  visitors are paused lazily, the next time each is actually read. The one exception to "nothing
-  unsent" is a one-byte carry per stream: on epoll a read can't be zero bytes without meaning end of
-  input, so a visitor read with no credit gives up at most one byte, which is held until credit
-  returns.
+  visitors are paused lazily, the next time each is actually read. The exception to "nothing
+  unsent" is the carry: on epoll a read can't be zero bytes without meaning end of input, so a
+  visitor read with no credit gives up at most one byte, which is held until credit returns. And
+  epoll reads a source that has sent `FIN` to the end of its input at once, credit or not, so a
+  visitor that half-closes while held back carries the rest of what it sent, at most its socket
+  receive buffer, and sends it ahead of its `CLOSE` as credit returns.
 - **Neither side stops reading the control connection for flow control.** Credit is withheld
   instead, per stream. Phase 1's `Backpressure` and the liveness handlers' `pause` and `resume` go.
   The liveness rules for a side that pauses stay in the specification for third-party peers.
@@ -94,8 +96,11 @@ Phase 2 raises the limit from 1 stream per session to 1,000. Three forces shape 
 - Kernel socket buffers are outside the windows, since credit returns when a write reaches the
   socket. Many stalled visitors can hold up to `tcp_wmem`'s maximum each in kernel memory charged to
   the pod. The load test measures it, and `SO_SNDBUF` is the lever if it has to be capped.
-- Fairness between streams comes from reading each visitor at most once per event-loop turn, with no
-  scheduler. Priorities would need one.
+- Fairness between streams comes from reading each visitor at most once per event-loop turn, and
+  from a line of visitors waiting for the session: when it is resumed, each may take an equal share
+  of the credit in its first read, whatever order the transport reads them in, and a visitor keeps
+  its place until a read of its own is sent, then rejoins at the back. No scheduler, and priorities
+  would need one.
 
 ## Alternatives considered
 

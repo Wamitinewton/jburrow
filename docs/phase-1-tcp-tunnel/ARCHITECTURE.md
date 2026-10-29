@@ -333,7 +333,7 @@ complete event table, closed versus never-opened ids, opening, and the mapping t
 
 ### Liveness
 
-Specified in [protocol.md §10](../protocol.md#10-liveness). `Liveness` in `jburrow-protocol`
+Specified in [protocol.md §11](../protocol.md#11-liveness). `Liveness` in `jburrow-protocol`
 implements the rules for both sides.
 
 - **Every frame received is proof of life**, not only `PONG`, so a busy session never needs a
@@ -357,7 +357,7 @@ implements the rules for both sides.
 
 ### Errors
 
-Specified in [protocol.md §11](../protocol.md#11-errors): where codes appear, the registry with
+Specified in [protocol.md §12](../protocol.md#12-errors): where codes appear, the registry with
 each code's scope, upgrade status and close code, and the rules for using them.
 `io.jburrow.protocol.wire.ErrorCode` is the registry in code, and `ErrorCodeTest` checks it against
 the table row for row. Every new code is a constant there and a row in the specification's registry.
@@ -378,7 +378,7 @@ different one (rename it).
 
 ### Receiver rules
 
-Specified in [protocol.md §12](../protocol.md#12-receiver-rules): nine ordered steps, each with its
+Specified in [protocol.md §13](../protocol.md#13-receiver-rules): nine ordered steps, each with its
 error. The order guarantees the decoder never allocates or parses anything a bad header could make
 expensive, and it makes the code a broken message produces deterministic, which is what lets the
 conformance vectors name one expected code.
@@ -389,7 +389,7 @@ never sends fails in the codec, before any session sees it. Step 9 is the sessio
 
 ### Protocol limits
 
-Specified in [protocol.md §13](../protocol.md#13-limits). The values the server announces and
+Specified in [protocol.md §14](../protocol.md#14-limits). The values the server announces and
 enforces come from [Configuration](#configuration); the rest are fixed by the protocol and live in
 `FrameLimits`, `ControlJson` and the control records.
 
@@ -403,7 +403,7 @@ enforces come from [Configuration](#configuration); the rest are fixed by the pr
 - **Conformance vectors** live in `jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/`
   as JSON files: each vector is a hex-encoded WebSocket message and either the decoded frame it must
   produce or the error code it must raise. `ConformanceVectorsTest` runs every vector, and
-  `docs/protocol.md` §14 links to the files so a third-party implementation can run the same ones. A
+  `docs/protocol.md` §15 links to the files so a third-party implementation can run the same ones. A
   bug found by the fuzzer or in production becomes a vector.
 - **Changing the protocol** starts in `docs/protocol.md`: the rule, a change-log row (and a draft
   bump if the change is wire-incompatible), then the code, the vectors and the seed corpus in the

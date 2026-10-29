@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.control.UpgradeRefusal;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolVersion;
@@ -17,6 +18,7 @@ import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -83,7 +85,7 @@ class EdgeServerIntegrationTest {
         connect(ProtocolVersion.CURRENT);
 
         awaitTrue(() -> upgrades.size() == 1);
-        assertThat(upgrades.get(0).subprotocol()).isEqualTo("jburrow.v1-draft.1");
+        assertThat(upgrades.get(0).subprotocol()).isEqualTo("jburrow.v1-draft.2");
         assertThat(upgrades.get(0).clientAddress()).isEqualTo(InetAddress.getLoopbackAddress());
         assertThat(admission.handshaking()).isOne();
     }
@@ -113,12 +115,12 @@ class EdgeServerIntegrationTest {
     void anOldDraftIsRefusedWithTheSupportedList() throws IOException {
         start(holdingSessions());
 
-        Response response = exchange(upgradeRequest("jburrow.v1-draft.0", ""));
+        Response response = exchange(upgradeRequest("jburrow.v1-draft.1", ""));
 
         assertThat(response.status()).isEqualTo(400);
         UpgradeRefusal refusal = response.refusal();
         assertThat(refusal.code()).isEqualTo(ErrorCode.UNSUPPORTED_PROTOCOL_VERSION);
-        assertThat(refusal.supported()).containsExactly("jburrow.v1-draft.1");
+        assertThat(refusal.supported()).containsExactly("jburrow.v1-draft.2");
     }
 
     @Test
@@ -260,8 +262,9 @@ class EdgeServerIntegrationTest {
                 Duration.ofSeconds(45),
                 128 * 1024,
                 512 * 1024,
-                32 * 1024,
-                128 * 1024,
+                new Windows(256 * 1024, 512 * 1024),
+                1,
+                8,
                 "test");
     }
 
@@ -275,7 +278,13 @@ class EdgeServerIntegrationTest {
         RegisterTunnels register = new RegisterTunnels(
                 new InMemoryAuthtokenVerifier(), admission, ports, new RegistrationPolicy(1, "localhost"));
         return new EngineDependencies(
-                register, admission, ports, metrics, blocking, new TcpSettings("127.0.0.1", "localhost"));
+                register,
+                admission,
+                new StreamQuota(8),
+                ports,
+                metrics,
+                blocking,
+                new TcpSettings("127.0.0.1", "localhost"));
     }
 
     private ScriptedPeer connect(String subprotocol) {

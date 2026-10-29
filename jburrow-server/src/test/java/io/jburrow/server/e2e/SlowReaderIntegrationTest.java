@@ -19,8 +19,9 @@ import org.springframework.test.context.TestPropertySource;
 
 /**
  * A fast sender and a slow reader on either end of a tunnel: memory stays within the per-session budget of {@code
- * docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Memory budget, and the session survives a stall longer than the idle
- * timeout.
+ * docs/phase-2-multiplexing/ARCHITECTURE.md} §Memory budget, and the session survives a stall longer than the idle
+ * timeout, since neither side stops reading the control connection for flow control: the slow reader's stream credit
+ * is withheld instead.
  *
  * <p>The reader reads 64 KiB per 100 ms for {@link #SLOW_PHASE}, long enough to fill every buffer on the path and hold
  * the sender back, then reads at full speed so the whole 256 MiB arrives and is checked. Direct memory is sampled every
@@ -61,7 +62,7 @@ class SlowReaderIntegrationTest extends TunnelTestSupport {
         LocalService slowSink = closeAfterTest(
                 LocalService.start(connection -> received.complete(slowThenFast(connection.getInputStream()))));
         Tunnel tunnel = openTunnel(slowSink);
-        double pausesBefore = counter("jburrow.backpressure.pauses", "direction", "inbound");
+        double blockedBefore = counter("jburrow.flow.blocked", "scope", "stream");
 
         Socket visitor = visit(tunnel.port());
         try (DirectMemorySampler sampler = new DirectMemorySampler()) {
@@ -82,9 +83,9 @@ class SlowReaderIntegrationTest extends TunnelTestSupport {
         }
 
         assertOpen(tunnel.handle());
-        assertThat(counter("jburrow.backpressure.pauses", "direction", "inbound"))
-                .as("the server stopped reading the visitor")
-                .isGreaterThan(pausesBefore);
+        assertThat(counter("jburrow.flow.blocked", "scope", "stream"))
+                .as("the visitor waited for its own stream's credit")
+                .isGreaterThan(blockedBefore);
     }
 
     @Test
@@ -108,8 +109,8 @@ class SlowReaderIntegrationTest extends TunnelTestSupport {
 
         assertOpen(tunnel.handle());
         assertThat(counter("jburrow.backpressure.pauses", "direction", "outbound"))
-                .as("the server stopped reading the client")
-                .isGreaterThan(pausesBefore);
+                .as("the server never stops reading the client")
+                .isEqualTo(pausesBefore);
     }
 
     /** Reads 64 KiB per 100 ms for {@link #SLOW_PHASE} from the first byte, then to the end at full speed. */

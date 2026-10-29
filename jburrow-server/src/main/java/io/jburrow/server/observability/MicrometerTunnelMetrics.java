@@ -52,6 +52,7 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     private final Map<FrameType, Map<FrameDirection, Counter>> frames = new EnumMap<>(FrameType.class);
     private final Map<Side, Map<ErrorCode, Counter>> protocolErrors = new EnumMap<>(Side.class);
     private final Map<Direction, Counter> backpressurePauses;
+    private final Map<FlowScope, Counter> flowBlocked;
 
     public MicrometerTunnelMetrics(MeterRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -141,6 +142,13 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
                         .description("Times reading one side paused because the other couldn't keep up")
                         .tag("direction", label(direction))
                         .register(registry));
+        flowBlocked = byEnum(
+                FlowScope.class,
+                scope -> Counter.builder("jburrow.flow.blocked")
+                        .description(
+                                "Times a visitor stopped being read because its stream's or session's credit ran out")
+                        .tag("scope", label(scope))
+                        .register(registry));
     }
 
     @Override
@@ -219,6 +227,11 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     @Override
     public void backpressurePaused(Direction direction) {
         backpressurePauses.get(direction).increment();
+    }
+
+    @Override
+    public void flowBlocked(FlowScope scope) {
+        flowBlocked.get(scope).increment();
     }
 
     @Override

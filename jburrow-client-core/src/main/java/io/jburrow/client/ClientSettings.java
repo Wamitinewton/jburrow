@@ -4,6 +4,7 @@ import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Register;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ProtocolException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,6 +39,8 @@ import javax.net.ssl.TrustManagerFactory;
  * @param tunnels exactly one in this version
  * @param handshakeTimeout how long the server has, from the TCP connection opening, to complete TLS and the upgrade
  *     and to answer {@code HELLO} and {@code REGISTER}
+ * @param windows this client's receive windows, announced in its {@code HELLO}: the most the server may send it on one
+ *     stream, and on all streams together, before it returns credit
  */
 public record ClientSettings(
         URI server,
@@ -46,10 +49,17 @@ public record ClientSettings(
         TunnelEvents events,
         ClientInfo clientInfo,
         Optional<TrustManagerFactory> trustManager,
-        Duration handshakeTimeout) {
+        Duration handshakeTimeout,
+        Windows windows) {
 
     public static final String CONNECT_PATH = "/v1/connect";
     public static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * 256 KiB per stream, as the server's; 1 MiB for the session, more generous than the server's, since a developer's
+     * machine runs one session and the server's memory doesn't depend on it.
+     */
+    public static final Windows DEFAULT_WINDOWS = new Windows(256 * 1024, 1024 * 1024);
+
     static final String DEFAULT_CLIENT_NAME = "jburrow-client-core";
 
     private static final Duration MAX_HANDSHAKE_TIMEOUT = Duration.ofMinutes(5);
@@ -81,6 +91,7 @@ public record ClientSettings(
             throw new IllegalArgumentException("The handshake timeout must be positive and at most "
                     + MAX_HANDSHAKE_TIMEOUT.toMinutes() + " minutes");
         }
+        Objects.requireNonNull(windows, "windows");
     }
 
     /** Whether the connection uses TLS: a {@code wss} URL. */
@@ -110,7 +121,7 @@ public record ClientSettings(
     public String toString() {
         return "ClientSettings[server=" + server + ", authtoken=***, tunnels=" + tunnels + ", clientInfo="
                 + clientInfo + ", trustManager=" + (trustManager.isPresent() ? "custom" : "system")
-                + ", handshakeTimeout=" + handshakeTimeout + "]";
+                + ", handshakeTimeout=" + handshakeTimeout + ", windows=" + windows + "]";
     }
 
     /**

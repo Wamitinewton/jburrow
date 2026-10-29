@@ -31,14 +31,18 @@ import java.net.URI;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.SplittableRandom;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,8 +57,8 @@ import org.springframework.web.client.RestClient;
  * The end-to-end harness: the full server context on real Postgres, with the real client and real sockets on loopback.
  * Nothing on the byte path is mocked.
  *
- * <p>Each subclass names its own {@code jburrow.tcp.port-range} (a 100-port range above 40,000), so each gets a context
- * of its own and no two classes share tunnel ports. The port pool quarantines and retries a port another process holds,
+ * <p>Each subclass names its own {@code jburrow.tcp.port-range}, within 31000-31999, so each gets a context of its own
+ * and no two classes share tunnel ports. The port pool quarantines and retries a port another process holds,
  * so a collision with something else on the host is harmless.
  *
  * <p>Everything a test opens through this class is closed after it, in reverse order, so no tunnel holds a port into
@@ -86,7 +90,8 @@ abstract class TunnelTestSupport {
     @LocalManagementPort
     int managementPort;
 
-    private final Deque<AutoCloseable> resources = new ArrayDeque<>();
+    /** Concurrent, so visitors can be opened from many threads at once. */
+    private final Deque<AutoCloseable> resources = new ConcurrentLinkedDeque<>();
 
     /** A started client, its established session, and what it reported. */
     record Tunnel(JBurrowClient client, TunnelHandle handle, RecordingEvents events) {
@@ -137,6 +142,11 @@ abstract class TunnelTestSupport {
         return URI.create("ws://localhost:" + edge.boundPort() + ScriptedPeer.CONNECT_PATH);
     }
 
+    /** The control URI by way of {@code proxy}, whose {@code Host} the edge still accepts. */
+    static URI connectUriThrough(ThrottlingProxy proxy) {
+        return URI.create("ws://localhost:" + proxy.port() + ScriptedPeer.CONNECT_PATH);
+    }
+
     /** A tunnel for {@code alice} to {@code service}, on a port the server chooses. */
     Tunnel openTunnel(LocalService service) throws TunnelStartException {
         return openTunnel(ALICE_TOKEN, tcp(service.port()));
@@ -172,8 +182,10 @@ abstract class TunnelTestSupport {
 
     /** {@code HELLO} and {@code REGISTER} for {@code alice}, answered; the session is established. */
     static RegisteredTunnel establish(ScriptedPeer client) {
-        client.send(
-                new Frame.Hello(new Hello(new ClientInfo("jburrow-scripted", "1.0.0", "linux", "amd64"), List.of())));
+        client.send(new Frame.Hello(new Hello(
+                new ClientInfo("jburrow-scripted", "1.0.0", "linux", "amd64"),
+                List.of(),
+                ScriptedPeer.CLIENT_WINDOWS)));
         client.send(new Frame.Register(
                 new Register(ALICE_TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, null)))));
         client.expect(Frame.ServerHello.class, TIMEOUT);
@@ -226,6 +238,33 @@ abstract class TunnelTestSupport {
             }
             Thread.sleep(10);
         }
+    }
+
+    /** Runs {@code task} on a virtual thread of its own. */
+    static <T> CompletableFuture<T> async(Callable<T> task) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        Thread.ofVirtual().start(() -> {
+            try {
+                result.complete(task.call());
+            } catch (Throwable e) {
+                result.completeExceptionally(e);
+            }
+        });
+        return result;
+    }
+
+    /** The results of every one of {@code tasks}, all within one {@code timeout}; the first failure fails the wait. */
+    static <T> List<T> awaitAll(List<CompletableFuture<T>> tasks, Duration timeout) throws Exception {
+        try {
+            CompletableFuture.allOf(tasks.toArray(CompletableFuture[]::new))
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof Exception cause) {
+                throw cause;
+            }
+            throw e;
+        }
+        return tasks.stream().map(CompletableFuture::join).toList();
     }
 
     /** The count of a counter, which must exist. */
@@ -284,14 +323,27 @@ abstract class TunnelTestSupport {
 
     /** Reads {@code in} to its end. */
     static Received drain(InputStream in) throws IOException {
+        return drain(in, new AtomicLong());
+    }
+
+    /** Reads {@code in} to its end, adding each read to {@code progress} as it arrives. */
+    static Received drain(InputStream in, AtomicLong progress) throws IOException {
         MessageDigest sha256 = sha256();
         byte[] buffer = new byte[CHUNK];
         long length = 0;
         for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
             sha256.update(buffer, 0, read);
             length += read;
+            progress.addAndGet(read);
         }
         return new Received(length, HexFormat.of().formatHex(sha256.digest()));
+    }
+
+    /** The first {@code length} bytes {@link #send} writes for {@code seed}, at most one chunk. */
+    static byte[] payloadPrefix(long seed, int length) {
+        byte[] chunk = new byte[CHUNK];
+        new SplittableRandom(seed).nextBytes(chunk);
+        return Arrays.copyOf(chunk, length);
     }
 
     static MessageDigest sha256() {

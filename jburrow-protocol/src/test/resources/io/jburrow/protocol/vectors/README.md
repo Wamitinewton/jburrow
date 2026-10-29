@@ -1,12 +1,12 @@
-# Conformance vectors for `jburrow.v1-draft.1`
+# Conformance vectors for `jburrow.v1-draft.2`
 
-These files test a frame decoder against the JBurrow wire protocol, specified in
+These files test a frame decoder against the JBurrow wire protocol, `jburrow.v1-draft.2`, specified in
 [`docs/protocol.md`](../../../../../../../../docs/protocol.md). Each vector is one binary WebSocket message and what a receiver must
 make of it: a decoded frame, or an error code. They cover steps 1 to 8 of the specification's
-[receiver rules](../../../../../../../../docs/protocol.md#12-receiver-rules), the checks that depend only on the bytes. Step 9
+[receiver rules](../../../../../../../../docs/protocol.md#13-receiver-rules), the checks that depend only on the bytes. Step 9
 (whether the frame is allowed in the session's and the stream's state) is a session's job, and no
 vector tests it. An implementation conforms to the framing layer when it passes every vector for
-each role it implements ([§14](../../../../../../../../docs/protocol.md#14-conformance)).
+each role it implements ([§15](../../../../../../../../docs/protocol.md#15-conformance)).
 
 JBurrow's own codec runs every vector in `ConformanceVectorsTest`. A third-party implementation
 can run the same files. Any bug found by fuzzing or in production becomes a new vector.
@@ -56,3 +56,7 @@ A neutral description of the decoded frame. Every frame has `type` (the registry
 | `CLOSE` | `reset`: the error code, present only for a reset (`RST` flag). Absent means a half-close. |
 | `PING`, `PONG` | `opaqueHex`: the 8 opaque bytes |
 | `HEADERS`, `GOAWAY` | nothing else. Their payloads belong to later drafts; a receiver of this draft decodes the header and then treats the frame as a session error. |
+
+A vector holds for one draft only: drafts are not compatible, and a `HELLO` of one is not a `HELLO`
+of another. These files change with the draft, and `docs/protocol.md` §1 lists what each draft
+changed.

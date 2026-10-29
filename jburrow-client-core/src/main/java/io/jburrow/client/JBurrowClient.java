@@ -2,6 +2,7 @@ package io.jburrow.client;
 
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
+import io.jburrow.protocol.control.Windows;
 import java.net.URI;
 import java.time.Duration;
 import javax.net.ssl.TrustManagerFactory;
@@ -81,6 +82,13 @@ public interface JBurrowClient extends AutoCloseable {
          * answer {@code HELLO} and {@code REGISTER}. 10 seconds by default.
          */
         Builder handshakeTimeout(Duration timeout);
+
+        /**
+         * This client's receive windows, announced to the server: how much it may send on one stream, and on all of
+         * them together, before this client returns credit. They bound what the client holds for a slow local
+         * service. 256 KiB per stream and 1 MiB for the session by default; {@link Windows} checks the bounds.
+         */
+        Builder windows(Windows windows);
 
         /**
          * Validates the settings and builds the client. Nothing connects until {@link JBurrowClient#start()}.

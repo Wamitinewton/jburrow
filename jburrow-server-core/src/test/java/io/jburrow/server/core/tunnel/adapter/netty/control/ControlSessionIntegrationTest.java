@@ -12,6 +12,7 @@ import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.testsupport.ConformanceVectors;
 import io.jburrow.protocol.testsupport.Hex;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
@@ -33,6 +34,7 @@ import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
 import io.jburrow.server.core.tunnel.domain.Principal;
 import io.netty.buffer.Unpooled;
@@ -74,6 +76,10 @@ class ControlSessionIntegrationTest {
     private static final Duration PING_INTERVAL = Duration.ofSeconds(1);
     private static final Duration IDLE_TIMEOUT = Duration.ofSeconds(2);
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
+    /** Not the defaults, so the test proves the server announces its settings rather than constants. */
+    private static final Windows SERVER_WINDOWS = new Windows(131_072, 393_216);
+
+    private static final int MAX_CONCURRENT_STREAMS = 7;
     private static final Duration STOP_TIMEOUT = Duration.ofSeconds(15);
 
     private final InMemoryAuthtokenVerifier tokens = new InMemoryAuthtokenVerifier().with(TOKEN, PRINCIPAL);
@@ -116,7 +122,12 @@ class ControlSessionIntegrationTest {
         assertThat(hello.capabilities()).isEmpty();
         assertThat(hello.limits())
                 .isEqualTo(new SessionLimits(
-                        FrameLimits.MAX_DATA_PAYLOAD, 1, 1, PING_INTERVAL.toMillis(), IDLE_TIMEOUT.toMillis()));
+                        FrameLimits.MAX_DATA_PAYLOAD,
+                        1,
+                        MAX_CONCURRENT_STREAMS,
+                        PING_INTERVAL.toMillis(),
+                        IDLE_TIMEOUT.toMillis()));
+        assertThat(hello.windows()).isEqualTo(SERVER_WINDOWS);
         RegisteredTunnel tunnel =
                 peer.expect(Frame.Registered.class, TIMEOUT).message().tunnels().getFirst();
         assertThat(tunnel.ref()).isEqualTo("default");
@@ -495,7 +506,13 @@ class ControlSessionIntegrationTest {
         RegisterTunnels register =
                 new RegisterTunnels(verifier, admission, ports, new RegistrationPolicy(1, PUBLIC_HOST));
         EngineDependencies deps = new EngineDependencies(
-                register, admission, ports, metrics, blocking, new TcpSettings("127.0.0.1", PUBLIC_HOST));
+                register,
+                admission,
+                new StreamQuota(16),
+                ports,
+                metrics,
+                blocking,
+                new TcpSettings("127.0.0.1", PUBLIC_HOST));
         sessions = new ControlSessionInitializer(settings, deps, tunnelListeners);
         edge = new EdgeServer(settings, deps, sessions);
         edge.start();
@@ -516,8 +533,9 @@ class ControlSessionIntegrationTest {
                 IDLE_TIMEOUT,
                 128 * 1024,
                 512 * 1024,
-                32 * 1024,
-                128 * 1024,
+                SERVER_WINDOWS,
+                MAX_CONCURRENT_STREAMS,
+                16,
                 "test");
     }
 
@@ -545,7 +563,8 @@ class ControlSessionIntegrationTest {
     }
 
     private static Frame hello() {
-        return new Frame.Hello(new Hello(new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), List.of()));
+        return new Frame.Hello(new Hello(
+                new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), List.of(), ScriptedPeer.CLIENT_WINDOWS));
     }
 
     private static Frame register(String authtoken, TunnelRequest... tunnels) {

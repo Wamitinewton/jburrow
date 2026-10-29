@@ -3,13 +3,17 @@ package io.jburrow.server.core.tunnel.adapter.netty.tcp;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.flow.Credit;
+import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamOutcome;
 import io.jburrow.protocol.stream.StreamState;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolException;
+import io.jburrow.protocol.wire.StreamIds;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionContext;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionStreams;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Direction;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Side;
@@ -33,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -43,6 +48,11 @@ import org.slf4j.LoggerFactory;
  * connection it carries ({@code docs/protocol.md} §9.5): a visitor's {@code FIN} becomes {@code CLOSE}, the client's
  * {@code CLOSE} shuts down the visitor's write side, and resets travel as {@code CLOSE RST} one way and TCP {@code RST}
  * the other. The session's {@link Session} decides what each event means; this class does the I/O.
+ *
+ * <p>Flow control ({@code docs/phase-2-multiplexing/ARCHITECTURE.md} §The server): a visitor is read only as far as its
+ * stream may send, which its {@link ReadGate} decides, and the client's {@code DATA} returns its credit only once its
+ * write to the visitor has completed, successfully or not. A slow visitor so holds back only its own stream, and the
+ * session's connection is always read.
  *
  * <p>A stream is in {@link #streams} exactly while the session's stream table holds it. When the table closes it, the
  * stream is finished here at once: counted, logged and forgotten, before its connection is closed, so the connection's
@@ -64,55 +74,75 @@ final class StreamRelay implements SessionStreams {
     private final Session session;
     private final Channel sessionChannel;
     private final TunnelMetrics metrics;
-    private final Backpressure backpressure;
+    private final StreamQuota streamQuota;
+    private final ReadGate gate;
     private final LongSupplier nanoTime;
     private final long byteReportNanos;
     private final Map<Integer, VisitorHandler> streams = new LinkedHashMap<>();
     private final List<VisitorHandler> written = new ArrayList<>();
 
     private ScheduledFuture<?> byteReport;
+    /** Carried bytes went out outside a visitor's read batch, and wait for the session channel's next flush. */
+    private boolean sessionFlushPending;
 
-    StreamRelay(SessionContext context, TunnelMetrics metrics) {
-        this(context, metrics, System::nanoTime, BYTE_REPORT_INTERVAL);
+    StreamRelay(SessionContext context, TunnelMetrics metrics, StreamQuota streamQuota) {
+        this(context, metrics, streamQuota, System::nanoTime, BYTE_REPORT_INTERVAL);
     }
 
-    StreamRelay(SessionContext context, TunnelMetrics metrics, LongSupplier nanoTime, Duration byteReportInterval) {
+    StreamRelay(
+            SessionContext context,
+            TunnelMetrics metrics,
+            StreamQuota streamQuota,
+            LongSupplier nanoTime,
+            Duration byteReportInterval) {
         this.context = Objects.requireNonNull(context, "context");
         this.session = context.session();
         this.sessionChannel = context.channel();
         this.metrics = Objects.requireNonNull(metrics, "metrics");
-        this.backpressure = new Backpressure(context, metrics);
+        this.streamQuota = Objects.requireNonNull(streamQuota, "streamQuota");
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        this.gate = new ReadGate(session, sessionChannel, metrics, new CarriedOutput(), nanoTime);
         this.byteReportNanos = byteReportInterval.toNanos();
     }
 
     // Visitor to client.
 
     /**
-     * A visitor connected. Admitted: send {@code OPEN}, then start reading the visitor, never before. Refused: close
-     * the connection at once; the client is not told.
+     * A visitor connected. Admitted by the session and the server-wide quota: send {@code OPEN}, then start reading the
+     * visitor, never before. Refused: close the connection at once; the client is not told. The quota is taken last,
+     * so a refusal by the session doesn't touch shared state, and given back in {@link #finish}.
      */
     void onVisitorConnected(VisitorHandler visitor) {
-        StreamAdmission admission;
+        Optional<StreamAdmission.Refusal> refusal =
+                session.checkAdmission(visitor.tunnel().id());
+        if (refusal.isPresent()) {
+            refuse(visitor, refusal.get());
+            return;
+        }
+        if (!streamQuota.tryAcquire()) {
+            refuse(visitor, StreamAdmission.Refusal.SERVER_STREAM_LIMIT);
+            return;
+        }
+        int streamId;
         try {
-            admission = session.openStream(visitor.tunnel().id());
+            streamId = session.openStream(visitor.tunnel().id());
         } catch (ProtocolException exhausted) {
+            streamQuota.release();
             visitor.channel().close();
             context.closer().fail(context, exhausted);
             return;
         }
-        switch (admission) {
-            case StreamAdmission.Refused refused -> {
-                metrics.visitorRefused(refused.reason());
-                log.debug(
-                        "visitor refused: session={} reason={} visitor={}",
-                        session.id(),
-                        refused.reason().label(),
-                        describe(visitor.remoteAddress()));
-                visitor.channel().close();
-            }
-            case StreamAdmission.Admitted admitted -> open(visitor, admitted.streamId());
-        }
+        open(visitor, streamId);
+    }
+
+    private void refuse(VisitorHandler visitor, StreamAdmission.Refusal reason) {
+        metrics.visitorRefused(reason);
+        log.debug(
+                "visitor refused: session={} reason={} visitor={}",
+                session.id(),
+                reason.label(),
+                describe(visitor.remoteAddress()));
+        visitor.channel().close();
     }
 
     private void open(VisitorHandler visitor, int streamId) {
@@ -125,44 +155,68 @@ final class StreamRelay implements SessionStreams {
                 new RemoteAddress(ipLiteral(remote), remote.getPort()));
         sessionChannel.writeAndFlush(new Frame.Open(streamId, open), sessionChannel.voidPromise());
         metrics.streamOpened(visitor.tunnel().kind());
-        backpressure.onOpened(visitor);
+        gate.onOpened(visitor);
         scheduleByteReport();
         log.debug("stream opened: session={} stream={} visitor={}", session.id(), streamId, describe(remote));
     }
 
-    /** Takes over {@code bytes}. */
+    ReadGate gate() {
+        return gate;
+    }
+
+    /**
+     * Takes over {@code bytes}. A read the gate sized is sent whole, as one {@code DATA}. A read it couldn't size (one
+     * byte with nothing sendable, or epoll draining a visitor that sent {@code FIN}) goes behind whatever the visitor
+     * already carries, and out as credit returns.
+     */
     void onVisitorData(VisitorHandler visitor, ByteBuf bytes) {
         if (!isOpen(visitor) || session.state() == SessionState.CLOSING || !bytes.isReadable()) {
             bytes.release();
             return;
         }
+        if (visitor.hasCarry() || bytes.readableBytes() > gate.sendable(visitor)) {
+            gate.hold(visitor, bytes);
+            return;
+        }
+        sendData(visitor, bytes);
+        gate.afterSend(visitor);
+    }
+
+    /** Spends the stream's and the session's credit, then writes, unflushed. Takes over {@code bytes}. */
+    private void sendData(VisitorHandler visitor, ByteBuf bytes) {
         int streamId = visitor.streamId();
-        session.onStreamSent(streamId, StreamEvent.DATA_SENT);
+        session.onDataSent(streamId, bytes.readableBytes());
         visitor.countIn(bytes.readableBytes());
         sessionChannel.write(new Frame.Data(streamId, bytes), sessionChannel.voidPromise());
     }
 
     void onVisitorReadComplete() {
+        sessionFlushPending = false;
         sessionChannel.flush();
     }
 
-    /** The visitor sent {@code FIN}: half-close the stream, and finish it if the client had already closed its half. */
+    /**
+     * The visitor sent {@code FIN}: half-close the stream, and finish it if the client had already closed its half. A
+     * half-close follows the stream's last byte, so while bytes are carried it waits for them.
+     */
     void onVisitorInputShutdown(VisitorHandler visitor) {
         if (!isOpen(visitor) || session.state() == SessionState.CLOSING) {
             return;
         }
+        if (visitor.hasCarry()) {
+            visitor.closeAfterCarry();
+            return;
+        }
+        halfClose(visitor);
+    }
+
+    private void halfClose(VisitorHandler visitor) {
         int streamId = visitor.streamId();
         session.onStreamSent(streamId, StreamEvent.CLOSE_SENT);
         sessionChannel.writeAndFlush(Frame.Close.half(streamId), sessionChannel.voidPromise());
         if (session.streamState(streamId).isEmpty()) {
             finish(visitor, "closed");
             closeAfterWrites(visitor.channel());
-        }
-    }
-
-    void onVisitorWritabilityChanged(VisitorHandler visitor, boolean writable) {
-        if (isOpen(visitor)) {
-            backpressure.onVisitorWritabilityChanged(visitor, writable);
         }
     }
 
@@ -204,30 +258,74 @@ final class StreamRelay implements SessionStreams {
 
     // Client to visitor.
 
+    /**
+     * The client's {@code DATA}. A delivered payload is held against the windows until its write to the visitor
+     * completes, successfully or not; only then does its credit go back.
+     */
     @Override
     public void onData(Frame.Data data) {
-        StreamOutcome outcome;
+        int streamId = data.streamId();
+        int length = data.payload().readableBytes();
+        DataOutcome outcome;
         try {
-            outcome = session.onStreamFrame(data.streamId(), StreamEvent.DATA_RECEIVED);
+            outcome = session.onDataReceived(streamId, length);
         } catch (RuntimeException e) {
             data.release();
             throw e;
         }
         switch (outcome) {
-            case StreamOutcome.Accept accepted -> {
-                VisitorHandler visitor = require(data.streamId());
-                ByteBuf payload = data.payload();
-                visitor.countOut(payload.readableBytes());
-                visitor.channel().write(payload, visitor.channel().voidPromise());
+            case DataOutcome.Deliver deliver -> {
+                VisitorHandler visitor = require(streamId);
+                visitor.countOut(length);
+                ChannelPromise delivered = visitor.channel().newPromise();
+                delivered.addListener(written -> onDelivered(streamId, length));
+                visitor.channel().write(data.payload(), delivered);
                 if (visitor.markFlushPending()) {
                     written.add(visitor);
                 }
             }
-            case StreamOutcome.ResetStream reset -> {
+            case DataOutcome.Reset reset -> {
                 data.release();
-                resetFromLocal(require(data.streamId()), reset.code());
+                sendCredit(streamId, reset.credit());
+                resetFromLocal(require(streamId), reset.code());
             }
-            case StreamOutcome.Discard discarded -> data.release();
+            case DataOutcome.Discard discarded -> {
+                data.release();
+                sendCredit(streamId, discarded.credit());
+            }
+        }
+    }
+
+    /** A payload's write to its visitor completed or failed: its bytes are no longer held, so its credit goes back. */
+    private void onDelivered(int streamId, int bytes) {
+        sendCredit(streamId, session.onReleased(streamId, bytes));
+    }
+
+    /**
+     * Sends the {@code WINDOW_UPDATE}s {@code credit} names, each flushed at once: updates are rare, one per half
+     * window. Nothing goes to a session that is closing, whose credit no longer matters.
+     */
+    private void sendCredit(int streamId, Credit credit) {
+        if (credit.isEmpty() || !sessionChannel.isActive() || session.state() == SessionState.CLOSING) {
+            return;
+        }
+        if (credit.session() > 0) {
+            sessionChannel.writeAndFlush(
+                    new Frame.WindowUpdate(StreamIds.CONTROL, credit.session()), sessionChannel.voidPromise());
+        }
+        if (credit.stream() > 0) {
+            sessionChannel.writeAndFlush(
+                    new Frame.WindowUpdate(streamId, credit.stream()), sessionChannel.voidPromise());
+        }
+    }
+
+    /** Credit from the client: the visitors it unblocks are read again, their carried bytes first. */
+    @Override
+    public void onWindowUpdate(Frame.WindowUpdate update) {
+        switch (session.onWindowUpdate(update.streamId(), update.increment())) {
+            case SESSION -> gate.onSessionCredit();
+            case STREAM -> gate.onStreamCredit(require(update.streamId()));
+            case IGNORED, DISCARDED -> {}
         }
     }
 
@@ -258,6 +356,7 @@ final class StreamRelay implements SessionStreams {
 
     @Override
     public void onReadComplete() {
+        flushCarried();
         if (written.isEmpty()) {
             return;
         }
@@ -270,7 +369,15 @@ final class StreamRelay implements SessionStreams {
     @Override
     public void onSessionWritabilityChanged(boolean writable) {
         if (session.state() != SessionState.CLOSING) {
-            backpressure.onSessionWritabilityChanged(writable, streams.values());
+            gate.onSessionWritable(writable);
+            flushCarried();
+        }
+    }
+
+    private void flushCarried() {
+        if (sessionFlushPending) {
+            sessionFlushPending = false;
+            sessionChannel.flush();
         }
     }
 
@@ -311,6 +418,36 @@ final class StreamRelay implements SessionStreams {
         return streams.values().stream().<Channel>map(VisitorHandler::channel).toList();
     }
 
+    @Override
+    public String describeFlow() {
+        StringBuilder description = new StringBuilder()
+                .append(session.describeFlow())
+                .append(", session channel headroom=")
+                .append(sessionChannel.bytesBeforeUnwritable())
+                .append(", waiting for the session=")
+                .append(gate.blockedOnSession().stream()
+                        .map(VisitorHandler::streamId)
+                        .toList());
+        for (VisitorHandler visitor : streams.values()) {
+            description
+                    .append("\n  stream ")
+                    .append(visitor.streamId())
+                    .append(": ")
+                    .append(session.describeStream(visitor.streamId()))
+                    .append(", sendable=")
+                    .append(gate.sendable(visitor))
+                    .append(", waiting=")
+                    .append(visitor.waiting() == null ? "-" : visitor.waiting())
+                    .append(", carried=")
+                    .append(visitor.carried())
+                    .append(", autoRead=")
+                    .append(visitor.channel().config().isAutoRead())
+                    .append(", visitor writable=")
+                    .append(visitor.channel().isWritable());
+        }
+        return description.toString();
+    }
+
     // Bookkeeping.
 
     private boolean isOpen(VisitorHandler visitor) {
@@ -329,8 +466,9 @@ final class StreamRelay implements SessionStreams {
     /** Forgets a stream the session's stream table has closed: its counters reach the session and the metrics. */
     private void finish(VisitorHandler visitor, String ending) {
         streams.remove(visitor.streamId());
+        streamQuota.release();
         written.remove(visitor);
-        backpressure.onRemoved(visitor);
+        gate.onRemoved(visitor);
         reportBytes(visitor);
         context.streamServed(visitor.bytesIn(), visitor.bytesOut());
         metrics.streamClosed(visitor.tunnel().kind());
@@ -338,13 +476,15 @@ final class StreamRelay implements SessionStreams {
             cancelByteReport();
         }
         log.info(
-                "stream closed: session={} stream={} visitor={} bytesIn={} bytesOut={} duration={}ms ending=\"{}\"",
+                "stream closed: session={} stream={} visitor={} bytesIn={} bytesOut={} duration={}ms blockedMs={}"
+                        + " ending=\"{}\"",
                 session.id(),
                 visitor.streamId(),
                 describe(visitor.remoteAddress()),
                 visitor.bytesIn(),
                 visitor.bytesOut(),
                 TimeUnit.NANOSECONDS.toMillis(nanoTime.getAsLong() - visitor.openedNanos()),
+                TimeUnit.NANOSECONDS.toMillis(visitor.blockedNanos()),
                 ending);
     }
 
@@ -420,5 +560,20 @@ final class StreamRelay implements SessionStreams {
 
     private static String describe(InetSocketAddress address) {
         return address == null ? "-" : ipLiteral(address) + ":" + address.getPort();
+    }
+
+    /** Where the gate's carried bytes, and the {@code CLOSE} that waited for them, go out. */
+    private final class CarriedOutput implements ReadGate.Output {
+
+        @Override
+        public void sendCarried(VisitorHandler visitor, ByteBuf bytes) {
+            sendData(visitor, bytes);
+            sessionFlushPending = true;
+        }
+
+        @Override
+        public void sendDeferredClose(VisitorHandler visitor) {
+            halfClose(visitor);
+        }
     }
 }

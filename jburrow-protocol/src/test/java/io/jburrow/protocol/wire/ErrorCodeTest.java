@@ -19,7 +19,7 @@ class ErrorCodeTest {
 
     private static final int NONE = -1;
 
-    /** {@code docs/protocol.md} §11.2, row for row: scopes, upgrade status, close code. */
+    /** {@code docs/protocol.md} §12.2, row for row: scopes, upgrade status, close code. */
     static Stream<Arguments> registry() {
         return Stream.of(
                 arguments(ErrorCode.NOT_FOUND, Set.of(UPGRADE), 404, NONE),

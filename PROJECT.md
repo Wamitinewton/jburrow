@@ -138,13 +138,13 @@ The stream id's top bit is reserved. Stream `0` is the control stream. The serve
 | `OPEN` | n | Server opens a stream: `tcp` (remote address) or `http` (request head) |
 | `HEADERS` | n | Client sends the HTTP response head |
 | `DATA` | n | Payload bytes, either direction |
-| `WINDOW_UPDATE` | n | Returns flow-control credit |
+| `WINDOW_UPDATE` | 0, n | Returns flow-control credit: on stream 0 for the session, on stream n for that stream |
 | `CLOSE` | n | Half-close (empty payload) or reset (`RST` flag, the error code as the payload) |
 | `PING` / `PONG` | 0 | Liveness and round-trip time |
 | `GOAWAY` | 0 | Server is draining; carries a reconnect delay |
 | `ERROR` | 0 | Session-level error with a stable code, then the session closes |
 
-Each frame's payload grows phase by phase: `jburrow.v1-draft.1`, the phase 1 draft, defines `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR` for TCP tunnels, and reserves the other three type codes for the phases that need them. Control payloads (`HELLO`, `REGISTER`, `OPEN`, `ERROR`, and later `HEADERS` and `GOAWAY`) are strict JSON, so the protocol stays debuggable while it is changing. Moving them to Protobuf is a later, versioned change negotiated through `HELLO` and doesn't need a new frame layout.
+Each frame's payload grows phase by phase: `jburrow.v1-draft.1`, the phase 1 draft, defined `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR` for TCP tunnels, and reserved the other three type codes for the phases that need them. `jburrow.v1-draft.2`, phase 2's, adds flow control: the receive windows in both `HELLO`s, `WINDOW_UPDATE`, and `FLOW_CONTROL_ERROR`. Control payloads (`HELLO`, `REGISTER`, `OPEN`, `ERROR`, and later `HEADERS` and `GOAWAY`) are strict JSON, so the protocol stays debuggable while it is changing. Moving them to Protobuf is a later, versioned change negotiated through `HELLO` and doesn't need a new frame layout.
 
 The first transport is **one frame per binary WebSocket message** over TLS on 443. That gets through corporate proxies and firewalls that would block an unusual port, and in production it goes through the same ingress as everything else. The frame keeps its own length field even though WebSocket already frames messages, so a raw TCP+TLS transport can be added later with the same codec. The protocol's major version is the WebSocket subprotocol (`jburrow.v1-draft.N` until v1.0.0, then `jburrow.v1`); within a version it only grows through capabilities negotiated in `HELLO`. The phase 1 design that implements it is [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md).
 

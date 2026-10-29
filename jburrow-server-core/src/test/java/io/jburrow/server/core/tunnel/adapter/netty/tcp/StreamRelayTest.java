@@ -8,13 +8,16 @@ import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.RemoteAddress;
 import io.jburrow.protocol.control.TunnelKind;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.stream.StreamState;
+import io.jburrow.protocol.testsupport.DuplexEmbeddedChannel;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionCloser;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionContext;
 import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.Session;
 import io.jburrow.server.core.tunnel.domain.SessionId;
@@ -34,13 +37,18 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** The relay table of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §The data path, row by row, with no sockets. */
+/**
+ * The relay table of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §The data path, row by row, with no sockets, and
+ * the client-to-visitor half of {@code docs/phase-2-multiplexing/ARCHITECTURE.md} §Client to visitor: credit on
+ * delivery. The read gate has its own test, {@link ReadGateTest}.
+ */
 class StreamRelayTest {
 
     private static final Tunnel TUNNEL = new Tunnel(TunnelId.random(), "default", TunnelKind.TCP, "localhost", 21_037);
     private static final InetSocketAddress VISITOR = new InetSocketAddress("203.0.113.9", 51_234);
 
     private final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
+    private final StreamQuota streamQuota = new StreamQuota(2);
     private final List<EmbeddedChannel> visitors = new ArrayList<>();
 
     private EmbeddedChannel sessionChannel;
@@ -51,8 +59,9 @@ class StreamRelayTest {
     @BeforeEach
     void setUp() {
         sessionChannel = new EmbeddedChannel();
-        session = new Session(SessionId.random(), 1);
-        session.onHello(new Hello(new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), List.of()));
+        session = new Session(SessionId.random(), 1, new Windows(262_144, 524_288));
+        session.onHello(new Hello(
+                new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), List.of(), new Windows(262_144, 1_048_576)));
         session.onRegisterReceived();
         session.onEstablished(new Principal("tester"), List.of(TUNNEL));
         context = new SessionContext(
@@ -62,7 +71,7 @@ class StreamRelayTest {
                 InetAddress.getLoopbackAddress(),
                 0,
                 new SessionCloser(metrics));
-        relay = new StreamRelay(context, metrics);
+        relay = new StreamRelay(context, metrics, streamQuota);
         context.streams(relay);
     }
 
@@ -86,29 +95,6 @@ class StreamRelayTest {
     }
 
     @Test
-    void aFullSessionConnectionStopsTheVisitorBeingReadUntilItDrains() {
-        DuplexEmbeddedChannel visitor = connectAndOpen();
-
-        relay.onSessionWritabilityChanged(false);
-        assertThat(visitor.config().isAutoRead()).isFalse();
-        assertThat(metrics.events()).containsOnlyOnce("backpressurePaused INBOUND");
-
-        relay.onSessionWritabilityChanged(true);
-        assertThat(visitor.config().isAutoRead()).isTrue();
-    }
-
-    @Test
-    void aVisitorWhoseInputIsShutDownIsNotReadAgainAfterTheSessionDrains() {
-        DuplexEmbeddedChannel visitor = connectAndOpen();
-        visitor.receiveFin();
-        relay.onSessionWritabilityChanged(false);
-
-        relay.onSessionWritabilityChanged(true);
-
-        assertThat(visitor.config().isAutoRead()).isFalse();
-    }
-
-    @Test
     void aSecondVisitorIsRefusedWhileTheFirstIsConnected() {
         connectAndOpen();
 
@@ -117,6 +103,45 @@ class StreamRelayTest {
         assertThat(second.isOpen()).isFalse();
         assertThat((Object) sessionChannel.readOutbound()).isNull();
         assertThat(metrics.events()).contains("visitorRefused STREAM_LIMIT");
+        assertThat(streamQuota.inUse()).isOne();
+    }
+
+    @Test
+    void aVisitorIsRefusedWhileTheServerIsAtItsStreamQuota() {
+        assertThat(streamQuota.tryAcquire()).isTrue();
+        assertThat(streamQuota.tryAcquire()).isTrue();
+
+        DuplexEmbeddedChannel visitor = connect();
+
+        assertThat(visitor.isOpen()).isFalse();
+        assertThat((Object) sessionChannel.readOutbound()).isNull();
+        assertThat(session.openStreamIds()).isEmpty();
+        assertThat(metrics.events()).contains("visitorRefused SERVER_STREAM_LIMIT");
+        assertThat(streamQuota.inUse()).isEqualTo(2);
+    }
+
+    @Test
+    void describesTheSessionsFlowAndEachOpenStream() {
+        connectAndOpen();
+
+        assertThat(relay.describeFlow())
+                .startsWith("SessionFlow[")
+                .contains("waiting for the session=[]")
+                .contains("\n  stream 1: OPEN StreamFlow[")
+                .contains("sendable=65536", "waiting=-", "carried=0", "autoRead=true");
+
+        relay.onClose(Frame.Close.reset(1, ErrorCode.CANCELLED));
+        assertThat(relay.describeFlow()).doesNotContain("stream 1");
+    }
+
+    @Test
+    void aStreamHoldsItsQuotaUntilItEnds() {
+        connectAndOpen();
+        assertThat(streamQuota.inUse()).isOne();
+
+        relay.onClose(Frame.Close.reset(1, ErrorCode.CANCELLED));
+
+        assertThat(streamQuota.inUse()).isZero();
     }
 
     @Test
@@ -160,6 +185,95 @@ class StreamRelayTest {
         assertThat(written).isSameAs(payload);
         written.release();
         assertThat(payload.refCnt()).isZero();
+    }
+
+    @Test
+    void creditGoesBackOnlyOnceTheWritesToTheVisitorCompleteAtHalfTheStreamWindow() {
+        DuplexEmbeddedChannel visitor = connectAndOpen();
+
+        relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        assertThat(sessionChannel.outboundMessages()).as("nothing written yet").isEmpty();
+        relay.onReadComplete();
+
+        assertThat((Frame.WindowUpdate) sessionChannel.readOutbound()).isEqualTo(new Frame.WindowUpdate(1, 131_072));
+        assertThat(sessionChannel.outboundMessages()).isEmpty();
+        releaseWritten(visitor);
+    }
+
+    @Test
+    void onlySessionCreditGoesBackOnceTheClientHasClosedItsHalf() {
+        DuplexEmbeddedChannel visitor = connectAndOpen();
+        for (int i = 0; i < 4; i++) {
+            relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        }
+
+        relay.onClose(Frame.Close.half(1));
+
+        assertThat((Frame.WindowUpdate) sessionChannel.readOutbound())
+                .as("the client finished the stream, so only session credit goes back")
+                .isEqualTo(new Frame.WindowUpdate(0, 262_144));
+        assertThat(sessionChannel.outboundMessages()).isEmpty();
+        releaseWritten(visitor);
+    }
+
+    @Test
+    void writesThatFailBecauseTheVisitorWasResetStillReturnSessionCredit() {
+        connectAndOpen();
+        for (int i = 0; i < 4; i++) {
+            relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        }
+
+        relay.onClose(Frame.Close.reset(1, ErrorCode.PEER_RESET));
+
+        assertThat((Frame.WindowUpdate) sessionChannel.readOutbound()).isEqualTo(new Frame.WindowUpdate(0, 262_144));
+    }
+
+    @Test
+    void dataForAClosedStreamIsDiscardedAndItsSessionCreditReturned() {
+        connectAndOpen();
+        relay.onClose(Frame.Close.reset(1, ErrorCode.PEER_RESET));
+
+        for (int i = 0; i < 4; i++) {
+            relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        }
+
+        assertThat((Frame.WindowUpdate) sessionChannel.readOutbound()).isEqualTo(new Frame.WindowUpdate(0, 262_144));
+    }
+
+    @Test
+    void noCreditIsSentOnceTheSessionIsClosing() {
+        DuplexEmbeddedChannel visitor = connectAndOpen();
+        relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[131_072 - 65_536])));
+        relay.onData(new Frame.Data(1, Unpooled.wrappedBuffer(new byte[65_536])));
+        session.onClosing(ErrorCode.SERVER_SHUTTING_DOWN);
+
+        relay.onReadComplete();
+
+        assertThat(sessionChannel.outboundMessages()).isEmpty();
+        releaseWritten(visitor);
+    }
+
+    @Test
+    void aWindowUpdateOnAStreamNeverOpenedIsAProtocolErrorAndOnAClosedOneIsDropped() {
+        connectAndOpen();
+        relay.onClose(Frame.Close.reset(1, ErrorCode.PEER_RESET));
+
+        relay.onWindowUpdate(new Frame.WindowUpdate(1, 1_000));
+        assertThatThrownBy(() -> relay.onWindowUpdate(new Frame.WindowUpdate(3, 1_000)))
+                .isInstanceOfSatisfying(
+                        ProtocolException.class,
+                        error -> assertThat(error.code()).isEqualTo(ErrorCode.PROTOCOL_ERROR));
+    }
+
+    @Test
+    void aWindowUpdatePastTheLargestCreditIsAFlowControlError() {
+        connectAndOpen();
+
+        assertThatThrownBy(() -> relay.onWindowUpdate(new Frame.WindowUpdate(0, Integer.MAX_VALUE)))
+                .isInstanceOfSatisfying(
+                        ProtocolException.class,
+                        error -> assertThat(error.code()).isEqualTo(ErrorCode.FLOW_CONTROL_ERROR));
     }
 
     @Test
@@ -316,6 +430,12 @@ class StreamRelayTest {
         DuplexEmbeddedChannel visitor = connect();
         assertThat((Object) sessionChannel.readOutbound()).isInstanceOf(Frame.Open.class);
         return visitor;
+    }
+
+    private static void releaseWritten(EmbeddedChannel visitor) {
+        for (Object written = visitor.readOutbound(); written != null; written = visitor.readOutbound()) {
+            ReferenceCountUtil.release(written);
+        }
     }
 
     private static ByteBuf ascii(String text) {

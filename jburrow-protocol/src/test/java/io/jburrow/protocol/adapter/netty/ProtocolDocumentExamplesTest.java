@@ -20,6 +20,7 @@ import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.FrameType;
@@ -85,7 +86,8 @@ class ProtocolDocumentExamplesTest {
     private static Map<String, Expected> expected() {
         Map<String, Expected> examples = new LinkedHashMap<>();
         examples.put("data", new Expected(SERVER, () -> new Frame.Data(1, ascii("SSH-2.0-OpenSSH_9.6\r\n"))));
-        examples.put("window-update", new Expected(CLIENT, () -> new Frame.WindowUpdate(1, 65_536)));
+        examples.put("window-update", new Expected(CLIENT, () -> new Frame.WindowUpdate(1, 131_072)));
+        examples.put("window-update-session", new Expected(SERVER, () -> new Frame.WindowUpdate(0, 262_144)));
         examples.put("close-half", new Expected(CLIENT, () -> Frame.Close.half(1)));
         examples.put(
                 "close-reset", new Expected(CLIENT, () -> Frame.Close.reset(1, ErrorCode.LOCAL_SERVICE_UNREACHABLE)));
@@ -95,8 +97,10 @@ class ProtocolDocumentExamplesTest {
                 "hello-client",
                 new Expected(
                         CLIENT,
-                        () -> new Frame.Hello(
-                                new Hello(new ClientInfo("jburrow-cli", "0.2.0", "linux", "amd64"), List.of()))));
+                        () -> new Frame.Hello(new Hello(
+                                new ClientInfo("jburrow-cli", "0.2.0", "linux", "amd64"),
+                                List.of(),
+                                new Windows(262_144, 1_048_576)))));
         examples.put(
                 "hello-server",
                 new Expected(
@@ -105,7 +109,8 @@ class ProtocolDocumentExamplesTest {
                                 SESSION_ID,
                                 new ServerInfo("jburrow-server", "0.2.0"),
                                 List.of(),
-                                new SessionLimits(65_536, 1, 1, 15_000, 45_000)))));
+                                new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+                                new Windows(262_144, 524_288)))));
         examples.put(
                 "register-request",
                 new Expected(

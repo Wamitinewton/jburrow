@@ -11,13 +11,13 @@ import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
 import io.jburrow.server.core.tunnel.application.PlannedTunnel;
 import io.jburrow.server.core.tunnel.application.Registration;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.domain.Tunnel;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoop;
-import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.unix.Errors;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -58,7 +58,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
     private final PortReservations ports;
     private final InetAddress bindAddress;
     private final String publicHost;
-    private final WriteBufferWaterMark visitorWatermarks;
+    private final StreamQuota streamQuota;
     private final TunnelMetrics metrics;
 
     public NettyTunnelListeners(EdgeSettings settings, EngineDependencies deps) {
@@ -69,7 +69,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
                 .orElseThrow(() -> new IllegalArgumentException("The tunnel bind address must be an IP literal: "
                         + deps.tcp().bindAddress()));
         this.publicHost = deps.tcp().publicHost();
-        this.visitorWatermarks = new WriteBufferWaterMark(settings.visitorWriteLow(), settings.visitorWriteHigh());
+        this.streamQuota = deps.streamQuota();
         this.metrics = deps.metrics();
     }
 
@@ -78,7 +78,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(registration, "registration");
         Channel channel = session.channel();
-        StreamRelay relay = new StreamRelay(session, metrics);
+        StreamRelay relay = new StreamRelay(session, metrics, streamQuota);
         session.streams(relay);
         channel.attr(LISTENERS).set(new ArrayList<>());
         Promise<List<Tunnel>> bound = channel.eventLoop().newPromise();
@@ -138,7 +138,6 @@ public final class NettyTunnelListeners implements TunnelListeners {
             TunnelListener listener = TunnelListener.bind(
                     loop,
                     new InetSocketAddress(bindAddress, next.reservation().port()),
-                    visitorWatermarks,
                     new ChannelInitializer<Channel>() {
                         @Override
                         protected void initChannel(Channel visitor) {

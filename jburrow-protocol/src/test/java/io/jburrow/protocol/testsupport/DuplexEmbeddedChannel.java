@@ -1,4 +1,4 @@
-package io.jburrow.server.core.tunnel.adapter.netty.tcp;
+package io.jburrow.protocol.testsupport;
 
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
@@ -9,14 +9,17 @@ import io.netty.channel.socket.DuplexChannel;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 
-/** An {@link EmbeddedChannel} that stands in for an accepted visitor connection, half-closure included. */
-final class DuplexEmbeddedChannel extends EmbeddedChannel implements DuplexChannel {
+/**
+ * An {@link EmbeddedChannel} that stands in for a TCP connection on the byte path, half-closure included: a visitor's on
+ * the server, a local service's on the client.
+ */
+public final class DuplexEmbeddedChannel extends EmbeddedChannel implements DuplexChannel {
 
     private final InetSocketAddress remote;
     private boolean inputShutdown;
     private boolean outputShutdown;
 
-    DuplexEmbeddedChannel(InetSocketAddress remote, ChannelHandler... handlers) {
+    public DuplexEmbeddedChannel(InetSocketAddress remote, ChannelHandler... handlers) {
         super(false, true, handlers);
         this.remote = remote;
         try {
@@ -80,8 +83,8 @@ final class DuplexEmbeddedChannel extends EmbeddedChannel implements DuplexChann
         return promise.setSuccess();
     }
 
-    /** The visitor sent {@code FIN}, as a real socket channel with half-closure allowed reports it. */
-    void receiveFin() {
+    /** The peer sent {@code FIN}, as a real socket channel with half-closure allowed reports it. */
+    public void receiveFin() {
         inputShutdown = true;
         pipeline().fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
     }

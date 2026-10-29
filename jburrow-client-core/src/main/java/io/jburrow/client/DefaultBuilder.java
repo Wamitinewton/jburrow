@@ -3,6 +3,7 @@ package io.jburrow.client;
 import io.jburrow.client.tunnel.adapter.netty.NettyTunnelClient;
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
+import io.jburrow.protocol.control.Windows;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     private String clientVersion = ClientSettings.defaultClientVersion();
     private TrustManagerFactory trustManager;
     private Duration handshakeTimeout = ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT;
+    private Windows windows = ClientSettings.DEFAULT_WINDOWS;
 
     @Override
     public JBurrowClient.Builder server(URI uri) {
@@ -67,6 +69,12 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     }
 
     @Override
+    public JBurrowClient.Builder windows(Windows receiveWindows) {
+        this.windows = Objects.requireNonNull(receiveWindows, "receiveWindows");
+        return this;
+    }
+
+    @Override
     public JBurrowClient build() {
         return new NettyTunnelClient(new ClientSettings(
                 server,
@@ -75,6 +83,7 @@ final class DefaultBuilder implements JBurrowClient.Builder {
                 events,
                 ClientSettings.clientInfo(clientName, clientVersion),
                 Optional.ofNullable(trustManager),
-                handshakeTimeout));
+                handshakeTimeout,
+                windows));
     }
 }

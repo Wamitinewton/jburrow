@@ -1,11 +1,11 @@
 # JBurrow wire protocol
 
-Version `jburrow.v1-draft.1`.
+Version `jburrow.v1-draft.2`.
 
 This document specifies the protocol between a JBurrow client and a JBurrow server: how the client
 connects, how the two sides agree on a version, the frames they exchange, and what a receiver does
 with every byte sequence it can be sent. It is written for someone implementing a client or a
-server in any language, without reading JBurrow's code. The conformance vectors (§14) let such an
+server in any language, without reading JBurrow's code. The conformance vectors (§15) let such an
 implementation test its frame decoder against the same cases as the reference implementation.
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
@@ -25,17 +25,18 @@ capitals, as shown here.
 7. [Control payloads](#7-control-payloads)
 8. [Sessions](#8-sessions)
 9. [Streams](#9-streams)
-10. [Liveness](#10-liveness)
-11. [Errors](#11-errors)
-12. [Receiver rules](#12-receiver-rules)
-13. [Limits](#13-limits)
-14. [Conformance](#14-conformance)
-15. [Security considerations](#15-security-considerations)
-16. [Reference implementation](#16-reference-implementation)
+10. [Flow control](#10-flow-control)
+11. [Liveness](#11-liveness)
+12. [Errors](#12-errors)
+13. [Receiver rules](#13-receiver-rules)
+14. [Limits](#14-limits)
+15. [Conformance](#15-conformance)
+16. [Security considerations](#16-security-considerations)
+17. [Reference implementation](#17-reference-implementation)
 
 ## 1. Status and version
 
-This document specifies `jburrow.v1-draft.1`. It is the authority on the wire. Other JBurrow
+This document specifies `jburrow.v1-draft.2`. It is the authority on the wire. Other JBurrow
 documents that describe the protocol summarize this one, and where they disagree, this one is
 right.
 
@@ -53,6 +54,7 @@ Section numbers refer to the document of the draft in the same row.
 | `jburrow.v1-draft.1` | 2026-10-19 | 1–16 | First draft: WebSocket transport, the frame format and type registry, `HELLO`, `REGISTER`, `OPEN`, `DATA`, `CLOSE`, `PING`, `PONG` and `ERROR`, one stream at a time, TCP tunnels only. `HEADERS`, `WINDOW_UPDATE` and `GOAWAY` are assigned type codes but may not be sent. |
 | `jburrow.v1-draft.1` | 2026-10-25 | 3.3, 3.5 | Clarified, not a wire change: a request that isn't valid HTTP/1.1 is refused with `PROTOCOL_ERROR` before the checks; `SERVER_SHUTTING_DOWN` refusals carry `Retry-After` too. |
 | `jburrow.v1-draft.1` | 2026-10-25 | 10 | A side that has paused reading keeps sending `PING` every `pingIntervalMs`, so its peer doesn't end a healthy session during a long stall. Not a wire change: every peer already answers a `PING`. |
+| `jburrow.v1-draft.2` | 2026-10-26 | 1, 2.1, 4.1, 4.2, 6, 6.5, 6.6, 7.3, 7.4, 8.2, 8.3, 8.5, 9.2–9.5, 10–17 | Flow control. Each side announces its receive windows in its `HELLO` (`windows`, required). `WINDOW_UPDATE` is defined, on stream 0 for the session window and on a data stream for that stream's window. `DATA` past a window, or credit past `2^31 - 1`, is the new session error `FLOW_CONTROL_ERROR`. Optimistic data is bounded by the client's stream window, and a client no longer stops reading the connection while it connects to a local target. New §10; §10–§16 of draft 1 are §11–§17. Not compatible with draft 1. |
 
 ## 2. Conventions
 
@@ -73,7 +75,10 @@ Section numbers refer to the document of the draft in the same row.
 | stream | One visitor connection carried over a session (§9). |
 | control stream | Stream `0`. It carries the frames about the session itself. |
 | data stream | Any stream other than `0`. |
-| code | An error code from the registry in §11. |
+| code | An error code from the registry in §12. |
+| credit | How many more bytes of `DATA` a sender may send, on one stream or on the session (§10). |
+| window | The credit a receiver gives its peer to start with, announced in its `HELLO`: one for each new stream and one for the session (§10.1). |
+| release | A receiver releases a byte of `DATA` when it no longer holds it: it has written the byte to its destination, or discarded it (§10.4). |
 
 ### 2.2 Notation
 
@@ -89,12 +94,12 @@ Section numbers refer to the document of the draft in the same row.
   16 bytes of the payload. Line breaks mean nothing. A control frame's example also shows its JSON
   payload, pretty-printed for reading; the hex is the exact bytes a sender produces, which carry
   the same JSON without whitespace. Every example is checked against the reference implementation
-  (§16).
+  (§17).
 
 ### 2.3 Session errors and stream errors
 
 Each error a receiver detects is either a session error or a stream error, and each has a code
-from §11.
+from §12.
 
 - **A session error** ends the session. The receiver sends an `ERROR` frame with the code, if the
   connection can still carry it, and then closes the connection (§8.6). Every stream of the session
@@ -179,13 +184,13 @@ The session starts when the upgrade completes. That moment starts the handshake 
 
 ### 3.5 A refused upgrade
 
-A server refuses an upgrade with an ordinary HTTP response: the status that §11 gives the code,
+A server refuses an upgrade with an ordinary HTTP response: the status that §12 gives the code,
 `Connection: close`, `Content-Type: application/json`, and this body:
 
 | Field | Type | Rule |
 |---|---|---|
 | `success` | boolean | Always `false`. |
-| `code` | string | The code, from §11. Only codes with upgrade scope appear here. |
+| `code` | string | The code, from §12. Only codes with upgrade scope appear here. |
 | `message` | string | For a person to read. |
 | `supported` | array of string | Only with `UNSUPPORTED_PROTOCOL_VERSION`: every token the server speaks. |
 | `timestamp` | string | The time of the refusal, as an RFC 3339 date-time in UTC. |
@@ -217,15 +222,15 @@ usually comes from something between the client and the server.
 - A text message is `PROTOCOL_ERROR`.
 - A message MAY be fragmented (RFC 6455 §5.4), since intermediaries may fragment. A receiver
   reassembles the whole message before it decodes the frame.
-- A message is at most 65,546 bytes: a 10-byte header and the largest payload (§13). A longer
+- A message is at most 65,546 bytes: a 10-byte header and the largest payload (§14). A longer
   message is `FRAME_SIZE_ERROR`. A receiver MAY instead close the connection with WebSocket status
   `1009` (Message Too Big) as soon as a message grows past 65,546 bytes, without sending `ERROR`,
   so that it never has to buffer it.
 - Client messages are masked and server messages are not, as RFC 6455 §5.3 requires.
 - No WebSocket extension is ever negotiated. In particular `permessage-deflate` is not: it would
-  compress bytes an attacker chooses in the same context as the authtoken (§15).
+  compress bytes an attacker chooses in the same context as the authtoken (§16).
 - WebSocket `Ping` frames are answered with `Pong` as RFC 6455 §5.5.2 requires, but WebSocket
-  `Ping` and `Pong` play no part in this protocol and do not count as proof of life (§10). The
+  `Ping` and `Pong` play no part in this protocol and do not count as proof of life (§11). The
   protocol's own `PING` and `PONG` frames do that, so liveness works the same over a future
   transport without WebSocket.
 
@@ -243,7 +248,8 @@ The version is the WebSocket subprotocol. Tokens are compared exactly, case incl
 
 | Token | Meaning |
 |---|---|
-| `jburrow.v1-draft.1` | This document. |
+| `jburrow.v1-draft.1` | The first draft, without flow control. |
+| `jburrow.v1-draft.2` | This document. |
 | `jburrow.v1-draft.N` | Each later wire-incompatible change before JBurrow v1.0.0 increments `N`. |
 | `jburrow.v1` | Frozen at JBurrow v1.0.0. |
 
@@ -262,7 +268,7 @@ lists the capabilities it supports in its `HELLO` (§7.3). The server answers in
 - A server ignores capabilities in the client's list that it doesn't know.
 - A client ignores capabilities in the server's list that it didn't offer.
 
-`jburrow.v1-draft.1` defines no capabilities. A client of this draft sends an empty list, and a
+`jburrow.v1-draft.2` defines no capabilities. A client of this draft sends an empty list, and a
 server of this draft answers with an empty list.
 
 ### 4.3 What a receiver doesn't know
@@ -320,7 +326,7 @@ truncation and framing bugs at the first bad frame.
 | `0x03` | `OPEN` | new data stream | server | JSON, 0–16,384 | none | §6.3 |
 | `0x04` | `HEADERS` | data stream | client | 0–16,384 | none | reserved (§6.4) |
 | `0x05` | `DATA` | data stream | both | bytes, 1–65,536 | none | §6.5 |
-| `0x06` | `WINDOW_UPDATE` | data stream | both | `u32`, exactly 4 | none | layout only (§6.6) |
+| `0x06` | `WINDOW_UPDATE` | 0 or data stream | both | `u32`, exactly 4 | none | §6.6 |
 | `0x07` | `CLOSE` | data stream | both | empty, or a code of 1–64 | `0x01` `RST` | §6.7 |
 | `0x08` | `PING` | 0 | both | exactly 8 | none | §6.8 |
 | `0x09` | `PONG` | 0 | both | exactly 8 | none | §6.9 |
@@ -331,7 +337,7 @@ Type `0x00` and types `0x0C` to `0xFF` are unassigned, and receiving one is `PRO
 assigned code is never reused for another type.
 
 "Sent by" is part of the type: a server that receives `OPEN` or `GOAWAY`, or a client that receives
-`HEADERS`, raises `PROTOCOL_ERROR` before looking at anything else about the frame (§12, step 4).
+`HEADERS`, raises `PROTOCOL_ERROR` before looking at anything else about the frame (§13, step 4).
 "none" in the flags column means that no flag is defined, so the flags byte MUST be `0x00`.
 
 A JSON payload of length 0 passes the length check and then fails to parse, as `PROTOCOL_ERROR`
@@ -366,7 +372,7 @@ Reserved for HTTP tunnels, defined in a later draft. In this draft no peer may s
 
 - Sent by the client only, on a data stream. No flags. Payload: up to 16,384 bytes, which a
   receiver of this draft doesn't parse.
-- A client that receives `HEADERS` raises `PROTOCOL_ERROR` at step 4 of §12. A server that receives
+- A client that receives `HEADERS` raises `PROTOCOL_ERROR` at step 4 of §13. A server that receives
   one decodes the header, checks the length and the flags, and then raises `PROTOCOL_ERROR` at
   step 9.
 
@@ -379,7 +385,8 @@ Carries stream bytes, in either direction.
   `FRAME_SIZE_ERROR`: it carries nothing, and allowing it would let a peer make the receiver work
   for free. A server MAY announce a lower maximum in `limits.maxFramePayload` (§7.4), and a client
   MUST NOT send `DATA` longer than that.
-- When `DATA` may be sent and received is in §9.2.
+- When `DATA` may be sent and received is in §9.2, and how much of it in §10. `DATA` is the only
+  flow-controlled frame.
 
 The server sends a visitor's first bytes, `SSH-2.0-OpenSSH_9.6` and a CRLF, on stream 1:
 
@@ -393,20 +400,30 @@ The server sends a visitor's first bytes, `SSH-2.0-OpenSSH_9.6` and a CRLF, on s
 
 ### 6.6 `WINDOW_UPDATE` (0x06)
 
-Reserved for per-stream flow control. A later draft defines when it is sent; this draft fixes its
-payload so that the receiver rules cover it. In this draft no peer may send it, and receiving a
-well-formed one is `PROTOCOL_ERROR` at step 9 of §12.
+Returns flow-control credit to the peer (§10). On stream 0 it adds to the session's credit; on a data
+stream, to that stream's.
 
-- A data stream. No flags.
+- Stream 0 or a data stream. No flags.
 - Payload: exactly 4 bytes, a `u32` credit increment from `1` to `2^31 - 1`. Any other value is
-  `PROTOCOL_ERROR`, at step 8.
+  `PROTOCOL_ERROR`, at step 8 of §13.
+- It may be sent only once the session is established (§8.2). When a receiver sends it is in §10.4,
+  and what it does in each state of its stream in §9.2.
 
-The layout, for an increment of 65,536 on stream 1:
+The client returns 131,072 bytes of credit on stream 1:
 
 <!-- example:window-update -->
 ```text
 00 00 00 01 06 00 00 00 00 04
-00 01 00 00
+00 02 00 00
+```
+<!-- /example -->
+
+The server returns 262,144 bytes of session credit:
+
+<!-- example:window-update-session -->
+```text
+00 00 00 00 06 00 00 00 00 04
+00 04 00 00
 ```
 <!-- /example -->
 
@@ -422,7 +439,7 @@ Ends one direction of a stream, or the whole stream.
 - A data stream. Bits other than `RST` MUST be 0.
 - The allowed length depends on the `RST` bit alone: 0 without it, 1 to 64 with it. Any other
   length is `FRAME_SIZE_ERROR`.
-- A reset's payload is a code from §11 in ASCII, with no terminator. Each byte MUST be one of
+- A reset's payload is a code from §12 in ASCII, with no terminator. Each byte MUST be one of
   `A`–`Z`, `0`–`9` or `_`; the code MUST be in the registry; and it MUST have stream scope.
   Anything else is `PROTOCOL_ERROR`: a peer may not invent codes, and a session-only code such as
   `AUTHTOKEN_INVALID` can't end a stream.
@@ -450,7 +467,7 @@ The client resets stream 1 because its local target refused the connection:
 
 ### 6.8 `PING` (0x08)
 
-Asks the peer for proof of life (§10).
+Asks the peer for proof of life (§11).
 
 - Stream 0. No flags. Payload: exactly 8 bytes, chosen by the sender and opaque to the receiver. A
   counter is a good choice.
@@ -466,7 +483,7 @@ The server pings with the opaque value 1:
 
 ### 6.9 `PONG` (0x09)
 
-Answers a `PING` (§10).
+Answers a `PING` (§11).
 
 - Stream 0. No flags. Payload: exactly 8 bytes, the payload of the `PING` it answers.
 
@@ -486,7 +503,7 @@ peer may send it.
 
 - Sent by the server only, on stream 0. No flags. Payload: up to 16,384 bytes, which a receiver of
   this draft doesn't parse.
-- A server that receives `GOAWAY` raises `PROTOCOL_ERROR` at step 4 of §12. A client that receives
+- A server that receives `GOAWAY` raises `PROTOCOL_ERROR` at step 4 of §13. A client that receives
   one decodes the header, checks the length and the flags, and then raises `PROTOCOL_ERROR` at
   step 9.
 
@@ -540,7 +557,7 @@ without negotiation (§4.3).
 A receiver checks rules 1 to 5 over the whole payload before it looks at any field, so a payload
 that breaks one of them is `PROTOCOL_ERROR` whatever else it breaks. When a payload breaks rule 6
 or 7 and also a field rule, which of them the receiver reports is not specified; both end the
-session. The conformance vectors (§14) each break exactly one rule.
+session. The conformance vectors (§15) each break exactly one rule.
 
 Every JSON string may use any escape RFC 8259 allows. An escaped unpaired surrogate such as
 `\ud800` is not an error; it can only appear where the field rules allow any text, and a sender
@@ -573,6 +590,9 @@ tables.
 | `client.os` | string | Optional. `[a-z0-9_]{1,32}`. The operating system, such as `linux`. |
 | `client.arch` | string | Optional. `[a-z0-9_]{1,32}`. The processor architecture, such as `amd64`. |
 | `capabilities` | array of string | 0 to 32 entries, each `[a-z0-9.-]{1,64}`, no two equal (§4.2). |
+| `windows` | object | The client's receive windows (§10.1). |
+| `windows.stream` | integer (32-bit) | 65,536 to `2^31 - 1`. The credit the server starts with on each new stream, for `DATA` it sends the client. |
+| `windows.session` | integer (32-bit) | At least `windows.stream`, at most `2^31 - 1`. The credit the server starts with for `DATA` it sends the client on all streams together. |
 
 `client` is for logs and diagnostics only; it has no effect on the protocol.
 
@@ -580,19 +600,22 @@ tables.
 ```json
 {
   "client": { "name": "jburrow-cli", "version": "0.2.0", "os": "linux", "arch": "amd64" },
-  "capabilities": []
+  "capabilities": [],
+  "windows": { "stream": 262144, "session": 1048576 }
 }
 ```
 
 ```text
-00 00 00 00 01 00 00 00 00 61
+00 00 00 00 01 00 00 00 00 8f
 7b 22 63 6c 69 65 6e 74 22 3a 7b 22 6e 61 6d 65
 22 3a 22 6a 62 75 72 72 6f 77 2d 63 6c 69 22 2c
 22 76 65 72 73 69 6f 6e 22 3a 22 30 2e 32 2e 30
 22 2c 22 6f 73 22 3a 22 6c 69 6e 75 78 22 2c 22
 61 72 63 68 22 3a 22 61 6d 64 36 34 22 7d 2c 22
 63 61 70 61 62 69 6c 69 74 69 65 73 22 3a 5b 5d
-7d
+2c 22 77 69 6e 64 6f 77 73 22 3a 7b 22 73 74 72
+65 61 6d 22 3a 32 36 32 31 34 34 2c 22 73 65 73
+73 69 6f 6e 22 3a 31 30 34 38 35 37 36 7d 7d
 ```
 <!-- /example -->
 
@@ -609,13 +632,17 @@ tables.
 | `limits.maxFramePayload` | integer (32-bit) | 1 to 65,536. The longest `DATA` payload the client may send. |
 | `limits.maxTunnels` | integer (32-bit) | At least 1. The most tunnels the client may ask for in its `REGISTER`. |
 | `limits.maxConcurrentStreams` | integer (32-bit) | At least 1. The most streams the server will have open at once on this session. |
-| `limits.pingIntervalMs` | integer (64-bit) | At least 1,000. Silence after which a side sends `PING` (§10). |
-| `limits.idleTimeoutMs` | integer (64-bit) | At least twice `pingIntervalMs`. Silence after which a side declares its peer dead (§10). |
+| `limits.pingIntervalMs` | integer (64-bit) | At least 1,000. Silence after which a side sends `PING` (§11). |
+| `limits.idleTimeoutMs` | integer (64-bit) | At least twice `pingIntervalMs`. Silence after which a side declares its peer dead (§11). |
+| `windows` | object | The server's receive windows (§10.1). |
+| `windows.stream` | integer (32-bit) | 65,536 to `2^31 - 1`. The credit the client starts with on each new stream, for `DATA` it sends the server. |
+| `windows.session` | integer (32-bit) | At least `windows.stream`, at most `2^31 - 1`. The credit the client starts with for `DATA` it sends the server on all streams together. |
 
 The limits are announced, not fixed, so that a server's operator can tune them and a later draft
 can raise `maxConcurrentStreams` without a new frame. The client MUST stay within them, and the
 server enforces them (§8.5). `maxFramePayload` can only lower the protocol's 65,536-byte maximum,
-never raise it.
+never raise it. The windows are the server's own, as the client's `windows` are the client's: each
+side announces what it is willing to receive, and neither side's windows change during the session.
 
 <!-- example:hello-server -->
 ```json
@@ -629,12 +656,13 @@ never raise it.
     "maxConcurrentStreams": 1,
     "pingIntervalMs": 15000,
     "idleTimeoutMs": 45000
-  }
+  },
+  "windows": { "stream": 262144, "session": 524288 }
 }
 ```
 
 ```text
-00 00 00 00 01 00 00 00 00 f3
+00 00 00 00 01 00 00 00 01 20
 7b 22 73 65 73 73 69 6f 6e 49 64 22 3a 22 30 62
 38 65 35 63 31 65 2d 37 63 35 35 2d 34 63 34 36
 2d 39 61 33 65 2d 32 66 31 64 30 63 39 65 34 62
@@ -650,7 +678,9 @@ never raise it.
 73 22 3a 31 2c 22 70 69 6e 67 49 6e 74 65 72 76
 61 6c 4d 73 22 3a 31 35 30 30 30 2c 22 69 64 6c
 65 54 69 6d 65 6f 75 74 4d 73 22 3a 34 35 30 30
-30 7d 7d
+30 7d 2c 22 77 69 6e 64 6f 77 73 22 3a 7b 22 73
+74 72 65 61 6d 22 3a 32 36 32 31 34 34 2c 22 73
+65 73 73 69 6f 6e 22 3a 35 32 34 32 38 38 7d 7d
 ```
 <!-- /example -->
 
@@ -771,7 +801,7 @@ unlocks a server running on the developer's own machine.
 
 | Field | Type | Rule |
 |---|---|---|
-| `code` | string | A code from §11 whose scope includes session or upgrade, spelled exactly. A code the registry doesn't have, or one with stream scope only, is `VALIDATION_FAILED`. |
+| `code` | string | A code from §12 whose scope includes session or upgrade, spelled exactly. A code the registry doesn't have, or one with stream scope only, is `VALIDATION_FAILED`. |
 | `message` | string | Length 1 to 512. For a person to read. It never contains a secret, a stack trace, an internal address or any part of a payload the sender received. |
 | `ref` | string | Optional. The rule of a tunnel `ref`: the tunnel the error is about. |
 
@@ -831,15 +861,15 @@ receives the `REGISTER` reply.
 
 | From | Before the session is established | Once it is established |
 |---|---|---|
-| Client | `HELLO` first; then `REGISTER`, exactly once; `PING`, `PONG` | `DATA` and `CLOSE` on streams the server opened; `PING`, `PONG` |
-| Server | `HELLO` first, after the client's `HELLO` arrives; then the `REGISTER` reply, exactly once, after the client's `REGISTER` arrives; `PING`, `PONG` | `OPEN`, `DATA`, `CLOSE`; `PING`, `PONG` |
+| Client | `HELLO` first; then `REGISTER`, exactly once; `PING`, `PONG` | `DATA`, `CLOSE` and `WINDOW_UPDATE` on streams the server opened; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
+| Server | `HELLO` first, after the client's `HELLO` arrives; then the `REGISTER` reply, exactly once, after the client's `REGISTER` arrives; `PING`, `PONG` | `OPEN`, `DATA`, `CLOSE` and `WINDOW_UPDATE` on data streams; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
 
 Either side may send `ERROR` at any point, including first, and it ends the session (§8.6).
 
 Any frame outside this table is `PROTOCOL_ERROR`, in either direction. In particular: a frame
 other than `HELLO` or `ERROR` before the peer's `HELLO`; a second `HELLO`; a second `REGISTER`;
-`OPEN`, `DATA` or `CLOSE` before the session is established; and in this draft any `HEADERS`,
-`WINDOW_UPDATE` or `GOAWAY`.
+`OPEN`, `DATA`, `CLOSE` or `WINDOW_UPDATE` before the session is established; and in this draft any
+`HEADERS` or `GOAWAY`.
 
 Stream 0 is processed in order. A receiver handles each control frame completely, including any
 error it raises, before the next one.
@@ -854,11 +884,11 @@ The client SHOULD send `REGISTER` immediately after its `HELLO`, without waiting
 sequenceDiagram
     participant C as Client
     participant S as Server
-    C->>S: WebSocket upgrade, Sec-WebSocket-Protocol: jburrow.v1-draft.1
-    S-->>C: 101 Switching Protocols, jburrow.v1-draft.1
-    C->>S: HELLO {client, capabilities}
+    C->>S: WebSocket upgrade, Sec-WebSocket-Protocol: jburrow.v1-draft.2
+    S-->>C: 101 Switching Protocols, jburrow.v1-draft.2
+    C->>S: HELLO {client, capabilities, windows}
     C->>S: REGISTER {authtoken, tunnels}
-    S-->>C: HELLO {sessionId, capabilities, limits}
+    S-->>C: HELLO {sessionId, capabilities, limits, windows}
     Note over S: verify the authtoken, create the tunnels
     S-->>C: REGISTER {tunnels}
 ```
@@ -870,7 +900,7 @@ authtoken. The server chooses the timeout and doesn't announce it; the reference
 seconds.
 
 A client SHOULD give up on a server whose `HELLO` hasn't arrived within a timeout of its own. Until
-that `HELLO` arrives, the client has no liveness intervals (§10).
+that `HELLO` arrives, the client has no liveness intervals (§11).
 
 ### 8.4 Registration
 
@@ -907,19 +937,23 @@ the server enforces them:
   refuses further visitor connections to the session's tunnels without telling the client. The
   client doesn't check this limit: its view of which streams are open can lag behind the server's.
 
+The windows (§10.1) are limits of the same kind, announced by both sides: a sender stays within its
+peer's, and a receiver treats `DATA` past its own as `FLOW_CONTROL_ERROR` (§10.5). They are the most
+`DATA` a peer can make a receiver hold, on one stream and on the session.
+
 ### 8.6 Closing
 
 A session ends in one of three ways:
 
 - **With an error.** The side that detects a session error sends `ERROR` with its code, then a
-  WebSocket close frame whose status is the code's close code (§11), and then closes the TCP
+  WebSocket close frame whose status is the code's close code (§12), and then closes the TCP
   connection, waiting at most 2 seconds for the peer's close frame. A side that receives `ERROR`
   sends no further frames and completes the WebSocket close. The WebSocket close status is advisory,
-  for intermediaries and logs; a receiver decides on the `ERROR` code (§11.3).
+  for intermediaries and logs; a receiver decides on the `ERROR` code (§12.3).
 - **On purpose, by the client.** A client that stops sends a WebSocket close frame with status
   `1000` and no `ERROR`.
 - **By losing the connection.** The TCP connection fails, or one side declares the other dead
-  (§10).
+  (§11).
 
 A side that closes without being able to send `ERROR`, because the connection is already gone,
 just closes. When a session ends, for any reason, every stream on it is reset on both sides, and the
@@ -966,17 +1000,22 @@ stateDiagram-v2
 
 The complete table. "CLOSE" is the half-close, and "RST" is `CLOSE` with the `RST` flag.
 
-| State | `DATA` received | `CLOSE` received | `RST` received | `DATA` sent | `CLOSE` sent | `RST` sent |
-|---|---|---|---|---|---|---|
-| Open | delivered | → HalfClosedRemote | → Closed | allowed | → HalfClosedLocal | → Closed |
-| HalfClosedLocal | delivered | → Closed | → Closed | MUST NOT | MUST NOT | → Closed |
-| HalfClosedRemote | stream error `STREAM_CLOSED` | stream error `STREAM_CLOSED` | → Closed | allowed | → Closed | → Closed |
-| Closed | discarded | discarded | discarded | MUST NOT | MUST NOT | MUST NOT |
+| State | `DATA` received | `CLOSE` received | `RST` received | `WINDOW_UPDATE` received | `DATA` sent | `CLOSE` sent | `RST` sent | `WINDOW_UPDATE` sent |
+|---|---|---|---|---|---|---|---|---|
+| Open | delivered | → HalfClosedRemote | → Closed | credit added | allowed | → HalfClosedLocal | → Closed | allowed |
+| HalfClosedLocal | delivered | → Closed | → Closed | accepted, credit ignored | MUST NOT | MUST NOT | → Closed | allowed |
+| HalfClosedRemote | stream error `STREAM_CLOSED` | stream error `STREAM_CLOSED` | → Closed | credit added | allowed | → Closed | → Closed | MUST NOT |
+| Closed | discarded | discarded | discarded | discarded | MUST NOT | MUST NOT | MUST NOT | MUST NOT |
 
 - A stream error closes the stream: the receiver sends `CLOSE RST STREAM_CLOSED` and the stream
   is Closed.
 - A side that receives `RST` discards whatever it still holds for that stream and sends no reply.
 - "discarded" means dropped without a reply and without an error.
+- "credit added" adds the increment to the stream's credit (§10.2). "accepted, credit ignored" means
+  the frame is valid but changes nothing, since this side sends no more `DATA` on the stream.
+- A side sends no `WINDOW_UPDATE` on a stream whose peer has finished sending on it (§10.4).
+- `DATA` that is discarded, or that is a stream error, still counts against the session window
+  (§10.3).
 
 ### 9.3 Closed versus never opened
 
@@ -996,15 +1035,15 @@ tunnel and the visitor's address, and the stream is Open on both sides as soon a
 received.
 
 Opening is **optimistic**: the server MAY send the visitor's bytes as `DATA` right behind the
-`OPEN`, without waiting for the client. This saves a round trip per connection. The client:
+`OPEN`, without waiting for the client, as far as its credit for the new stream allows (§10.2). This
+saves a round trip per connection. The client:
 
 - MUST treat an `OPEN` naming a `tunnelId` that isn't one of its tunnels as `PROTOCOL_ERROR`.
 - Connects to the tunnel's local target. `DATA` that arrives before that connection is ready is
-  not an error: the client holds it, and when it holds more than it is willing to buffer, it stops
-  reading the session's connection until the local connection is ready or has failed (§10 covers
-  how pausing affects liveness).
+  not an error: the client holds it. It is never more than the client's `windows.stream`, since
+  nothing on the stream is released, and no credit for it returned, until it is written.
 - Writes what it holds once the local connection is ready, or, if the connection fails, discards
-  it and resets the stream with `LOCAL_SERVICE_UNREACHABLE`.
+  it, which releases it (§10.4), and resets the stream with `LOCAL_SERVICE_UNREACHABLE`.
 
 ### 9.5 Streams and TCP
 
@@ -1012,7 +1051,7 @@ A stream behaves like the TCP connection it carries, including when only one dir
 
 | On the visitor's or the local target's connection | The side sends |
 |---|---|
-| Bytes read | `DATA`, at most 65,536 bytes each (or `limits.maxFramePayload`, for the client) |
+| Bytes read | `DATA`, at most 65,536 bytes each (or `limits.maxFramePayload`, for the client), and no more than the credit allows (§10.2) |
 | End of input: the other end sent `FIN` | `CLOSE` (half-close) |
 | The connection is reset, or fails with an I/O error | `CLOSE RST PEER_RESET` |
 | The local target refuses the connection (client only) | `CLOSE RST LOCAL_SERVICE_UNREACHABLE` |
@@ -1033,7 +1072,91 @@ When a session ends, every stream on it ends as if it had been reset. A side tha
 session while its connection still works MAY first send `CLOSE RST CANCELLED` for each of its open
 streams. Either way, each side closes the connections its streams carried with a TCP `RST`.
 
-## 10. Liveness
+## 10. Flow control
+
+Flow control bounds the `DATA` a receiver can be made to hold. A receiver gives its peer credit, a
+number of bytes of `DATA` it may send; sending spends it, and the receiver gives it back with
+`WINDOW_UPDATE` as it releases what it received. There is credit for each data stream and for the
+session as a whole, in each direction. Only `DATA` is flow-controlled.
+
+### 10.1 Windows
+
+Each side announces its receive windows in its `HELLO` (`windows`, §7.3 and §7.4):
+
+- `windows.stream` is the credit its peer starts with on each new stream, for `DATA` towards the
+  side that announced it.
+- `windows.session` is the credit its peer starts with for `DATA` towards that side on all streams
+  together.
+
+A side's windows are fixed for the session. Each side knows the other's before any `DATA` flows,
+since `DATA` is only sent once the session is established (§8.2).
+
+No credit is ever more than `2^31 - 1` bytes. An implementation SHOULD keep credit in an integer
+wider than 32 bits, so that an increment that would take it past `2^31 - 1` is detected (§10.5)
+rather than wrapped.
+
+### 10.2 Sending
+
+A sender keeps two credits towards its peer: one for each data stream, starting at the peer's
+`windows.stream` when the stream opens, and one for the session, starting at the peer's
+`windows.session`.
+
+- A sender MUST NOT send a `DATA` frame whose payload is `n` bytes unless `n` is at most the
+  stream's credit and at most the session's credit. Sending it takes `n` from both. Credit counts
+  payload bytes only, never the frame header or the WebSocket framing.
+- A `WINDOW_UPDATE` received on stream 0 adds its increment to the session's credit. One received
+  on a data stream adds it to that stream's credit, unless the stream's state says otherwise (§9.2).
+- A sender MAY send less than its credit allows. A sender without enough credit waits for a
+  `WINDOW_UPDATE`.
+- `OPEN`, `CLOSE`, `WINDOW_UPDATE` and the frames on stream 0 are not flow-controlled: a sender with
+  no credit can still open, close or reset a stream, return credit, and answer a `PING`.
+
+### 10.3 Receiving
+
+A receiver keeps, for each data stream and for the session, how much more its peer may send: its
+window, less the `DATA` that has arrived, plus the credit it has given back.
+
+- Each `DATA` frame counts against the session first, and then against its stream. One that is
+  larger than what its peer may still send on either is `FLOW_CONTROL_ERROR` (§10.5).
+- `DATA` that the receiver discards because its stream is Closed (§9.3), or that is a stream error
+  because its stream is HalfClosedRemote (§9.2), counts against the session only. The receiver
+  releases it at once (§10.4), so its session credit comes back.
+
+### 10.4 Returning credit
+
+A receiver returns credit with `WINDOW_UPDATE`: on a data stream for that stream's window, and on
+stream 0 for the session's.
+
+- A byte is **released** when the receiver no longer holds it: it has been written to its
+  destination (the visitor's or the local target's connection, §9.5), or discarded. A write that
+  fails releases its bytes too. Credit is returned for released bytes only, never for bytes that
+  have only arrived.
+- A receiver MUST send a `WINDOW_UPDATE` on stream 0 once the bytes it has released and not yet
+  returned for the session reach half its session window, rounded down, and one on a data stream
+  once those of that stream reach half its stream window, rounded down. Each increment is all the
+  released bytes not yet returned for its window. A receiver MAY return credit sooner.
+- A receiver MAY return more credit than it has released. It MUST NOT return credit that would take
+  its peer's credit past `2^31 - 1`, and it can't take credit back.
+- Once a receiver has received the peer's `CLOSE` or `RST` on a stream, it MUST NOT send
+  `WINDOW_UPDATE` on that stream. Session credit for that stream's released bytes still goes back on
+  stream 0.
+- A receiver MUST NOT send `WINDOW_UPDATE` before the session is established (§8.2).
+
+### 10.5 Violations
+
+Every violation of a window is a session error, raised at the first frame that commits it:
+
+| Received | Error |
+|---|---|
+| `DATA` longer than the session credit its sender has left, in the receiver's view | `FLOW_CONTROL_ERROR` |
+| `DATA` longer than its stream's credit left, in the receiver's view | `FLOW_CONTROL_ERROR` |
+| `WINDOW_UPDATE` that would take a credit past `2^31 - 1` | `FLOW_CONTROL_ERROR` |
+
+A sender that follows §10.2 never overruns a window, whatever the timing: the receiver's view of
+its peer's credit grows only when it sends a `WINDOW_UPDATE`, and the sender's only when the update
+arrives. So a receiver allows no slack.
+
+## 11. Liveness
 
 Each side detects a dead peer on its own: the server, to remove a vanished client's tunnels; the
 client, to tell its user the tunnels are gone. The two intervals are the ones the server announces in
@@ -1050,18 +1173,18 @@ the announced ones.
 - A side MUST answer each `PING` with a `PONG` carrying the same 8 bytes, as soon as it can. A
   `PONG` that answers no `PING` this side sent, or answers one already answered, is discarded,
   though it still counts as a frame received.
-- **Paused reading pauses the clock.** A side that stops reading the connection on purpose, for
-  backpressure, MUST stop counting time towards both intervals while it isn't reading, and MUST
-  restart the count from zero when it reads again. Without this rule, a visitor that stops reading
-  would make the server stop reading the client, miss the client's `PONG`, and end a healthy
+- A side that follows §10 has no reason to stop reading the connection: a slow destination holds
+  back its own stream's credit, and every other frame keeps arriving. The next two rules are for a
+  side that stops reading anyway.
+- **Paused reading pauses the clock.** A side that stops reading the connection on purpose MUST stop
+  counting time towards both intervals while it isn't reading, and MUST restart the count from zero
+  when it reads again. Otherwise it would miss its peer's `PONG` while paused and end a healthy
   session.
 - **A paused side keeps sending `PING`.** While it isn't reading, a side MUST send a `PING` at
   once if it has never sent one, and then each time `pingIntervalMs` has passed since its last
-  `PING`, answered or not. Its peer may still be reading, and counts each one as proof of life.
-  Without this rule the peer hears nothing and ends the session after `idleTimeoutMs`: a local
-  service that stops reading makes the client stop reading the server, and a visitor that stops
-  reading leaves the client waiting on a server whose clock is paused. Under these rules a side's
-  `PING`s are never less than `pingIntervalMs` apart.
+  `PING`, answered or not. Its peer may still be reading, and counts each one as proof of life;
+  without them, the peer would hear nothing and end the session after `idleTimeoutMs`. Under these
+  rules a side's `PING`s are never less than `pingIntervalMs` apart.
 - Before the server's `HELLO` arrives, the client has no intervals; the client's handshake timeout
   applies instead (§8.3).
 - A side SHOULD NOT send `PING` other than as these rules say.
@@ -1070,9 +1193,9 @@ the announced ones.
   server work. The reference server allows a burst of 5 and one per second after that, far above
   what these rules ever produce.
 
-## 11. Errors
+## 12. Errors
 
-### 11.1 Where codes appear
+### 12.1 Where codes appear
 
 Every error has a code: an ASCII string of 1 to 64 characters from `[A-Z0-9_]`. A code appears in
 one of three places, which make up its **scope**:
@@ -1083,9 +1206,9 @@ one of three places, which make up its **scope**:
 | session | The `code` of an `ERROR` frame (§7.8) | The session |
 | stream | The payload of a `CLOSE` frame with `RST` (§6.7) | One stream |
 
-### 11.2 The registry
+### 12.2 The registry
 
-The registry for `jburrow.v1-draft.1`. The upgrade status is the HTTP status of a refused upgrade;
+The registry for `jburrow.v1-draft.2`. The upgrade status is the HTTP status of a refused upgrade;
 the close code is the WebSocket close status that follows an `ERROR` (§8.6).
 
 | Code | Scope | Meaning | Upgrade status | Close code |
@@ -1097,6 +1220,7 @@ the close code is the WebSocket close status that follows an `ERROR` (§8.6).
 | `SERVER_SHUTTING_DOWN` | upgrade, session | The server is stopping. | 503 | 1001 |
 | `PROTOCOL_ERROR` | upgrade, session | A rule of this document was broken. For the upgrade, the request is not a valid WebSocket opening handshake. | 400 | 1002 |
 | `FRAME_SIZE_ERROR` | session | A frame's length is wrong for its type or its message. | | 1002 |
+| `FLOW_CONTROL_ERROR` | session | `DATA` past a window, or a `WINDOW_UPDATE` that would take a credit past `2^31 - 1` (§10.5). | | 1002 |
 | `HANDSHAKE_TIMEOUT` | session | The session wasn't established within the server's handshake timeout. | | 1008 |
 | `AUTHTOKEN_INVALID` | session | The authtoken is malformed or unknown. | | 1008 |
 | `VALIDATION_FAILED` | session | A control payload field broke its rule. | | 1008 |
@@ -1112,7 +1236,7 @@ the close code is the WebSocket close status that follows an `ERROR` (§8.6).
 | `STREAM_CLOSED` | stream | A frame arrived for a direction of the stream that was already closed. | | |
 | `CANCELLED` | stream | The stream was cut because its session is ending. | | |
 
-### 11.3 Rules
+### 12.3 Rules
 
 - A receiver MUST decide what to do on the code alone. The WebSocket close status and the
   `message` are for intermediaries, logs and people.
@@ -1124,7 +1248,7 @@ the close code is the WebSocket close status that follows an `ERROR` (§8.6).
 - A code means the same thing in JBurrow's REST API as on the wire. `NOT_FOUND`,
   `VALIDATION_FAILED` and `INTERNAL_ERROR` appear in both.
 
-## 12. Receiver rules
+## 13. Receiver rules
 
 A receiver checks every message in this order and stops at the first check that fails, with that
 check's error. The order is part of the protocol: it decides which code a broken message produces,
@@ -1137,16 +1261,16 @@ expensive.
 | 2 | The reserved bit `R` is 0. | `PROTOCOL_ERROR` |
 | 3 | The length field equals the message length minus 10. | `FRAME_SIZE_ERROR` |
 | 4 | The type is assigned (§6), and the peer's role sends it: a server never receives `OPEN` or `GOAWAY`, a client never receives `HEADERS`. | `PROTOCOL_ERROR` |
-| 5 | The stream id is 0 for a type sent on stream 0, and not 0 for a type sent on a data stream. | `PROTOCOL_ERROR` |
+| 5 | The stream id is 0 for a type sent on stream 0, and not 0 for a type sent on a data stream. `WINDOW_UPDATE` may be on either. | `PROTOCOL_ERROR` |
 | 6 | The length is allowed for the type (§6), for `CLOSE` given its `RST` bit. | `FRAME_SIZE_ERROR` |
 | 7 | Every flag bit the type doesn't define is 0. | `PROTOCOL_ERROR` |
 | 8 | The payload is valid for the type: a control payload follows §7 (`PROTOCOL_ERROR` for an encoding rule, `VALIDATION_FAILED` for a field rule); a `CLOSE` reset holds a known stream code (§6.7); a `WINDOW_UPDATE` increment is 1 to `2^31 - 1` (§6.6). `DATA`, `PING` and `PONG` payloads are opaque, and `HEADERS` and `GOAWAY` payloads are not parsed in this draft. | `PROTOCOL_ERROR`, or `VALIDATION_FAILED` |
-| 9 | The frame is allowed in the session's state (§8.2) and in its stream's state (§9.2, §9.3), and respects the limits the receiver announced (§8.5). | The error those sections give |
+| 9 | The frame is allowed in the session's state (§8.2) and in its stream's state (§9.2, §9.3), and respects the limits the receiver announced (§8.5). A `DATA` frame fits the receiver's windows, and a `WINDOW_UPDATE` doesn't take a credit past `2^31 - 1` (§10.5). | The error those sections give |
 
 Steps 1 to 8 depend only on the bytes of the message and on which side receives it, and the
-conformance vectors cover them (§14). Step 9 depends on the session.
+conformance vectors cover them (§15). Step 9 depends on the session.
 
-## 13. Limits
+## 14. Limits
 
 | Limit | Value | Set by |
 |---|---|---|
@@ -1156,6 +1280,9 @@ conformance vectors cover them (§14). Step 9 depends on the session.
 | Control payload (`HELLO`, `REGISTER`, `OPEN`, `ERROR`), and `HEADERS` and `GOAWAY` in this draft | at most 16,384 bytes | protocol |
 | `PING` and `PONG` payload | exactly 8 bytes | protocol |
 | `WINDOW_UPDATE` payload | exactly 4 bytes | protocol |
+| Stream window | 65,536 to `2^31 - 1` bytes | each side, in its `HELLO`; 256 KiB in the reference server and client |
+| Session window | the stream window to `2^31 - 1` bytes | each side, in its `HELLO`; 512 KiB in the reference server, 1 MiB in the reference client |
+| Credit, per stream and per session | at most `2^31 - 1` bytes | protocol |
 | Code | 1 to 64 ASCII characters, `[A-Z0-9_]` | protocol |
 | JSON nesting | 8 levels | protocol |
 | JSON string | 4,096 UTF-16 code units | protocol |
@@ -1170,32 +1297,33 @@ conformance vectors cover them (§14). Step 9 depends on the session.
 | Handshake timeout | not announced | server; 10 s in the reference server |
 | Close handshake wait | 2 s | protocol |
 
-## 14. Conformance
+## 15. Conformance
 
 The conformance vectors are in
 [`jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/`](../jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/):
 
 - `valid.json`: messages that MUST decode, each with the frame it decodes to.
 - `invalid.json`: messages that MUST be rejected, each with the code of the first broken rule in
-  the order of §12.
+  the order of §13.
 
 Each vector names the side that receives the message, since what a message means depends on it.
 The format of the files, including the hex notation and the neutral description of a decoded frame,
 is in the [`README.md`](../jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/README.md)
 next to them.
 
-**An implementation conforms to the framing layer of `jburrow.v1-draft.1` when it passes every
+**An implementation conforms to the framing layer of `jburrow.v1-draft.2` when it passes every
 vector for each role it implements.** A client runs the vectors whose role is `client`, and a
 server those whose role is `server`.
 
-The vectors cover steps 1 to 8 of §12. They don't cover the session and stream rules of step 9, the
-transport, liveness or registration, which need a running peer. JBurrow tests those against a
-scripted peer that can send any sequence of frames, valid or not.
+The vectors cover steps 1 to 8 of §13. They don't cover the session and stream rules of step 9, the
+transport, liveness, flow control or registration, which need a running peer. JBurrow tests those
+against a scripted peer that can send any sequence of frames, valid or not, and that fails a test the
+moment the implementation sends `DATA` past one of the peer's windows.
 
 The reference decoder is fuzzed continuously, and every input that ever found a bug is kept. A bug
 found that way, or in production, becomes a new vector.
 
-## 15. Security considerations
+## 16. Security considerations
 
 **The authtoken is sent inside the connection.** Whoever can read the connection can take the
 token, and whoever can impersonate the server can collect it. That is why TLS with certificate and
@@ -1212,14 +1340,21 @@ compression would gain little.
 page a visitor opened could make their browser connect to a server and act as a client.
 
 **Limits bound the receiver's work.** Every size in a frame is checked before anything is read or
-allocated for it (§12), every message is bounded (§13), and JSON payloads have fixed parser limits
-(§7.1). A peer can't make a receiver hold more than one maximum-size message per connection, or
-parse anything larger than 16 KiB of JSON. Receivers fail closed: anything they don't recognize is
-an error rather than something to skip (§4.3), so a mistaken or hostile peer is found at its first
-bad frame.
+allocated for it (§13), every message is bounded (§14), and JSON payloads have fixed parser limits
+(§7.1). A peer can't make a receiver decode more than one maximum-size message at a time, or parse
+anything larger than 16 KiB of JSON. Receivers fail closed: anything they don't recognize is an
+error rather than something to skip (§4.3), so a mistaken or hostile peer is found at its first bad
+frame.
+
+**Windows bound what a peer can make a receiver hold.** A receiver holds at most its session window
+of `DATA` for its peer, however many streams are open, because it returns credit only for bytes it
+has released (§10.4); `DATA` past a window ends the session at the first frame (§10.5). The
+65,536-byte minimum stream window means a peer can't announce a window so small that the other side
+has to send one tiny frame per round trip. A peer that announces large windows gains nothing either:
+how much a side sends, and how much it queues for its peer, remains its own choice.
 
 **`PING` costs the receiver a write.** A server should limit the rate at which it answers them
-(§10).
+(§11).
 
 **What a server logs.** A server SHOULD log codes, session and stream ids, sizes, durations and
 addresses. It MUST NOT log `DATA` payloads, the authtoken, or the text of a control payload it
@@ -1232,10 +1367,10 @@ learns who connects to their tunnel.
 **Session ids are not secrets.** A `sessionId` identifies a session in logs and support requests.
 Nothing in the protocol accepts one as proof of anything.
 
-## 16. Reference implementation
+## 17. Reference implementation
 
 The `jburrow-protocol` module of the [JBurrow repository](../README.md) is a Java implementation of
-this document: the frame codec, the control payloads, and the stream and liveness rules that both
+this document: the frame codec, the control payloads, and the stream, flow-control and liveness rules that both
 JBurrow's server and its client use. Every example in this document is checked against it, and it
 passes every conformance vector. It is not normative: where it and this document disagree, the
 document is right, and the difference is a bug to fix in one or the other.
