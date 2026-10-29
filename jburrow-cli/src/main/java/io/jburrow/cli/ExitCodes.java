@@ -8,7 +8,7 @@ import picocli.CommandLine.ParameterException;
 
 /**
  * The process exit codes, as phase 1's ARCHITECTURE.md §The CLI lists them, with {@code FLOW_CONTROL_ERROR} added to
- * 6 by phase 2's §Failure modes. A script decides on these, so a code's meaning never changes once released.
+ * 6 by phase 2's §Failure modes and the subdomain refusals added to 5 by phase 3's §The CLI. A script decides on these, so a code's meaning never changes once released.
  */
 final class ExitCodes {
 
@@ -58,7 +58,9 @@ final class ExitCodes {
                     TUNNEL_LIMIT_EXCEEDED,
                     SESSION_LIMIT_EXCEEDED,
                     PORT_UNAVAILABLE,
-                    PORT_POOL_EXHAUSTED -> REGISTRATION_REFUSED;
+                    PORT_POOL_EXHAUSTED,
+                    SUBDOMAIN_UNAVAILABLE,
+                    SUBDOMAIN_FORBIDDEN -> REGISTRATION_REFUSED;
             case UNSUPPORTED_PROTOCOL_VERSION,
                     PROTOCOL_ERROR,
                     FRAME_SIZE_ERROR,
@@ -66,7 +68,8 @@ final class ExitCodes {
                     FORBIDDEN_ORIGIN,
                     PING_RATE_EXCEEDED -> PROTOCOL_MISMATCH;
             // Stream codes never end a session; seeing one here is a bug.
-            case PEER_RESET, LOCAL_SERVICE_UNREACHABLE, STREAM_CLOSED, CANCELLED -> ExitCodes.INTERNAL_ERROR;
+            case PEER_RESET, LOCAL_SERVICE_UNREACHABLE, LOCAL_SERVICE_ERROR, STREAM_CLOSED, CANCELLED ->
+                ExitCodes.INTERNAL_ERROR;
         };
     }
 }

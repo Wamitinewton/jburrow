@@ -1,7 +1,8 @@
 # 9. Flow control
 
 - Status: accepted; the share each resumed source takes, the server-wide stream cap and kernel socket memory are amended by
-  [ADR-0010](0010-share-floor-and-visitor-receive-buffers.md)
+  [ADR-0010](0010-share-floor-and-visitor-receive-buffers.md); reservations, and parking that returns a stalled stream's
+  session credit before release, are added by [ADR-0012](0012-http-exchanges-across-event-loops.md)
 - Date: 2026-10-26
 
 ## Context

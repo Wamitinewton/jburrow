@@ -38,24 +38,29 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Two peers built on {@link SessionFlow}, with a FIFO of frames in flight each way, driven by a script of sends,
- * deliveries, releases, half-closes and resets in any order. A is the server and opens every stream; B learns of one
- * when its {@code OPEN} arrives. Each peer keeps its streams' {@link StreamLifecycle} next to their {@link StreamFlow},
- * as each side's domain does, so the lifecycle's {@code WINDOW_UPDATE} columns are exercised with the model.
+ * reservations, refunds, deliveries, releases, parking, half-closes and resets in any order. A is the server and opens
+ * every stream; B learns of one when its {@code OPEN} arrives. Each peer keeps its streams' {@link StreamLifecycle} next
+ * to their {@link StreamFlow}, as each side's domain does, so the lifecycle's {@code WINDOW_UPDATE} columns are
+ * exercised with the model. A stream that can no longer send refunds what it has reserved, and one that leaves its
+ * table with bytes parked is released through its flow rather than as session credit only.
  *
  * <p>After every step:
  *
  * <ol>
- *   <li><b>No overrun.</b> Nothing throws: a sender that follows the model never causes a {@code FLOW_CONTROL_ERROR},
- *       and the model never asks for a {@code WINDOW_UPDATE} the stream's state forbids.
- *   <li><b>Bounded holding.</b> No receiver holds more than its session window, nor more than its stream window on a
- *       stream.
+ *   <li><b>No overrun.</b> Nothing throws: a sender that follows the model, reserving or not, never causes a
+ *       {@code FLOW_CONTROL_ERROR}, and the model never asks for a {@code WINDOW_UPDATE} the stream's state forbids.
+ *   <li><b>Bounded holding.</b> No receiver holds more unparked bytes than its session window, nor more bytes, parked or
+ *       not, than its stream window on a stream.
  *   <li><b>Conservation.</b> Per direction, for the session and for every stream its sender may still send on: sender
- *       credit + {@code DATA} in flight + receiver held + receiver unreturned + updates in flight = the window.
+ *       credit + reserved + {@code DATA} in flight + receiver held + receiver unreturned + updates in flight = the
+ *       window. Parked bytes count as released in the session's column and as held in the stream's.
+ *   <li><b>Bounded parking.</b> The bytes a receiver has parked are the sum of its streams' parked bytes, and never more
+ *       than the stream windows of the streams that parked them.
  * </ol>
  *
- * <p>At the end both peers release everything and deliver everything until nothing moves. Then every credit a sender
- * may still use is more than half its window. That is the no-deadlock property, and it also proves credit goes back at
- * half the window: a receiver that waited longer leaves its sender with less.
+ * <p>At the end both peers refund every reservation, release everything and deliver everything until nothing moves.
+ * Then every credit a sender may still use is more than half its window. That is the no-deadlock property, and it also
+ * proves credit goes back at half the window: a receiver that waited longer leaves its sender with less.
  *
  * <p>The script is read from the front, a byte at a time, so the seed corpus is written by {@link ScriptBuilder} and
  * kept in step with it by {@link #seedsAreCommitted}.
@@ -75,6 +80,15 @@ class SessionFlowFuzzTest {
     private static final int RESET = 5;
     private static final int DELIVER_ALL = 6;
     private static final int RELEASE_ALL = 7;
+    private static final int RESERVE = 0;
+    private static final int SEND_RESERVED = 1;
+    private static final int REFUND = 2;
+    private static final int REFUND_ALL = 3;
+    private static final int PARK = 4;
+    private static final int EXTENDED_ACTIONS = 5;
+    /** Set in an op for the reservation and parking actions; the phase 2 seeds never set it, so they keep their meaning. */
+    private static final int EXTENDED = 0x10;
+
     private static final int A = 0;
     private static final int B = 1;
 
@@ -198,6 +212,81 @@ class SessionFlowFuzzTest {
                         .send(A, 1, 65_536)
                         .send(B, 0, 70_001)
                         .build());
+        seeds.put(
+                "reservations-sent-and-refunded",
+                new ScriptBuilder(65_536, 98_304, 65_536, 65_536)
+                        .open()
+                        .open()
+                        .deliverAll(A)
+                        .reserve(A, 0, 16_384)
+                        .sendReserved(A, 0, 10_000)
+                        .refund(A, 0, 6_384)
+                        .reserve(A, 1, 65_535)
+                        .send(A, 0, 1)
+                        .deliverAll(A)
+                        .releaseAll(B)
+                        .deliverAll(B)
+                        .sendReserved(A, 1, 50_000)
+                        .reserve(A, 0, 65_535)
+                        .reset(A, 1)
+                        .sendReserved(A, 0, 65_535)
+                        .deliverAll(A)
+                        .refundAll(A, 0)
+                        .reserve(B, 0, 0)
+                        .reserve(B, 0, 40_000)
+                        .sendReserved(B, 0, 40_000)
+                        .deliverAll(B)
+                        .build());
+        seeds.put(
+                "parked-streams-beside-a-busy-one",
+                new ScriptBuilder(65_536, 65_536, 65_536, 65_536)
+                        .open()
+                        .open()
+                        .open()
+                        .deliverAll(A)
+                        .send(B, 0, 32_768)
+                        .send(B, 1, 32_768)
+                        .deliverAll(B)
+                        .send(B, 2, 1)
+                        .park(A, 0)
+                        .park(A, 0)
+                        .deliverAll(A)
+                        .send(B, 2, 32_768)
+                        .park(A, 1)
+                        .deliverAll(A)
+                        .send(B, 0, 65_535)
+                        .deliverAll(B)
+                        .release(A, 0, 40_000)
+                        .park(A, 0)
+                        .deliverAll(A)
+                        .send(B, 2, 65_535)
+                        .deliverAll(B)
+                        .releaseAll(A)
+                        .deliverAll(A)
+                        .build());
+        seeds.put(
+                "parked-streams-reset-and-closed",
+                new ScriptBuilder(65_536, 131_072, 65_536, 65_536)
+                        .open()
+                        .open()
+                        .deliverAll(A)
+                        .send(B, 0, 65_536)
+                        .send(B, 1, 40_000)
+                        .deliverAll(B)
+                        .park(A, 0)
+                        .park(A, 1)
+                        .send(B, 1, 20_000)
+                        .close(B, 1)
+                        .deliverAll(B)
+                        .reset(A, 0)
+                        .close(A, 1)
+                        .deliverAll(A)
+                        .release(A, 0, 30_000)
+                        .release(A, 1, 50_000)
+                        .park(A, 0)
+                        .releaseAll(A)
+                        .deliverAll(A)
+                        .build());
         return seeds;
     }
 
@@ -272,8 +361,14 @@ class SessionFlowFuzzTest {
         final List<Entry> order = new ArrayList<>();
         final ArrayDeque<Frame> outbound = new ArrayDeque<>();
 
-        /** Bytes still held for streams that have closed: their entries are gone, so they release session credit only. */
+        /**
+         * Bytes still held for streams that left their table with nothing parked: they release session credit only, as
+         * in phase 2.
+         */
         int orphaned;
+
+        /** Streams that left their table with bytes parked: released through their flow, which knows which are parked. */
+        final List<Entry> parkedOrphans = new ArrayList<>();
 
         Peer(String name, int streamWindow, int sessionWindow, int peerStreamWindow, int peerSessionWindow) {
             this.name = name;
@@ -309,12 +404,59 @@ class SessionFlowFuzzTest {
             outbound.add(new DataFrame(entry.id, bytes));
         }
 
+        void reserve(int selector, int max) {
+            Entry entry = pick(selector);
+            if (entry != null && entry.maySend()) {
+                flow.reserve(entry.flow, max);
+            }
+        }
+
+        void sendReserved(int selector, int size) {
+            Entry entry = pick(selector);
+            if (entry == null || !entry.maySend() || entry.flow.reserved() == 0) {
+                return;
+            }
+            int bytes = Math.min(entry.flow.reserved(), size);
+            flow.onSentReserved(entry.flow, bytes);
+            entry.lifecycle.on(StreamEvent.DATA_SENT);
+            outbound.add(new DataFrame(entry.id, bytes));
+        }
+
+        void refund(int selector, int amount) {
+            Entry entry = pick(selector);
+            if (entry != null) {
+                flow.refund(entry.flow, Math.min(entry.flow.reserved(), amount));
+            }
+        }
+
+        void refundAll(int selector) {
+            Entry entry = pick(selector);
+            if (entry != null) {
+                flow.refundAll(entry.flow);
+            }
+        }
+
+        void park(int selector) {
+            Entry entry = pick(selector);
+            if (entry != null && entry.isLive()) {
+                sendCredit(entry, flow.park(entry.flow));
+            }
+        }
+
+        /** A stream that can no longer send gives back what it reserved, as an adapter must when a stream ends. */
+        void stopSending(Entry entry) {
+            if (!entry.maySend()) {
+                flow.refundAll(entry.flow);
+            }
+        }
+
         void close(int selector) {
             Entry entry = pick(selector);
             if (entry == null || !entry.maySend()) {
                 return;
             }
             entry.lifecycle.on(StreamEvent.CLOSE_SENT);
+            stopSending(entry);
             outbound.add(new CloseFrame(entry.id));
             if (!entry.isLive()) {
                 orphan(entry);
@@ -333,13 +475,36 @@ class SessionFlowFuzzTest {
 
         /** The stream's entry is gone, but its writes may still be pending: what it held is released later. */
         void orphan(Entry entry) {
-            orphaned += entry.flow.receive().held();
+            flow.onRemoved(entry.flow);
+            stopSending(entry);
+            if (entry.flow.parked() > 0) {
+                parkedOrphans.add(entry);
+            } else {
+                orphaned += entry.flow.receive().held();
+            }
+        }
+
+        List<Entry> holding() {
+            List<Entry> holding = new ArrayList<>();
+            for (Entry entry : order) {
+                if (entry.isLive() && entry.flow.receive().held() > 0) {
+                    holding.add(entry);
+                }
+            }
+            for (Entry entry : parkedOrphans) {
+                if (entry.flow.receive().held() > 0) {
+                    holding.add(entry);
+                }
+            }
+            return holding;
+        }
+
+        boolean holdsAnything() {
+            return orphaned > 0 || !holding().isEmpty();
         }
 
         void release(int selector, int amount) {
-            List<Entry> holding = order.stream()
-                    .filter(e -> e.isLive() && e.flow.receive().held() > 0)
-                    .toList();
+            List<Entry> holding = holding();
             int choices = holding.size() + (orphaned > 0 ? 1 : 0);
             if (choices == 0) {
                 return;
@@ -348,7 +513,7 @@ class SessionFlowFuzzTest {
             if (choice < holding.size()) {
                 Entry entry = holding.get(choice);
                 int bytes = 1 + amount % entry.flow.receive().held();
-                sendCredit(entry, flow.onReleased(entry.flow, bytes));
+                releaseFrom(entry, bytes);
             } else {
                 int bytes = 1 + amount % orphaned;
                 orphaned -= bytes;
@@ -357,16 +522,24 @@ class SessionFlowFuzzTest {
         }
 
         void releaseAll() {
-            for (Entry entry : order) {
-                int held = entry.flow.receive().held();
-                if (entry.isLive() && held > 0) {
-                    sendCredit(entry, flow.onReleased(entry.flow, held));
-                }
+            for (Entry entry : holding()) {
+                releaseFrom(entry, entry.flow.receive().held());
             }
             if (orphaned > 0) {
                 int bytes = orphaned;
                 orphaned = 0;
                 sendCredit(null, flow.onReleased(null, bytes));
+            }
+        }
+
+        private void releaseFrom(Entry entry, int bytes) {
+            Credit credit = flow.onReleased(entry.flow, bytes);
+            sendCredit(entry.isLive() ? entry : null, credit);
+        }
+
+        void refundEverything() {
+            for (Entry entry : order) {
+                flow.refundAll(entry.flow);
             }
         }
 
@@ -479,6 +652,17 @@ class SessionFlowFuzzTest {
 
         private void step(int op) {
             Peer side = ((op >> 3) & 1) == A ? a : b;
+            if ((op & EXTENDED) != 0) {
+                switch ((op & 0x07) % EXTENDED_ACTIONS) {
+                    case RESERVE -> side.reserve(script.u8(), script.u16());
+                    case SEND_RESERVED -> side.sendReserved(script.u8(), 1 + script.u16());
+                    case REFUND -> side.refund(script.u8(), script.u16());
+                    case REFUND_ALL -> side.refundAll(script.u8());
+                    case PARK -> side.park(script.u8());
+                    default -> throw new AssertionError(op);
+                }
+                return;
+            }
             switch (op & 0x07) {
                 case OPEN_STREAM -> {
                     if (a.order.size() < MAX_STREAMS) {
@@ -509,12 +693,11 @@ class SessionFlowFuzzTest {
             }
         }
 
-        /** Delivers and releases until nothing is held and nothing is in flight. */
+        /** Refunds every reservation, then delivers and releases until nothing is held and nothing is in flight. */
         private void drain() {
-            while (!a.outbound.isEmpty()
-                    || !b.outbound.isEmpty()
-                    || a.flow.sessionReceive().held() > 0
-                    || b.flow.sessionReceive().held() > 0) {
+            a.refundEverything();
+            b.refundEverything();
+            while (!a.outbound.isEmpty() || !b.outbound.isEmpty() || a.holdsAnything() || b.holdsAnything()) {
                 while (!a.outbound.isEmpty() || !b.outbound.isEmpty()) {
                     deliverOne(a);
                     deliverOne(b);
@@ -525,25 +708,58 @@ class SessionFlowFuzzTest {
         }
 
         private void checkInvariants() {
+            checkReserved(a);
+            checkReserved(b);
             checkReceiver(a);
             checkReceiver(b);
             checkConservation(a, b);
             checkConservation(b, a);
         }
 
+        /** The session's reservation is its streams', and only a stream that may still send holds one. */
+        private static void checkReserved(Peer sender) {
+            long reserved = 0;
+            for (Entry entry : sender.order) {
+                if (!entry.maySend()) {
+                    assertThat(entry.flow.reserved())
+                            .as("%s stream %d reserved after it stopped sending", sender.name, entry.id)
+                            .isZero();
+                }
+                reserved += entry.flow.reserved();
+            }
+            assertThat((long) sender.flow.reserved())
+                    .as("%s: session reserved vs its streams'", sender.name)
+                    .isEqualTo(reserved);
+        }
+
         private static void checkReceiver(Peer receiver) {
             ReceiveWindow session = receiver.flow.sessionReceive();
             checkWindow(receiver.name + " session", session, receiver.sessionWindow);
-            long streamsHeld = receiver.orphaned;
+            assertThat(session.parked()).as("%s session parked", receiver.name).isZero();
+            long unparkedHeld = receiver.orphaned;
+            long parked = 0;
+            long parkingStreams = 0;
             for (Entry entry : receiver.order) {
-                if (entry.isLive()) {
-                    checkWindow(receiver.name + " stream " + entry.id, entry.flow.receive(), receiver.streamWindow);
-                    streamsHeld += entry.flow.receive().held();
+                ReceiveWindow window = entry.flow.receive();
+                boolean tracked = entry.isLive() || receiver.parkedOrphans.contains(entry);
+                if (!tracked) {
+                    continue;
                 }
+                checkWindow(receiver.name + " stream " + entry.id, window, receiver.streamWindow);
+                assertThat(window.parked())
+                        .as("%s stream %d parked", receiver.name, entry.id)
+                        .isBetween(0, window.held());
+                unparkedHeld += window.held() - window.parked();
+                parked += window.parked();
+                parkingStreams += window.parked() > 0 ? 1 : 0;
             }
             assertThat(session.held())
-                    .as("%s: session held vs its streams' held plus orphaned", receiver.name)
-                    .isEqualTo(streamsHeld);
+                    .as("%s: session held vs its streams' unparked held plus orphaned", receiver.name)
+                    .isEqualTo(unparkedHeld);
+            assertThat(receiver.flow.parked())
+                    .as("%s: parked vs its streams' parked", receiver.name)
+                    .isEqualTo(parked)
+                    .isLessThanOrEqualTo(parkingStreams * receiver.streamWindow);
         }
 
         private static void checkWindow(String what, ReceiveWindow window, int size) {
@@ -575,6 +791,7 @@ class SessionFlowFuzzTest {
 
             ReceiveWindow session = receiver.flow.sessionReceive();
             assertThat(sender.flow.sessionSend().available()
+                            + sender.flow.reserved()
                             + sessionData
                             + session.held()
                             + session.unreturned()
@@ -590,6 +807,7 @@ class SessionFlowFuzzTest {
                 long held = received == null ? 0 : received.flow.receive().held();
                 long unreturned = received == null ? 0 : received.flow.receive().unreturned();
                 assertThat(entry.flow.send().available()
+                                + entry.flow.reserved()
                                 + streamData.getOrDefault(entry.id, 0L)
                                 + held
                                 + unreturned
@@ -693,12 +911,36 @@ class SessionFlowFuzzTest {
             return op(RESET, side).u8(stream);
         }
 
+        ScriptBuilder reserve(int side, int stream, int max) {
+            return extended(RESERVE, side).u8(stream).u16(max);
+        }
+
+        ScriptBuilder sendReserved(int side, int stream, int bytes) {
+            return extended(SEND_RESERVED, side).u8(stream).u16(bytes - 1);
+        }
+
+        ScriptBuilder refund(int side, int stream, int bytes) {
+            return extended(REFUND, side).u8(stream).u16(bytes);
+        }
+
+        ScriptBuilder refundAll(int side, int stream) {
+            return extended(REFUND_ALL, side).u8(stream);
+        }
+
+        ScriptBuilder park(int side, int stream) {
+            return extended(PARK, side).u8(stream);
+        }
+
         byte[] build() {
             return out.toByteArray();
         }
 
         private ScriptBuilder op(int action, int side) {
             return u8(side << 3 | action);
+        }
+
+        private ScriptBuilder extended(int action, int side) {
+            return u8(EXTENDED | side << 3 | action);
         }
 
         private ScriptBuilder u8(int value) {

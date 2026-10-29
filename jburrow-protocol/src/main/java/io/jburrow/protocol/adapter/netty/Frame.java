@@ -1,6 +1,7 @@
 package io.jburrow.protocol.adapter.netty;
 
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameType;
@@ -44,6 +45,7 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
                     Register,
                     Registered,
                     Open,
+                    Headers,
                     WindowUpdate,
                     Close,
                     Ping,
@@ -170,6 +172,20 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
         @Override
         public FrameType type() {
             return FrameType.OPEN;
+        }
+    }
+
+    /** {@code HEADERS}, client to server: a response head on an HTTP stream. Only in a session with {@code http}. */
+    record Headers(int streamId, HttpResponseHead head) implements NoBuffer {
+
+        public Headers {
+            requireDataStream(streamId);
+            Objects.requireNonNull(head, "head");
+        }
+
+        @Override
+        public FrameType type() {
+            return FrameType.HEADERS;
         }
     }
 
@@ -336,14 +352,13 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
     }
 
     /**
-     * A {@code HEADERS} or {@code GOAWAY} frame, decoded only as far as its header: their payloads belong to phases 3
-     * and 4. No peer of {@code jburrow.v1-draft.2} may send either, so a session treats this as
-     * {@code PROTOCOL_ERROR}. It is never encoded.
+     * A {@code GOAWAY} frame, decoded only as far as its header: its payload belongs to phase 4. No peer of
+     * {@code jburrow.v1-draft.2} may send it, so a session treats this as {@code PROTOCOL_ERROR}. It is never encoded.
      */
     record Unsupported(int streamId, FrameType type) implements NoBuffer {
 
         public Unsupported {
-            if (type != FrameType.HEADERS && type != FrameType.GOAWAY) {
+            if (type != FrameType.GOAWAY) {
                 throw new IllegalArgumentException(type + " is a supported frame type");
             }
             if (!type.allowsStream(streamId)) {

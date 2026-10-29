@@ -1,8 +1,13 @@
 package io.jburrow.protocol.adapter.jackson;
 
+import io.jburrow.protocol.control.BodyFraming;
+import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.wire.ErrorCode;
+import io.jburrow.protocol.wire.ProtocolException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import tools.jackson.core.JsonGenerator;
@@ -48,8 +53,12 @@ final class WireValueModule extends SimpleModule {
         addDeserializer(UUID.class, new UuidReader());
         addDeserializer(TunnelKind.class, new TunnelKindReader());
         addDeserializer(ErrorCode.class, new ErrorCodeReader());
+        addDeserializer(BodyFraming.class, new BodyFramingReader());
+        addDeserializer(HeaderFields.class, new HeaderFieldsReader());
         addSerializer(TunnelKind.class, new TunnelKindWriter());
         addSerializer(ErrorCode.class, new ErrorCodeWriter());
+        addSerializer(BodyFraming.class, new BodyFramingWriter());
+        addSerializer(HeaderFields.class, new HeaderFieldsWriter());
         setDeserializerModifier(new NullRejectingModifier());
     }
 
@@ -240,6 +249,79 @@ final class WireValueModule extends SimpleModule {
         }
     }
 
+    private static final class BodyFramingReader extends StrictReader<BodyFraming> {
+        private static final String RULE = "must be one of "
+                + Arrays.stream(BodyFraming.values()).map(BodyFraming::wireName).toList();
+
+        BodyFramingReader() {
+            super(BodyFraming.class, JsonToken.VALUE_STRING);
+        }
+
+        @Override
+        BodyFraming read(JsonParser parser) {
+            return BodyFraming.fromWireName(parser.getString())
+                    .orElseThrow(() -> new InvalidValueException(parser, BodyFraming.class, RULE));
+        }
+    }
+
+    /**
+     * Header fields as an array of {@code [name, value]} arrays. An entry of any other shape breaks a field rule rather
+     * than an encoding rule, so it is {@code VALIDATION_FAILED}, named by its index. The record's own rules then apply
+     * to each field and to the list.
+     */
+    private static final class HeaderFieldsReader extends StrictReader<HeaderFields> {
+        HeaderFieldsReader() {
+            super(HeaderFields.class, JsonToken.START_ARRAY);
+        }
+
+        @Override
+        HeaderFields read(JsonParser parser) {
+            List<HeaderFields.Field> fields = new ArrayList<>();
+            for (int i = 0; isEntry(parser.nextToken()); i++) {
+                String[] pair = readPair(parser);
+                if (pair == null) {
+                    throw invalid("[" + i + "] must be an array of two strings");
+                }
+                try {
+                    fields.add(new HeaderFields.Field(pair[0], pair[1]));
+                } catch (ProtocolException rejected) {
+                    throw invalid("[" + i + "] " + rejected.getMessage());
+                }
+            }
+            return new HeaderFields(fields);
+        }
+
+        /** {@code null} ends the loop too; the payload was checked to be well-formed before any field was read. */
+        private static boolean isEntry(JsonToken token) {
+            return token != JsonToken.END_ARRAY && token != null;
+        }
+
+        /** The entry at the parser as a name and a value, or {@code null} if it isn't two strings. Consumes it whole. */
+        private static String[] readPair(JsonParser parser) {
+            if (!parser.hasToken(JsonToken.START_ARRAY)) {
+                parser.skipChildren();
+                return null;
+            }
+            String[] pair = new String[2];
+            int count = 0;
+            boolean strings = true;
+            for (JsonToken token = parser.nextToken(); isEntry(token); token = parser.nextToken()) {
+                if (token == JsonToken.VALUE_STRING && count < pair.length) {
+                    pair[count] = parser.getString();
+                } else {
+                    strings = false;
+                    parser.skipChildren();
+                }
+                count++;
+            }
+            return strings && count == pair.length ? pair : null;
+        }
+
+        private static ProtocolException invalid(String message) {
+            return ProtocolException.session(ErrorCode.VALIDATION_FAILED, message);
+        }
+    }
+
     private static final class TunnelKindWriter extends StdSerializer<TunnelKind> {
         TunnelKindWriter() {
             super(TunnelKind.class);
@@ -259,6 +341,35 @@ final class WireValueModule extends SimpleModule {
         @Override
         public void serialize(ErrorCode code, JsonGenerator generator, SerializationContext context) {
             generator.writeString(code.code());
+        }
+    }
+
+    private static final class BodyFramingWriter extends StdSerializer<BodyFraming> {
+        BodyFramingWriter() {
+            super(BodyFraming.class);
+        }
+
+        @Override
+        public void serialize(BodyFraming framing, JsonGenerator generator, SerializationContext context) {
+            generator.writeString(framing.wireName());
+        }
+    }
+
+    private static final class HeaderFieldsWriter extends StdSerializer<HeaderFields> {
+        HeaderFieldsWriter() {
+            super(HeaderFields.class);
+        }
+
+        @Override
+        public void serialize(HeaderFields headers, JsonGenerator generator, SerializationContext context) {
+            generator.writeStartArray();
+            for (HeaderFields.Field field : headers.fields()) {
+                generator.writeStartArray();
+                generator.writeString(field.name());
+                generator.writeString(field.value());
+                generator.writeEndArray();
+            }
+            generator.writeEndArray();
         }
     }
 }

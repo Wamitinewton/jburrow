@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -30,6 +32,13 @@ public final class ConformanceVectors {
         List<JsonNode> all = new ArrayList<>(valid());
         all.addAll(invalid());
         return all;
+    }
+
+    /** The capabilities {@code vector}'s session has negotiated; empty when it names none. */
+    public static Set<String> capabilities(JsonNode vector) {
+        Set<String> capabilities = new HashSet<>();
+        vector.path("capabilities").forEach(capability -> capabilities.add(capability.asString()));
+        return Set.copyOf(capabilities);
     }
 
     private static List<JsonNode> load(String file) {

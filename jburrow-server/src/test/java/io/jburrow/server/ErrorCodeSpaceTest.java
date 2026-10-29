@@ -35,6 +35,21 @@ class ErrorCodeSpaceTest {
                 .containsExactlyInAnyOrderElementsOf(SHARED);
     }
 
+    /**
+     * A code a protocol capability introduces is unknown to a peer without it, so the REST API, which no such peer
+     * negotiates with, never shares one.
+     */
+    @Test
+    void codesACapabilityIntroducesAreNeverShared() {
+        Set<String> rest = names(io.jburrow.server.api.shared.error.ErrorCode.values());
+
+        assertThat(Arrays.stream(io.jburrow.protocol.wire.ErrorCode.values())
+                        .filter(code -> code.capability().isPresent())
+                        .map(Enum::name))
+                .containsExactlyInAnyOrder("SUBDOMAIN_UNAVAILABLE", "SUBDOMAIN_FORBIDDEN", "LOCAL_SERVICE_ERROR")
+                .noneMatch(rest::contains);
+    }
+
     private static Set<String> names(Enum<?>[] constants) {
         return Arrays.stream(constants).map(Enum::name).collect(Collectors.toSet());
     }

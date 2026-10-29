@@ -39,13 +39,16 @@ public enum ErrorCode {
     SESSION_LIMIT_EXCEEDED(Set.of(SESSION), NONE, 1008),
     PORT_UNAVAILABLE(Set.of(SESSION), NONE, 1008),
     PORT_POOL_EXHAUSTED(Set.of(SESSION), NONE, 1008),
+    SUBDOMAIN_UNAVAILABLE(Set.of(SESSION), NONE, 1008, Capability.HTTP),
+    SUBDOMAIN_FORBIDDEN(Set.of(SESSION), NONE, 1008, Capability.HTTP),
     HEARTBEAT_TIMEOUT(Set.of(SESSION), NONE, 1008),
     PING_RATE_EXCEEDED(Set.of(SESSION), NONE, 1008),
     INTERNAL_ERROR(Set.of(SESSION, STREAM), NONE, 1011),
     PEER_RESET(Set.of(STREAM), NONE, NONE),
     LOCAL_SERVICE_UNREACHABLE(Set.of(STREAM), NONE, NONE),
     STREAM_CLOSED(Set.of(STREAM), NONE, NONE),
-    CANCELLED(Set.of(STREAM), NONE, NONE);
+    CANCELLED(Set.of(STREAM), NONE, NONE),
+    LOCAL_SERVICE_ERROR(Set.of(STREAM), NONE, NONE, Capability.HTTP);
 
     /** Holds the "no value" marker apart from the enum, since an enum constant can't forward-reference its own field. */
     static final class Unset {
@@ -60,8 +63,13 @@ public enum ErrorCode {
     private final Set<ErrorScope> scopes;
     private final OptionalInt upgradeStatus;
     private final OptionalInt closeCode;
+    private final Capability capability;
 
     ErrorCode(Set<ErrorScope> scopes, int upgradeStatus, int closeCode) {
+        this(scopes, upgradeStatus, closeCode, null);
+    }
+
+    ErrorCode(Set<ErrorScope> scopes, int upgradeStatus, int closeCode, Capability capability) {
         if (scopes.contains(UPGRADE) != (upgradeStatus != NONE)) {
             throw new IllegalArgumentException(name() + ": an upgrade status is required exactly for UPGRADE scope");
         }
@@ -71,6 +79,7 @@ public enum ErrorCode {
         this.scopes = Collections.unmodifiableSet(EnumSet.copyOf(scopes));
         this.upgradeStatus = upgradeStatus == NONE ? OptionalInt.empty() : OptionalInt.of(upgradeStatus);
         this.closeCode = closeCode == NONE ? OptionalInt.empty() : OptionalInt.of(closeCode);
+        this.capability = capability;
     }
 
     public Set<ErrorScope> scopes() {
@@ -85,6 +94,14 @@ public enum ErrorCode {
     /** The advisory WebSocket close code; empty unless the scopes contain {@link ErrorScope#SESSION}. */
     public OptionalInt closeCode() {
         return closeCode;
+    }
+
+    /**
+     * The capability that introduces this code, which a session must have before the code is sent in it; empty for a
+     * code of the draft itself.
+     */
+    public Optional<Capability> capability() {
+        return Optional.ofNullable(capability);
     }
 
     public String code() {

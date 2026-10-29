@@ -11,10 +11,14 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.Nulls;
+import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.HttpRequestHead;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
@@ -77,6 +81,20 @@ class ControlJsonTest {
             List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "tcp.cloudnativehub.app", 20_417)));
     private static final Open OPEN_RECORD =
             new Open(TUNNEL_ID, TunnelKind.TCP, new RemoteAddress("203.0.113.9", 51_234));
+    private static final HttpResponseHead HEADERS_RECORD = new HttpResponseHead(
+            200,
+            HeaderFields.of(
+                    "set-cookie", "a=1",
+                    "content-type", "text/html; charset=utf-8",
+                    "set-cookie", "b=2",
+                    "content-length", "1043"),
+            BodyFraming.LENGTH);
+    private static final Open HTTP_OPEN_RECORD = new Open(
+            TUNNEL_ID,
+            TunnelKind.HTTP,
+            new RemoteAddress("203.0.113.9", 51_234),
+            new HttpRequestHead(
+                    "GET", "/?q=1", HeaderFields.of("host", "quiet-otter-4f2a.example.dev"), BodyFraming.EMPTY));
     private static final ErrorBody ERROR_RECORD =
             new ErrorBody(ErrorCode.PORT_UNAVAILABLE, "Port 20417 is already in use.", "default");
 
@@ -96,6 +114,13 @@ class ControlJsonTest {
             + "\"url\":\"tcp://tcp.cloudnativehub.app:20417\"}]}";
     private static final String OPEN = "{\"tunnelId\":\"5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23\",\"kind\":\"tcp\","
             + "\"remote\":{\"address\":\"203.0.113.9\",\"port\":51234}}";
+    private static final String HEADERS = "{\"status\":200,\"headers\":[[\"set-cookie\",\"a=1\"],"
+            + "[\"content-type\",\"text/html; charset=utf-8\"],[\"set-cookie\",\"b=2\"],"
+            + "[\"content-length\",\"1043\"]],\"body\":\"length\"}";
+    private static final String HTTP_OPEN = "{\"tunnelId\":\"5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23\",\"kind\":\"http\","
+            + "\"remote\":{\"address\":\"203.0.113.9\",\"port\":51234},"
+            + "\"request\":{\"method\":\"GET\",\"target\":\"/?q=1\","
+            + "\"headers\":[[\"host\",\"quiet-otter-4f2a.example.dev\"]],\"body\":\"empty\"}}";
     private static final String ERROR =
             "{\"code\":\"PORT_UNAVAILABLE\",\"message\":\"Port 20417 is already in use.\",\"ref\":\"default\"}";
 
@@ -235,7 +260,7 @@ class ControlJsonTest {
                         SERVER_HELLO.replace("\"session\":524288", "\"session\":524288,\"maxWindow\":{\"x\":1}"),
                         SERVER_HELLO_RECORD),
                 arguments(
-                        REGISTER.replace("\"ref\":\"default\"", "\"ref\":\"default\",\"subdomain\":\"x\""),
+                        REGISTER.replace("\"ref\":\"default\"", "\"ref\":\"default\",\"label\":\"x\""),
                         REGISTER_RECORD),
                 arguments(
                         REGISTERED.replace("\"publicPort\":20417", "\"publicPort\":20417,\"expiresAtMs\":1"),
@@ -461,12 +486,128 @@ class ControlJsonTest {
     }
 
     @Test
+    void headerFieldsAreArraysOfNameAndValueInOrderWithRepeats() {
+        assertThat(written(HEADERS_RECORD)).isEqualTo(HEADERS);
+        assertThat(read(HEADERS, HttpResponseHead.class)).isEqualTo(HEADERS_RECORD);
+        assertThat(read(HEADERS, HttpResponseHead.class).headers().all("set-cookie"))
+                .containsExactly("a=1", "b=2");
+    }
+
+    @Test
+    void aRequestHeadIsPartOfAnHttpOpen() {
+        assertThat(written(HTTP_OPEN_RECORD)).isEqualTo(HTTP_OPEN);
+        assertThat(read(HTTP_OPEN, Open.class)).isEqualTo(HTTP_OPEN_RECORD);
+    }
+
+    @Test
+    void anInformationalHeadOmitsItsBody() {
+        HttpResponseHead hints = new HttpResponseHead(103, HeaderFields.of("link", "</a.css>"), null);
+
+        assertThat(written(hints)).isEqualTo("{\"status\":103,\"headers\":[[\"link\",\"</a.css>\"]]}");
+        assertThat(read(written(hints), HttpResponseHead.class)).isEqualTo(hints);
+    }
+
+    @Test
+    void aSubdomainIsPartOfAnHttpTunnelRequest() {
+        Register register = new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.HTTP, "myapp", null)));
+
+        assertThat(written(register)).contains("{\"ref\":\"default\",\"kind\":\"http\",\"subdomain\":\"myapp\"}");
+        assertThat(read(written(register), Register.class)).isEqualTo(register);
+    }
+
+    @Test
+    void headerValuesKeepLatin1CodePointsAsUtf8() {
+        HttpResponseHead head =
+                new HttpResponseHead(200, HeaderFields.of("x-name", "caf\u00e9\u00ff"), BodyFraming.EMPTY);
+
+        byte[] json = JSON.write(head);
+
+        assertThat(new String(json, UTF_8)).contains("caf\u00e9\u00ff");
+        assertThat(JSON.read(json, HttpResponseHead.class)).isEqualTo(head);
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "[\"content-length\"]",
+                "[\"content-length\",\"1043\",\"x\"]",
+                "[]",
+                "[\"content-length\",1043]",
+                "[1,\"1043\"]",
+                "[\"content-length\",null]",
+                "[\"content-length\",[\"1043\"]]",
+                "{\"content-length\":\"1043\"}",
+                "\"content-length: 1043\"",
+                "null"
+            })
+    void aHeaderThatIsNotTwoStringsIsAValidationFailure(String entry) {
+        assertValidationFailed(
+                HEADERS.replace("[\"content-length\",\"1043\"]", entry),
+                HttpResponseHead.class,
+                "headers[3] must be an array of two strings");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "\"x\"", "1", "null"})
+    void headersOfTheWrongJsonTypeAreAProtocolError(String value) {
+        assertProtocolError("{\"status\":200,\"headers\":" + value + ",\"body\":\"empty\"}", HttpResponseHead.class);
+    }
+
+    @Test
+    void headerFieldRulesNameTheEntry() {
+        assertValidationFailed(
+                HEADERS.replace("\"content-type\"", "\"Content-Type\""),
+                HttpResponseHead.class,
+                "headers[1] name must match [a-z0-9!#$%&'*+.^_`|~-]{1,256}");
+        assertValidationFailed(
+                HEADERS.replace("\"b=2\"", "\"b=2\\r\\nx: y\""),
+                HttpResponseHead.class,
+                "headers[2] value must hold only HTAB, U+0020 to U+007E and U+0080 to U+00FF");
+        assertValidationFailed(
+                HEADERS.replace("[\"set-cookie\",\"a=1\"]", "[\"connection\",\"close\"]"),
+                HttpResponseHead.class,
+                "headers[0] name must not be a connection-specific field");
+        assertValidationFailed(
+                HTTP_OPEN.replace("[[\"host\"", "[[\"keep-alive\",\"timeout=5\"],[\"host\""),
+                Open.class,
+                "request.headers[0] name must not be a connection-specific field");
+        assertValidationFailed(
+                HTTP_OPEN.replace("\"host\"", "\"accept\""),
+                Open.class,
+                "request.headers must have exactly one host field");
+    }
+
+    @Test
+    void aHeaderValueLongerThanAJsonStringIsAProtocolError() {
+        assertProtocolError(HEADERS.replace("\"b=2\"", "\"" + "b".repeat(4_097) + "\""), HttpResponseHead.class);
+    }
+
+    @Test
+    void bodyFramingIsExactAndKnown() {
+        assertValidationFailed(
+                HEADERS.replace("\"length\"", "\"Length\""),
+                HttpResponseHead.class,
+                "body must be one of [empty, length, chunked]");
+        assertValidationFailed(
+                HEADERS.replace("\"length\"", "\"gzip\""),
+                HttpResponseHead.class,
+                "body must be one of [empty, length, chunked]");
+        assertProtocolError(HEADERS.replace("\"length\"", "1"), HttpResponseHead.class);
+    }
+
+    @Test
+    void statusIsARequiredInteger() {
+        assertValidationFailed(HEADERS.replace("\"status\":200,", ""), HttpResponseHead.class, "status is required");
+        assertProtocolError(HEADERS.replace("\"status\":200", "\"status\":\"200\""), HttpResponseHead.class);
+    }
+
+    @Test
     void unknownKindIsAValidationFailure() {
         assertValidationFailed(
-                REGISTER.replace("\"tcp\"", "\"http\""), Register.class, "tunnels[0].kind must be one of [tcp]");
+                REGISTER.replace("\"tcp\"", "\"udp\""), Register.class, "tunnels[0].kind must be one of [tcp, http]");
         assertValidationFailed(
-                REGISTER.replace("\"tcp\"", "\"TCP\""), Register.class, "tunnels[0].kind must be one of [tcp]");
-        assertValidationFailed(OPEN.replace("\"tcp\"", "\"udp\""), Open.class, "kind must be one of [tcp]");
+                REGISTER.replace("\"tcp\"", "\"TCP\""), Register.class, "tunnels[0].kind must be one of [tcp, http]");
+        assertValidationFailed(OPEN.replace("\"tcp\"", "\"HTTP\""), Open.class, "kind must be one of [tcp, http]");
     }
 
     @ParameterizedTest
@@ -644,7 +785,7 @@ class ControlJsonTest {
         assertValidationFailed(
                 REGISTERED.replace("tcp://tcp.cloudnativehub.app:20417", "tcp://elsewhere:1"),
                 Registered.class,
-                "tunnels[0].url must be <kind>://<publicHost>:<publicPort>");
+                "tunnels[0].url must be tcp://<publicHost>:<publicPort>");
         assertValidationFailed(
                 SERVER_HELLO.replace("45000", "29999"),
                 ServerHello.class,

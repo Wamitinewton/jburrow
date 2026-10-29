@@ -242,9 +242,11 @@ public final class ControlJson {
         String path = path(e);
         ProtocolException rejected = rejectedByRecord(e);
         if (rejected != null) {
-            return path.isEmpty()
-                    ? rejected
-                    : ProtocolException.session(rejected.code(), path + "." + rejected.getMessage());
+            if (path.isEmpty()) {
+                return rejected;
+            }
+            String message = rejected.getMessage();
+            return ProtocolException.session(rejected.code(), path + (message.startsWith("[") ? "" : ".") + message);
         }
         if (e instanceof WireValueModule.InvalidValueException invalid) {
             return ProtocolException.session(ErrorCode.VALIDATION_FAILED, path + " " + invalid.rule());
@@ -252,7 +254,10 @@ public final class ControlJson {
         return protocolError(reason(e, path) + location(e));
     }
 
-    /** A record constructor's own error, which Jackson wraps; it already names the field within that record. */
+    /**
+     * A record constructor's own error, which Jackson wraps; it already names the field within that record, or an
+     * index within it for a record written as an array.
+     */
     private static ProtocolException rejectedByRecord(Throwable e) {
         for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
             if (cause instanceof ProtocolException rejected) {

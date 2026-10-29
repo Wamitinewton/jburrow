@@ -6,6 +6,7 @@ import static io.jburrow.protocol.wire.ErrorScope.UPGRADE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -37,13 +38,16 @@ class ErrorCodeTest {
                 arguments(ErrorCode.SESSION_LIMIT_EXCEEDED, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.PORT_UNAVAILABLE, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.PORT_POOL_EXHAUSTED, Set.of(SESSION), NONE, 1008),
+                arguments(ErrorCode.SUBDOMAIN_UNAVAILABLE, Set.of(SESSION), NONE, 1008),
+                arguments(ErrorCode.SUBDOMAIN_FORBIDDEN, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.HEARTBEAT_TIMEOUT, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.PING_RATE_EXCEEDED, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.INTERNAL_ERROR, Set.of(SESSION, STREAM), NONE, 1011),
                 arguments(ErrorCode.PEER_RESET, Set.of(STREAM), NONE, NONE),
                 arguments(ErrorCode.LOCAL_SERVICE_UNREACHABLE, Set.of(STREAM), NONE, NONE),
                 arguments(ErrorCode.STREAM_CLOSED, Set.of(STREAM), NONE, NONE),
-                arguments(ErrorCode.CANCELLED, Set.of(STREAM), NONE, NONE));
+                arguments(ErrorCode.CANCELLED, Set.of(STREAM), NONE, NONE),
+                arguments(ErrorCode.LOCAL_SERVICE_ERROR, Set.of(STREAM), NONE, NONE));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -52,6 +56,17 @@ class ErrorCodeTest {
         assertThat(code.scopes()).containsExactlyInAnyOrderElementsOf(scopes);
         assertThat(code.upgradeStatus()).isEqualTo(optional(upgradeStatus));
         assertThat(code.closeCode()).isEqualTo(optional(closeCode));
+    }
+
+    @Test
+    void onlyTheHttpCodesNeedACapability() {
+        Set<ErrorCode> http =
+                Set.of(ErrorCode.SUBDOMAIN_UNAVAILABLE, ErrorCode.SUBDOMAIN_FORBIDDEN, ErrorCode.LOCAL_SERVICE_ERROR);
+        for (ErrorCode code : ErrorCode.values()) {
+            assertThat(code.capability())
+                    .as(code.code())
+                    .isEqualTo(http.contains(code) ? Optional.of(Capability.HTTP) : Optional.empty());
+        }
     }
 
     @Test

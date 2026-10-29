@@ -41,6 +41,8 @@ class ExitCodesTest {
         "SESSION_LIMIT_EXCEEDED, 5",
         "PORT_UNAVAILABLE, 5",
         "PORT_POOL_EXHAUSTED, 5",
+        "SUBDOMAIN_UNAVAILABLE, 5",
+        "SUBDOMAIN_FORBIDDEN, 5",
         "UNSUPPORTED_PROTOCOL_VERSION, 6",
         "PROTOCOL_ERROR, 6",
         "FRAME_SIZE_ERROR, 6",
@@ -49,6 +51,7 @@ class ExitCodesTest {
         "PING_RATE_EXCEEDED, 6",
         "PEER_RESET, 1",
         "LOCAL_SERVICE_UNREACHABLE, 1",
+        "LOCAL_SERVICE_ERROR, 1",
         "STREAM_CLOSED, 1",
         "CANCELLED, 1"
     })

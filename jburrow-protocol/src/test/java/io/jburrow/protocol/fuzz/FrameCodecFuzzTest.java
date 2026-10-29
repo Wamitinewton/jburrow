@@ -17,7 +17,8 @@ import java.nio.ByteBuffer;
 import java.util.Set;
 
 /**
- * Feeds arbitrary bytes to {@link FrameCodec#decode} as one WebSocket message, once for each receiving role.
+ * Feeds arbitrary bytes to {@link FrameCodec#decode} as one WebSocket message, once for each receiving role, in a
+ * session without capabilities and in one with {@code http}.
  *
  * <p>The property: decoding returns a frame or throws a session-scoped {@link ProtocolException} with a code the codec
  * may raise, and nothing else. It never changes the input's reference count, a returned {@code DATA} frame's payload
@@ -40,17 +41,21 @@ class FrameCodecFuzzTest {
     private static final ControlJson JSON = ControlJson.create();
     private static final FrameCodec SERVER = new FrameCodec(Role.SERVER, JSON);
     private static final FrameCodec CLIENT = new FrameCodec(Role.CLIENT, JSON);
+    private static final FrameCodec SERVER_WITH_HTTP = new FrameCodec(Role.SERVER, JSON, () -> true);
+    private static final FrameCodec CLIENT_WITH_HTTP = new FrameCodec(Role.CLIENT, JSON, () -> true);
     private static final ByteBufAllocator ALLOC = ByteBufAllocator.DEFAULT;
     private static final int LENGTH_FIELD_OFFSET = 6;
 
     @FuzzTest(maxDuration = "2m")
     void decodeAsServer(byte[] message) {
         decodeBothForms(SERVER, CLIENT, message);
+        decodeBothForms(SERVER_WITH_HTTP, CLIENT_WITH_HTTP, message);
     }
 
     @FuzzTest(maxDuration = "2m")
     void decodeAsClient(byte[] message) {
         decodeBothForms(CLIENT, SERVER, message);
+        decodeBothForms(CLIENT_WITH_HTTP, SERVER_WITH_HTTP, message);
     }
 
     private static void decodeBothForms(FrameCodec receiver, FrameCodec peer, byte[] message) {
@@ -106,10 +111,7 @@ class FrameCodecFuzzTest {
         }
     }
 
-    /**
-     * {@code HEADERS} and {@code GOAWAY} are decoded only as far as their header and are never encoded, so they have
-     * nothing to round-trip.
-     */
+    /** {@code GOAWAY} is decoded only as far as its header and is never encoded, so it has nothing to round-trip. */
     private static void assertReencodes(Frame frame, FrameCodec receiver, FrameCodec peer) {
         if (frame instanceof Frame.Unsupported) {
             return;

@@ -4,6 +4,8 @@ import static io.jburrow.protocol.stream.StreamEvent.CLOSE_RECEIVED;
 import static io.jburrow.protocol.stream.StreamEvent.CLOSE_SENT;
 import static io.jburrow.protocol.stream.StreamEvent.DATA_RECEIVED;
 import static io.jburrow.protocol.stream.StreamEvent.DATA_SENT;
+import static io.jburrow.protocol.stream.StreamEvent.HEADERS_RECEIVED;
+import static io.jburrow.protocol.stream.StreamEvent.HEADERS_SENT;
 import static io.jburrow.protocol.stream.StreamEvent.RST_RECEIVED;
 import static io.jburrow.protocol.stream.StreamEvent.RST_SENT;
 import static io.jburrow.protocol.stream.StreamEvent.WINDOW_UPDATE_RECEIVED;
@@ -35,10 +37,15 @@ class StreamLifecycleTest {
     private static final StreamOutcome RESET = new ResetStream(ErrorCode.STREAM_CLOSED);
     private static final StreamOutcome DISCARD = new Discard();
 
-    /** One row per cell of {@code docs/protocol.md} §9.2; {@code null} means the event throws. */
+    /**
+     * One row per cell of {@code docs/protocol.md} §9.2; {@code null} means the event throws. {@code HEADERS} has the
+     * cells of {@code DATA}, since a response head starts the client's direction of the stream (§9.7).
+     */
     static Stream<Arguments> table() {
         return Stream.of(
                 arguments(OPEN, DATA_RECEIVED, accept(OPEN)),
+                arguments(OPEN, HEADERS_RECEIVED, accept(OPEN)),
+                arguments(OPEN, HEADERS_SENT, accept(OPEN)),
                 arguments(OPEN, CLOSE_RECEIVED, accept(HALF_CLOSED_REMOTE)),
                 arguments(OPEN, RST_RECEIVED, accept(CLOSED)),
                 arguments(OPEN, DATA_SENT, accept(OPEN)),
@@ -47,6 +54,8 @@ class StreamLifecycleTest {
                 arguments(OPEN, WINDOW_UPDATE_RECEIVED, accept(OPEN)),
                 arguments(OPEN, WINDOW_UPDATE_SENT, accept(OPEN)),
                 arguments(HALF_CLOSED_LOCAL, DATA_RECEIVED, accept(HALF_CLOSED_LOCAL)),
+                arguments(HALF_CLOSED_LOCAL, HEADERS_RECEIVED, accept(HALF_CLOSED_LOCAL)),
+                arguments(HALF_CLOSED_LOCAL, HEADERS_SENT, null),
                 arguments(HALF_CLOSED_LOCAL, CLOSE_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_LOCAL, RST_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_LOCAL, DATA_SENT, null),
@@ -55,6 +64,8 @@ class StreamLifecycleTest {
                 arguments(HALF_CLOSED_LOCAL, WINDOW_UPDATE_RECEIVED, accept(HALF_CLOSED_LOCAL)),
                 arguments(HALF_CLOSED_LOCAL, WINDOW_UPDATE_SENT, accept(HALF_CLOSED_LOCAL)),
                 arguments(HALF_CLOSED_REMOTE, DATA_RECEIVED, RESET),
+                arguments(HALF_CLOSED_REMOTE, HEADERS_RECEIVED, RESET),
+                arguments(HALF_CLOSED_REMOTE, HEADERS_SENT, accept(HALF_CLOSED_REMOTE)),
                 arguments(HALF_CLOSED_REMOTE, CLOSE_RECEIVED, RESET),
                 arguments(HALF_CLOSED_REMOTE, RST_RECEIVED, accept(CLOSED)),
                 arguments(HALF_CLOSED_REMOTE, DATA_SENT, accept(HALF_CLOSED_REMOTE)),
@@ -63,6 +74,8 @@ class StreamLifecycleTest {
                 arguments(HALF_CLOSED_REMOTE, WINDOW_UPDATE_RECEIVED, accept(HALF_CLOSED_REMOTE)),
                 arguments(HALF_CLOSED_REMOTE, WINDOW_UPDATE_SENT, null),
                 arguments(CLOSED, DATA_RECEIVED, DISCARD),
+                arguments(CLOSED, HEADERS_RECEIVED, DISCARD),
+                arguments(CLOSED, HEADERS_SENT, null),
                 arguments(CLOSED, CLOSE_RECEIVED, DISCARD),
                 arguments(CLOSED, RST_RECEIVED, DISCARD),
                 arguments(CLOSED, DATA_SENT, null),
@@ -181,7 +194,8 @@ class StreamLifecycleTest {
         }
 
         assertThat(received)
-                .containsExactlyInAnyOrder(DATA_RECEIVED, CLOSE_RECEIVED, RST_RECEIVED, WINDOW_UPDATE_RECEIVED);
+                .containsExactlyInAnyOrder(
+                        DATA_RECEIVED, HEADERS_RECEIVED, CLOSE_RECEIVED, RST_RECEIVED, WINDOW_UPDATE_RECEIVED);
     }
 
     private static Accept accept(StreamState next) {

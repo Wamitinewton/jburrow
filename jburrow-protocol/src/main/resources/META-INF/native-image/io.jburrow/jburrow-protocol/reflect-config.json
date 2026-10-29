@@ -14,7 +14,35 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "io.jburrow.protocol.control.HeaderFields",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.protocol.control.HeaderFields$Field",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
     "name": "io.jburrow.protocol.control.Hello",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.protocol.control.HttpRequestHead",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.protocol.control.HttpResponseHead",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
     "allDeclaredFields": true,
@@ -96,6 +124,11 @@
     "allDeclaredMethods": true,
     "allDeclaredFields": true,
     "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.protocol.control.BodyFraming",
+    "allDeclaredFields": true,
+    "allDeclaredMethods": true
   },
   {
     "name": "io.jburrow.protocol.control.TunnelKind",

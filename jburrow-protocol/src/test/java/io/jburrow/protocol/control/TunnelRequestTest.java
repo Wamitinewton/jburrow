@@ -10,6 +10,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 class TunnelRequestTest {
 
     private static final String REF_RULE = "ref must match [a-z0-9][a-z0-9-]{0,31}";
+    private static final String SUBDOMAIN_RULE =
+            "subdomain must be 3 to 63 characters of [a-z0-9-], starting and ending with a letter or digit, without --";
 
     @Test
     void acceptsTheArchitectureExample() {
@@ -40,6 +42,42 @@ class TunnelRequestTest {
     @ValueSource(strings = {"", "-a", "Default", "a_b", "a.b", "abcdefghijklmnopqrstuvwxyz0123456"})
     void rejectsInvalidRefs(String ref) {
         assertInvalid(() -> new TunnelRequest(ref, TunnelKind.TCP, null), REF_RULE);
+    }
+
+    @Test
+    void anHttpTunnelMayAskForASubdomain() {
+        assertThat(new TunnelRequest("default", TunnelKind.HTTP, "myapp", null).subdomain())
+                .isEqualTo("myapp");
+        assertThat(new TunnelRequest("default", TunnelKind.HTTP, null, null).subdomain())
+                .isNull();
+    }
+
+    @Test
+    void subdomainIsOnlyForHttpAndRemotePortOnlyForTcp() {
+        assertInvalid(
+                () -> new TunnelRequest("a", TunnelKind.TCP, "myapp", null),
+                "subdomain is only allowed with kind http");
+        assertInvalid(
+                () -> new TunnelRequest("a", TunnelKind.HTTP, null, 20_417),
+                "remotePort is only allowed with kind tcp");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"abc", "myapp", "quiet-otter-4f2a", "a-b", "123", "a1-2b-3c", "x2y"})
+    void acceptsSubdomainsOf3To63Characters(String subdomain) {
+        new TunnelRequest("a", TunnelKind.HTTP, subdomain, null);
+    }
+
+    @Test
+    void subdomainsAreAtMost63Characters() {
+        new TunnelRequest("a", TunnelKind.HTTP, "a".repeat(63), null);
+        assertInvalid(() -> new TunnelRequest("a", TunnelKind.HTTP, "a".repeat(64), null), SUBDOMAIN_RULE);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "a", "ab", "-abc", "abc-", "my--app", "MyApp", "my_app", "my.app", "my app", "café"})
+    void rejectsOtherSubdomains(String subdomain) {
+        assertInvalid(() -> new TunnelRequest("a", TunnelKind.HTTP, subdomain, null), SUBDOMAIN_RULE);
     }
 
     @Test

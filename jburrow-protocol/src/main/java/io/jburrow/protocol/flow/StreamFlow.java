@@ -9,6 +9,7 @@ public final class StreamFlow {
 
     private final SendCredit send;
     private final ReceiveWindow receive;
+    private boolean removed;
 
     StreamFlow(SendCredit send, ReceiveWindow receive) {
         this.send = send;
@@ -21,6 +22,25 @@ public final class StreamFlow {
 
     public ReceiveWindow receive() {
         return receive;
+    }
+
+    /** Send credit taken by {@link SessionFlow#reserve} and not yet sent or refunded. */
+    public int reserved() {
+        return send.reserved();
+    }
+
+    /** Received bytes still held whose session credit {@link SessionFlow#park} returned early. */
+    public int parked() {
+        return receive.parked();
+    }
+
+    /** True once {@link SessionFlow#onRemoved} has seen the stream leave its table. */
+    boolean isRemoved() {
+        return removed;
+    }
+
+    void markRemoved() {
+        removed = true;
     }
 
     @Override

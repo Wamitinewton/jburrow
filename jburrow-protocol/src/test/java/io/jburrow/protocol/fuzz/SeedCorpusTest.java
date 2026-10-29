@@ -49,7 +49,7 @@ class SeedCorpusTest {
 
     /** The frame types whose payload the codec hands to {@code ControlJson}. */
     private static final Set<FrameType> JSON_PAYLOAD_TYPES =
-            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.ERROR);
+            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.ERROR);
 
     static Stream<Arguments> corpora() {
         Map<String, Map<String, byte[]>> seeds = new TreeMap<>();
