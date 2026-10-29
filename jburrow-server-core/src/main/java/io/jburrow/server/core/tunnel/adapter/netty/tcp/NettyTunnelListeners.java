@@ -58,6 +58,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
     private final PortReservations ports;
     private final InetAddress bindAddress;
     private final String publicHost;
+    private final int visitorReceiveBuffer;
     private final StreamQuota streamQuota;
     private final TunnelMetrics metrics;
 
@@ -69,6 +70,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
                 .orElseThrow(() -> new IllegalArgumentException("The tunnel bind address must be an IP literal: "
                         + deps.tcp().bindAddress()));
         this.publicHost = deps.tcp().publicHost();
+        this.visitorReceiveBuffer = deps.tcp().visitorReceiveBuffer();
         this.streamQuota = deps.streamQuota();
         this.metrics = deps.metrics();
     }
@@ -138,6 +140,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
             TunnelListener listener = TunnelListener.bind(
                     loop,
                     new InetSocketAddress(bindAddress, next.reservation().port()),
+                    visitorReceiveBuffer,
                     new ChannelInitializer<Channel>() {
                         @Override
                         protected void initChannel(Channel visitor) {

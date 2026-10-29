@@ -12,6 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
@@ -25,20 +26,32 @@ import java.util.function.LongSupplier;
  * visitors that actually have data pay for a pause, and idle ones are never touched.
  *
  * <p>A visitor blocked by its own stream's credit is resumed by that stream's {@code WINDOW_UPDATE}. One blocked by the
- * session's credit or headroom joins the line in {@link #blockedOnSession}, and every visitor in line is resumed, in
- * line order, when stream 0's {@code WINDOW_UPDATE} arrives or the session channel becomes writable again. Neither event
- * touches visitors that aren't waiting.
+ * session's credit or headroom joins the line in {@link #blockedOnSession}. When stream 0's {@code WINDOW_UPDATE}
+ * arrives or the session channel becomes writable again, visitors in line are resumed, in line order, until those
+ * resumed may send all the session can. Neither event touches visitors that aren't waiting.
  *
- * <p>Visitors share the session's credit. When the line is resumed, each visitor in it may take at most an equal share
- * of the credit there is, for its first read: which visitor the transport reads first then doesn't decide who gets the
- * credit, and NIO reads ready channels in no order the gate controls. The share lifts once that read is sent or held,
- * so credit a visitor leaves unused goes to the others in later reads, and every visitor in line is resumed, so none
- * waits while credit sits unused. A visitor keeps its place in line, through any number of resumes and one-byte pauses,
- * until a read of its own is sent; then it leaves, and rejoins at the back if that read spent what it may send.
+ * <p>Visitors share the session's credit. Each visitor resumed from the line may take at most a share of the credit
+ * there is, for its first read: an equal share, but never less than {@link #SHARE_FLOOR}. Which visitor the transport
+ * reads first then doesn't decide who gets the credit, and NIO reads ready channels in no order the gate controls. The
+ * floor keeps frames large when hundreds of visitors wait: below it, a grant would be split into frames of a few
+ * hundred bytes. Visitors the credit doesn't cover stay paused, so they don't each give up a byte to a read that can't
+ * be sent. The share lifts once that read is sent or held. Credit that resumed visitors leave unused, because they had
+ * less to send, goes to the next ones in line after {@link #RECHECK_NANOS}, so none waits while credit sits unused.
+ * A visitor keeps its place in line, through any number of resumes and one-byte pauses, until a read of its own is
+ * sent; then it leaves, and rejoins at the back if that read spent what it may send, or if it was resumed from the
+ * line and others there are still paused: one read per turn, so the transport's order of reads can't hand one visitor
+ * the credit meant for those resumed with it. Fairness holds across grants, as turns rotate, rather than within each
+ * one.
  *
  * <p>Confined to the session's event loop, so a credit check and the read it allows happen with no gap between them.
  */
 final class ReadGate {
+
+    /** The smallest share of the session's credit a resumed visitor is offered, unless less credit is left. */
+    static final int SHARE_FLOOR = 16_384;
+
+    /** How long after a partial resume the gate looks for credit resumed visitors didn't use. */
+    static final long RECHECK_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
 
     /** Why a visitor isn't read. */
     enum Wait {
@@ -47,7 +60,9 @@ final class ReadGate {
         /** The session's credit ran out. */
         SESSION,
         /** The session channel's outbound buffer is at its high watermark. */
-        HEADROOM
+        HEADROOM,
+        /** It had its turn at the session's credit, and others in line go first. */
+        TURN
     }
 
     /** What the gate asks of the relay when carried bytes can go out. */
@@ -58,6 +73,9 @@ final class ReadGate {
 
         /** Sends the {@code CLOSE} the visitor's {@code FIN} was holding back until its carried bytes went out. */
         void sendDeferredClose(VisitorHandler visitor);
+
+        /** Flushes carried bytes sent outside a read batch, which no read-complete will flush. */
+        void flushCarried();
     }
 
     private final Session session;
@@ -67,6 +85,8 @@ final class ReadGate {
     private final LongSupplier nanoTime;
     /** The line: insertion order is the order visitors joined it, which is the order they are resumed in. */
     private final Set<VisitorHandler> blockedOnSession = new LinkedHashSet<>();
+
+    private boolean recheckPending;
 
     ReadGate(Session session, Channel sessionChannel, TunnelMetrics metrics, Output output, LongSupplier nanoTime) {
         this.session = Objects.requireNonNull(session, "session");
@@ -99,13 +119,26 @@ final class ReadGate {
 
     /**
      * A read from the visitor went out as {@code DATA}: it has had its turn and leaves the line. If that spent what it
-     * may send, it stops being read now, and rejoins at the back if it waits for the session.
+     * may send, it stops being read now, and rejoins at the back if it waits for the session. If it was resumed from
+     * the line and others there still wait, it rejoins at the back anyway, so the visitors resumed with it get their
+     * reads before it takes a second.
+     *
+     * <p>A paused visitor can be read too, when the transport had already found it readable, so whatever it waited
+     * for is over: left waiting, it would be out of the line and never resumed.
      */
     void afterSend(VisitorHandler visitor) {
-        blockedOnSession.remove(visitor);
+        boolean resumedFromLine = visitor.share() > 0;
+        leaveLine(visitor);
         visitor.share(0);
         if (sendable(visitor) == 0) {
             block(visitor);
+        } else if (resumedFromLine && anyPausedInLine()) {
+            setAutoRead(visitor, false);
+            visitor.blocked(Wait.TURN, nanoTime.getAsLong());
+            blockedOnSession.add(visitor);
+            scheduleRecheck();
+        } else if (!visitor.channel().isInputShutdown()) {
+            setAutoRead(visitor, true);
         }
     }
 
@@ -139,24 +172,63 @@ final class ReadGate {
     }
 
     /**
-     * Resumes the visitors in line, in line order, each with an equal share of the credit for its first read and
-     * keeping its place until a read of its own is sent. Stops once the session can't send again: the visitors it hasn't
-     * reached stay paused.
+     * Resumes paused visitors in line, in line order, each with its share of the credit for its first read and keeping
+     * its place until a read of its own is sent, until those resumed may send all the session can. Visitors it doesn't
+     * reach stay paused, and are looked at again shortly in case the resumed ones leave credit unused.
      */
     private void resumeBlockedOnSession() {
-        if (blockedOnSession.isEmpty()) {
+        if (blockedOnSession.isEmpty() || sessionLimit() == 0) {
             return;
         }
         List<VisitorHandler> line = List.copyOf(blockedOnSession);
-        int share = Math.max(1, sessionLimit() / line.size());
+        int share = share(sessionLimit(), line.size());
+        long promised = 0;
         for (VisitorHandler visitor : line) {
-            if (sessionLimit() == 0) {
+            int left = sessionLimit();
+            if (left == 0) {
                 return;
             }
-            if (blockedOnSession.contains(visitor)) {
+            if (promised >= left) {
+                scheduleRecheck();
+                return;
+            }
+            // A visitor in line with nothing to wait for was resumed already and hasn't been read yet.
+            if (blockedOnSession.contains(visitor) && visitor.waiting() != null) {
                 visitor.share(share);
                 reassess(visitor);
+                promised += sendable(visitor);
             }
+        }
+    }
+
+    /** Whether a visitor in line is paused; those that were resumed and not yet read are already being served. */
+    private boolean anyPausedInLine() {
+        for (VisitorHandler waiting : blockedOnSession) {
+            if (waiting.waiting() != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** An equal share of {@code limit} among {@code visitors}, but at least the floor, or all of it if less. */
+    static int share(int limit, int visitors) {
+        return Math.max(Math.min(SHARE_FLOOR, limit), limit / visitors);
+    }
+
+    private void scheduleRecheck() {
+        if (recheckPending) {
+            return;
+        }
+        recheckPending = true;
+        sessionChannel.eventLoop().schedule(this::recheck, RECHECK_NANOS, TimeUnit.NANOSECONDS);
+    }
+
+    private void recheck() {
+        recheckPending = false;
+        if (session.state() != SessionState.CLOSING) {
+            resumeBlockedOnSession();
+            output.flushCarried();
         }
     }
 

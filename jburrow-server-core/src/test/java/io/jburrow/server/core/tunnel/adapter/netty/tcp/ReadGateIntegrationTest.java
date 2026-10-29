@@ -55,6 +55,8 @@ class ReadGateIntegrationTest {
     private TunnelHarness harness;
     /** {@code DATA} bytes the test has taken from the peer, which its ledger may count ahead of. */
     private long taken;
+    /** {@code DATA} frames the test has taken. */
+    private long frames;
 
     @AfterEach
     void stop() throws Exception {
@@ -183,6 +185,39 @@ class ReadGateIntegrationTest {
 
     @ParameterizedTest
     @MethodSource(TRANSPORTS)
+    void aHundredVisitorsInLineStillGetFramesOfAboutTheShareFloor(EdgeTransport transport) throws Exception {
+        start(transport);
+        ScriptedPeer peer = harness.connect();
+        RegisteredTunnel tunnel = harness.establish(peer, null, SMALLEST);
+        int count = 100;
+        List<byte[]> payloads = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            open(peer, tunnel, i + 1);
+            peer.grant(i + 1, 64 * 1024 * KIB);
+            payloads.add(new byte[256 * KIB]);
+        }
+        writeAllAtOnce(payloads);
+        takeData(peer, WINDOW, new HashMap<>());
+        for (int grant = 0; grant < 5; grant++) {
+            peer.grantSession(WINDOW);
+            takeData(peer, taken + WINDOW, new HashMap<>());
+        }
+
+        int grants = 20;
+        long framesBefore = frames;
+        for (int grant = 0; grant < grants; grant++) {
+            peer.grantSession(WINDOW);
+            takeData(peer, taken + WINDOW, new HashMap<>());
+        }
+
+        long average = (long) grants * WINDOW / (frames - framesBefore);
+        assertThat(average)
+                .as("an equal share alone would be %d bytes", WINDOW / count)
+                .isGreaterThanOrEqualTo(ReadGate.SHARE_FLOOR / 4);
+    }
+
+    @ParameterizedTest
+    @MethodSource(TRANSPORTS)
     void aFinBehindACarriedByteArrivesAfterItOnceCreditReturns(EdgeTransport transport) throws Exception {
         start(transport);
         ScriptedPeer peer = harness.connect();
@@ -281,6 +316,7 @@ class ReadGateIntegrationTest {
                 byte[] bytes = new byte[data.payload().readableBytes()];
                 data.payload().readBytes(bytes);
                 taken += bytes.length;
+                frames++;
                 received.computeIfAbsent(data.streamId(), id -> new ByteArrayOutputStream())
                         .writeBytes(bytes);
             }

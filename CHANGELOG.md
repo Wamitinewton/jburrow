@@ -54,18 +54,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ([ADR-0008](docs/adr/0008-byte-path-concurrency-model.md)). Tunnel metrics and an `edge` health
   indicator.
 - Many streams per session: up to `jburrow.edge.max-concurrent-streams` (1,000, announced in the
-  server `HELLO`) and `jburrow.edge.max-streams` (20,000) across the server, with the server's
+  server `HELLO`) and `jburrow.edge.max-streams` (4,000) across the server, with the server's
   receive windows set by `jburrow.edge.stream-window` and `jburrow.edge.session-window`. The edge
-  logs at startup the direct memory its settings can make it hold, and warns above 90% of the
-  limit. A tunnel's listener queues up to 1,024 connections waiting to be accepted, so a burst of
-  visitors isn't kept waiting on the kernel's handshake retries. The "session closed" line logs
-  `maxStreams`, the most streams the session had open at once.
+  logs at startup the direct memory its settings can make it hold, and warns above 90% of the limit.
+  `jburrow.tcp.visitor-receive-buffer` (32 KiB) caps what each visitor held back by credit can park
+  in the server's kernel, and the edge logs that total at startup too
+  ([ADR-0010](docs/adr/0010-share-floor-and-visitor-receive-buffers.md)). A tunnel's listener queues
+  up to 1,024 connections waiting to be accepted, so a burst of visitors isn't kept waiting on the
+  kernel's handshake retries. The "session closed" line logs `maxStreams`, the most streams the
+  session had open at once.
 - Per-stream backpressure on the server: a visitor is read only as far as its stream may send, and
   credit for the client's `DATA` goes back as it is written to the visitor, so a slow visitor holds
   back only its own stream and the client's connection is always read. Visitors waiting for a
-  session's credit take turns at it. `jburrow_flow_blocked_total{scope}` counts visitors paused for
-  want of stream or session credit, and the "stream closed" line logs `blockedMs`, how long the
-  stream waited for it.
+  session's credit take turns at it, one read per turn, each taking an equal share of it but never
+  less than 16 KiB, so a long line doesn't split the credit into tiny frames.
+  `jburrow_flow_blocked_total{scope}` counts visitors paused for want of stream or session credit,
+  and the "stream closed" line logs `blockedMs`, how long the stream waited for it.
 - Per-stream backpressure on the client, the server's mirror: it announces its receive windows (256
   KiB per stream, 1 MiB per session, settable with `JBurrowClient.Builder.windows`), reads a local
   connection only as far as its stream may send, and returns credit as the server's `DATA` is

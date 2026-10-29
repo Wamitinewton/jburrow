@@ -284,7 +284,7 @@ class EdgeServerIntegrationTest {
                 ports,
                 metrics,
                 blocking,
-                new TcpSettings("127.0.0.1", "localhost"));
+                new TcpSettings("127.0.0.1", "localhost", 32 * 1024));
     }
 
     private ScriptedPeer connect(String subprotocol) {

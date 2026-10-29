@@ -539,7 +539,7 @@ path never touches it: only admission and stream end do.
 
 1. Is the session established? Otherwise `NOT_ESTABLISHED`, as in phase 1.
 2. Is the session below `maxConcurrentStreams` (1,000)? Otherwise `STREAM_LIMIT`.
-3. Does `StreamQuota` have room (`jburrow.edge.max-streams`, 20,000)? Otherwise
+3. Does `StreamQuota` have room (`jburrow.edge.max-streams`, 4,000)? Otherwise
    `SERVER_STREAM_LIMIT`.
 
 A refused visitor is closed at once, unannounced, as in phase 1 (protocol.md §8.5). The quota is
@@ -548,9 +548,11 @@ on every path, which the tests check by counting the quota back to zero after ev
 
 Why a server-wide cap: phase 1 could hold at most 200 visitor connections (200 sessions × 1 stream).
 Phase 2's per-session limit allows 200,000. Each costs a file descriptor, a few KiB of heap for the
-channel and its pipeline, and kernel socket memory that cgroup v2 charges to the pod. 20,000 is
-roughly 60 MiB of heap for channels in the worst case and far below the container's open-file limit,
-and the load test measures it.
+channel and its pipeline, and kernel socket memory that cgroup v2 charges to the pod. The kernel
+memory is what sets the cap: a visitor held back by credit parks up to its receive buffer in the
+server's kernel, 64 KiB with `jburrow.tcp.visitor-receive-buffer` at its default, so 4,000 streams
+come to 250 MiB ([Memory budget](#memory-budget), ADR-0010). The load test's first choice of 20,000
+would have needed about 2.3 GiB at the kernel's default buffers.
 
 ### Visitor to client: the read gate
 
@@ -582,22 +584,39 @@ one term of the same minimum.
   implementations keep for the same purpose.
 - **Who is waiting for what.** A visitor blocked by its own stream credit is resumed by its stream's
   `WINDOW_UPDATE`. A visitor blocked by session credit or headroom joins a line, the relay's
-  `blockedOnSession` set, and every visitor in line is resumed, in line order, when stream 0's
-  `WINDOW_UPDATE` arrives or the session channel becomes writable again. Neither event scans
-  visitors that aren't waiting.
-- **An equal share.** Whoever the event loop reads first after a resume takes the credit, and the
-  others give up a byte each, so the order of reads would decide who is served. Epoll reads resumed
-  visitors in the order they were resumed; NIO reads ready channels in an order of its own, the same
-  every time, which the gate doesn't control. So when the line is resumed, each visitor in it may
-  take at most `credit / visitors in line` (at least one byte) in its first read. The cap lifts once
-  that read is sent or held, so credit a visitor leaves unused goes to the others in later reads.
-  Every visitor in line is still resumed: resuming only as many as the credit covers would leave the
-  rest waiting, with credit unused, behind a resumed visitor that turns out to have nothing to send,
-  until a `WINDOW_UPDATE` that may never come.
+  `blockedOnSession` set. When stream 0's `WINDOW_UPDATE` arrives or the session channel becomes
+  writable again, visitors in line are resumed, in line order, until what the resumed ones may send
+  adds up to all the session can send. The rest stay paused and keep their place. Neither event
+  scans visitors that aren't waiting.
+- **A share with a floor** (ADR-0010). Whoever the event loop reads first after a resume takes the
+  credit, so the order of reads would decide who is served. Epoll reads resumed visitors in the
+  order they were resumed; NIO reads ready channels in an order of its own, the same every time,
+  which the gate doesn't control. So each visitor resumed from the line may take at most
+  `max(16 KiB, credit / visitors in line)` in its first read, or all the credit if less is left. The
+  cap lifts once that read is sent or held. The floor keeps frames large: without it, a 512 KiB
+  grant to 1,000 visitors would be split into frames of about 500 bytes, which the load test found
+  cost 8 times the CPU and 22% of the link ([Performance](#performance)). Resuming only the visitors
+  the credit covers is what makes the floor work. A visitor resumed past the credit would be read
+  anyway and give up a byte to the carry, which goes out later as a one-byte frame, so every
+  visitor in line would still cost a read and a frame per grant.
+- **A re-check for unused credit.** A resumed visitor may have less to send than its share, or
+  nothing, and then no event tells the gate the credit is still there. So after a partial resume, or
+  a visitor giving up its turn, the gate looks again 1 ms later, on the session's event loop, and resumes the next paused visitors if
+  credit is unused. Visitors resumed earlier and not yet read are skipped, since they may be idle.
+  At most one re-check is pending per session. Without it, the rest of the line would wait, with
+  credit unused, behind a resumed visitor that had nothing to send, until a `WINDOW_UPDATE` that may
+  never come.
 - **Turns rotate.** A visitor keeps its place in line, through any number of resumes and one-byte
   pauses, until a read of its own is sent; then it leaves, and rejoins at the back if that read spent
   what it could send. Without this, visitors would re-block in the order they were read, and on
-  epoll the same visitor would head the line at every grant.
+  epoll the same visitor would head the line at every grant. With the floor, fairness holds across
+  grants rather than within each one: a line of 1,000 takes about 31 grants of 512 KiB to come round.
+- **One read per turn.** A visitor resumed from the line whose read leaves it credit still goes to
+  the back, waiting for its `TURN`, if any visitor in line is still paused, and the re-check is
+  scheduled so the credit it leaves isn't stranded. Without this, NIO could read the same visitor
+  twice before the others resumed with it, and `ReadGateIntegrationTest` saw one of ten visitors take
+  1.9 times its share. A visitor with no one paused behind it keeps reading. A turn isn't counted in
+  `jburrow_flow_blocked_total`, since the visitor wasn't short of credit.
 
 **The one-byte carry.** A visitor can be read when its `sendable` is 0, in two ways. One is
 deliberate: when session credit or headroom runs out, pausing every visitor of the session at once
@@ -622,9 +641,14 @@ credit, however the gate sized the turn's first read. Those bytes are not lost o
 its carry, in order, and go out as credit returns, ahead of its `CLOSE`. The allocator recognises
 the drain (a second read in one turn can be nothing else) and reads it in full-sized chunks rather
 than byte by byte, so it doesn't tie up the event loop. What such a visitor holds is at most what the
-kernel had already received for it, its socket receive buffer, which the pod was charged for already;
-it moves from kernel memory into direct memory ([Memory budget](#memory-budget)). NIO has no such
-drain: a paused visitor's `FIN` is read when it is next resumed.
+kernel had already received for it, its socket receive buffer, which the pod was charged for already.
+**Carried bytes are copied onto the heap** (unpooled, so they are freed once sent) and the read's
+direct buffer released at once. With the share floor, most of a long line stays paused across
+grants, so many visitors can half-close while held back: `SlowClientIntegrationTest`'s 500 uploads
+drained 27 MB into direct memory before the copy, far past the per-session budget, and 112 KiB after
+it. The bytes move from kernel memory to the heap, so the pod's total doesn't change
+([Memory budget](#memory-budget)). The copy is off the steady path: only bytes that can't be sent
+are carried. NIO has no such drain: a paused visitor's `FIN` is read when it is next resumed.
 
 A visitor's `FIN` still becomes `CLOSE`, once any carried bytes have gone out ahead of it, since a
 half-close must follow the stream's last byte. A reset discards the carried bytes and needs no
@@ -655,7 +679,7 @@ one per 256 KiB per session) that coalescing their flushes would buy nothing.
 | `Backpressure`: a visitor that can't take more stops the session channel being read and pauses liveness | Removed. The visitor's stream window does that job for its stream alone. Session writability moves into the read gate. |
 | `jburrow.edge.visitor-write-buffer` | Removed. What a visitor channel holds is bounded by the stream window, so its watermarks no longer drive anything. |
 | `LivenessHandler.pause` and `resume` | Removed, along with their callers. The server never stops reading a client for flow control any more. `Liveness`'s pausing rules stay in the protocol model, which the specification still allows. |
-| Second visitor refused (`maxConcurrentStreams` 1) | 1,000 streams per session, 20,000 per server. |
+| Second visitor refused (`maxConcurrentStreams` 1) | 1,000 streams per session, 4,000 per server. |
 | Tunnel listener backlog 128 | 1,024, as the edge's. A burst of visitors beyond the accept queue loses each handshake's last ACK while the visitor already thinks it is connected, and waits seconds for the kernel's retries: `ManyStreamsIntegrationTest`'s 500 connections at once found it. The kernel caps the backlog at `net.core.somaxconn` (4,096 by default since Linux 5.4). |
 
 ## The client
@@ -735,12 +759,14 @@ allowed. `StreamQuota` is in `tunnel.application` and uses only `java.util.concu
 | `jburrow.edge.stream-window` | | `256KB` | `256KB` | announced as `windows.stream`; 64 KiB to 2 GiB − 1 |
 | `jburrow.edge.session-window` | | `512KB` | `512KB` | announced as `windows.session`; at least `stream-window` |
 | `jburrow.edge.max-concurrent-streams` | | `1000` | `1000` | announced as `limits.maxConcurrentStreams`; was a constant, 1 |
-| `jburrow.edge.max-streams` | | `20000` | `20000` | server-wide; at least `max-concurrent-streams` |
+| `jburrow.edge.max-streams` | | `4000` | `4000` | server-wide; at least `max-concurrent-streams`. With the receive buffer, sets the kernel memory held-back visitors can park |
+| `jburrow.tcp.visitor-receive-buffer` | | `32KB` | `32KB` | `SO_RCVBUF` on tunnel listeners, inherited by visitors; Linux doubles it. `0` leaves it to the kernel; otherwise 4 KB to 4 MB |
 | `jburrow.edge.session-write-buffer` | | `64KB-256KB` | same | was `128KB-512KB` |
 | `jburrow.edge.visitor-write-buffer` | | removed | removed | |
 
 None needs a value in the production Secret. Validation is in `JBurrowProperties`, as in phase 1:
-the window bounds, `session-window ≥ stream-window`, `max-streams ≥ max-concurrent-streams`.
+the window bounds, `session-window ≥ stream-window`, `max-streams ≥ max-concurrent-streams`, the
+receive buffer's bounds.
 
 **The budget check.** At startup `EdgeConfiguration` computes the per-session worst case from these
 values ([Memory budget](#memory-budget)), multiplies it by `max-sessions`, adds the handshaking
@@ -748,7 +774,11 @@ connections, and compares the total with Netty's direct memory limit
 (`PlatformDependent.maxDirectMemory()`). It logs the arithmetic at INFO, and at WARN if the total
 exceeds 90% of the limit. It doesn't fail startup, because the worst case needs every session
 saturated at once and an operator may knowingly overcommit, but nobody can configure past the budget
-without being told.
+without being told. A second line states the kernel memory visitors' receive buffers can take,
+`max-streams × 2 × visitor-receive-buffer` (`4000 streams × 64 KiB = 250 MiB of kernel memory`),
+at INFO, or at WARN when the buffer is left to the kernel and nothing bounds it. That memory is
+outside the JVM, so there is no limit to compare it with from inside; [Memory budget](#memory-budget)
+has the pod-level sum.
 
 ## Observability
 
@@ -775,7 +805,6 @@ The pod limit, the JVM settings and the 256 MiB direct memory cap are phase 1's.
 | Client `DATA` received and not yet written to visitors: the server's session window | 512 KiB |
 | One message from a client that overruns its window, held until it is rejected | 64 KiB |
 | Session channel outbound buffer: high watermark plus one frame | 256 KiB + 64 KiB |
-| Carried bytes, at most one per stream (but see below) | 1 KiB at 1,000 streams |
 | **Total** | **≈ 0.88 MiB** |
 
 200 sessions use at most about 175 MiB, and 64 handshaking connections about 4 MiB more: 179 MiB of
@@ -789,10 +818,10 @@ thousand.
 
 **Also not in this table**: on epoll, a visitor that sends `FIN` while held back is read to the end
 at once ([A `FIN` on epoll](#visitor-to-client-the-read-gate)), and what it sent past its credit is
-carried until credit returns: at most its socket receive buffer, about 128 KiB unless the kernel has
-grown it for a fast reader (`net.ipv4.tcp_rmem`'s maximum, 6 MiB, at most). It was already in the pod's
-kernel memory, and only moves to direct memory. Many visitors doing this to a session held back at
-once is the case to watch; `SO_RCVBUF` on visitor channels caps it if the load test shows it matters.
+carried until credit returns: at most its socket receive buffer, 64 KiB with
+`jburrow.tcp.visitor-receive-buffer` at its default (with the kernel's own sizing it would be about
+128 KiB, and up to `net.ipv4.tcp_rmem`'s maximum, 6 MiB, for a fast reader). It was already in the
+pod's kernel memory, and moves to the heap, which has room for it (below).
 
 **Not in this table**: kernel socket buffers. Credit is returned when a write reaches a visitor's
 socket, so what the kernel holds for a slow visitor is outside the window. Linux sizes a socket's
@@ -807,15 +836,38 @@ without credit isn't read, so what it sends waits in the server's kernel. Almost
 such visitors: after the first two, the session window stops the client-to-visitor direction, and
 their own receive buffers took the rest. So the kernel memory that grows with stream count is the
 receive side, about 125 KB per held-back visitor, not send buffers, and **`SO_SNDBUF` isn't needed**.
-At `max-streams` (20,000) the receive side comes to about 2.3 GiB. That is over the pod's 1 GiB
-limit, so the server-wide stream cap doesn't keep the pod within its memory
-([Open questions](#open-questions)).
+At the 20,000 streams first planned, the receive side would come to about 2.3 GiB, over the pod's
+1 GiB limit, so ADR-0010 bounds both factors. `jburrow.tcp.visitor-receive-buffer` (32 KiB, so
+64 KiB once Linux doubles it) caps each visitor, and `max-streams` drops to 4,000: **250 MiB** at
+most. The buffer is set on the listening socket, so a visitor has it from the handshake on and its
+window is scaled to match. The cost is the kernel's receive auto-tuning for visitors: a visitor's
+upload is capped at about its usable buffer ÷ its round trip, roughly 0.6 MiB/s at 50 ms and
+160 KiB/s at 200 ms. Downloads to visitors aren't affected.
+
+**The pod**, worst case at the defaults, against its 1 GiB limit:
+
+| | Bytes |
+|---|---|
+| Heap, held to 30% of the pod by the deployment (`-XX:MaxRAMPercentage=30.0`), including what visitors' drained receive buffers move into it | 307 MiB |
+| Direct memory, capped (`-Dio.netty.maxDirectMemory`); 179 MiB budgeted above | 256 MiB |
+| Visitors' receive buffers, `max-streams × 64 KiB` | 250 MiB |
+| The JVM's own memory: metaspace, code cache, thread stacks, GC structures | the rest, about 200 MiB |
+
+The heap needs about 47 MiB at 4,000 streams (below). The rest is room for carried bytes: in the
+worst case, every visitor half-closes while held back, and its receive buffer, up to 64 KiB, moves
+from the kernel to the heap, 250 MiB at 4,000 streams. That leaves the receive-buffer row empty as
+it fills the heap, so the two rows are one allowance, not two, and 307 MiB covers both with little
+to spare. Phase 1's 75% gave the heap 768 MiB it never used, which is the memory kernel socket
+buffers need. The sessions'
+own socket buffers on the edge are outside this table, as they were in phase 1, and are the next
+thing to measure. The figures for kernel memory and the JVM's non-heap memory are estimates until
+the load test's rows 4 and 6 are run again with these settings.
 
 **Heap.** Per stream the server keeps a channel, its pipeline, a `VisitorHandler`, a lifecycle and a
 `StreamFlow`, and nothing that grows with the bytes carried. The slow-client test measures heap
 after garbage collection at two points of a long transfer and requires it not to grow between them.
 **Measured**: 2.8 KiB of heap per open stream after a full collection (35.9 MiB idle, 38.7 MiB with
-1,000 streams open), so 20,000 streams need about 55 MiB on top of an idle server's 36 MiB.
+1,000 streams open), so 4,000 streams need about 11 MiB on top of an idle server's 36 MiB.
 
 ## Performance
 
@@ -826,8 +878,9 @@ after garbage collection at two points of a long transfer and requires it not to
   per stream, and one per 256 KiB on stream 0. Less than 0.02% of the data.
 - **Pausing at scale.** Turning `autoRead` off and on is a system call per visitor on epoll. When a
   session's credit or headroom runs out, only the visitors that are actually read are paused (each
-  after a one-byte read), and only the ones waiting are resumed; idle visitors cost nothing. The
-  load test found that the equal share costs more than the pausing does (below).
+  after a one-byte read), and only as many waiting visitors as the credit covers are resumed; idle
+  visitors cost nothing. The load test found that the share without a floor cost more than the
+  pausing does (below).
 - **Latency.** An interactive stream (SSH) next to bulk streams waits at most one turn of reads, each
   at most 64 KiB, before its next frame is read.
 
@@ -851,8 +904,11 @@ visitors competing for session credit. Pausing doesn't account for it. The **equ
 each visitor resumed from a line of 1,000 may take one thousandth of the credit returned, so `DATA`
 frames averaged **247 bytes** client to server and **540 bytes** server to client, against 14 KB
 and 23 KB with 10 visitors. That means 48 times the packets, a quarter of the bytes on the link spent
-on headers, and 8 times the CPU. Both sides' read gates follow the same rule, so both pay for it
-([Open questions](#open-questions)).
+on headers, and 8 times the CPU. Both sides' read gates followed the same rule, so both paid for it.
+ADR-0010 puts a 16 KiB floor under the share and resumes only the visitors the credit covers
+([The read gate](#visitor-to-client-the-read-gate)), so a 512 KiB grant goes out in about 32 frames
+instead of 1,000. `ReadGateIntegrationTest` checks the frame size with 100 visitors; the link-limited
+row is to be measured again.
 - **Opening many streams at once.** The client resolves each local target on a virtual thread
   (phase 1), so 500 simultaneous `OPEN`s resolve in parallel without blocking the event loop.
 
@@ -903,7 +959,9 @@ next to `PROTOCOL_ERROR`, extending phase 1's exit code table
 | `CreditBoundedRecvByteBufAllocatorTest` | unit | the cap, the one-byte floor, adaptive guesses not shrunk by capped reads |
 | `SessionTest`, `StreamTableTest`, `StreamQuotaTest` | unit | window events through the server domain; the server-wide cap |
 | `FlowControlIntegrationTest` | real edge, `ScriptedPeer` client | the server never sends past the client's windows; it resumes on `WINDOW_UPDATE` for the stream and for stream 0; it returns credit as it writes to visitors, at half the window; every violation is `FLOW_CONTROL_ERROR`; `WINDOW_UPDATE` before established is `PROTOCOL_ERROR`; credit returns for discarded and reset streams |
-| `ReadGateIntegrationTest` | real edge, `ScriptedPeer`, many visitors | the one-byte carry under a forced race with a 64 KiB session window and 50 visitors, on epoll and NIO; outbound buffer never more than one frame over its high watermark; turns are fair (no visitor gets two reads while another waits) |
+| `ReadGateTest` (server and client) | unit, embedded channels | the gate's rules one by one: sizing, lazy pausing and the carry, the equal share and its 16 KiB floor, resuming only the visitors the credit covers, the re-check for unused credit, turns and one read per turn |
+| `ReadGateIntegrationTest` | real edge, `ScriptedPeer`, many visitors | the one-byte carry under a forced race with a 64 KiB session window and 50 visitors, on epoll and NIO; outbound buffer never more than one frame over its high watermark; turns are fair across grants (every visitor within half of its fair share over 50 grants); 100 visitors in line still get frames averaging at least a quarter of the floor |
+| `TunnelListenerTest` additions | real sockets | every visitor inherits the listener's receive buffer, on epoll and NIO |
 | `StreamAdmissionIntegrationTest` | real edge | per-session and server-wide caps, quota back to zero after every scenario |
 | `ClientSessionIntegrationTest` additions | real client, `ScriptedPeer` server | the client mirror of the above; queued data before connect bounded by the window; control connection never paused |
 | `ManyStreamsIntegrationTest` | full server + real client | 500 concurrent visitors, 1 MiB each way, checksums, one session |
@@ -942,8 +1000,11 @@ No new resource, port, Secret key or DNS record. What a deploy has to get right:
 - **Order.** The new server refuses every phase 1 CLI. Build the native binary from the phase 2 commit
   and give it to the testers before the server is deployed, and tell them that the old one stops
   working at the deploy.
-- **Settings.** All new keys have defaults. The startup budget line in the log confirms the arithmetic
-  on the production pod.
+- **Settings.** All new keys have defaults. The two startup budget lines in the log (direct memory and
+  visitor receive buffers) confirm the arithmetic on the production pod.
+- **JVM.** The deployment's `JAVA_TOOL_OPTIONS` holds the heap to 30% of the pod
+  (`-XX:MaxRAMPercentage=30.0`, was 75%), so the pod's memory has room for kernel socket buffers
+  ([Memory budget](#memory-budget)). `-Dio.netty.maxDirectMemory` stays at 256 MiB.
 - **Watch.** `jburrow_netty_direct_memory_bytes`, `jburrow_flow_blocked_total` and the pod's memory
   during the exit test, as the evidence for [Memory budget](#memory-budget).
 
@@ -954,6 +1015,7 @@ The deployment runbook's phase 2 section has the steps.
 | ADR | Decision | Written in |
 |---|---|---|
 | 0009 | Flow control: credit windows per stream and per session, as in HTTP/2 and QUIC; each side announces its own receive windows, fixed for the session; credit returned for released bytes, at half the window; every overrun a session error; sources read only as far as they can be sent, paused lazily with a one-byte carry; no read pausing of the control connection for flow control; protocol draft 2 | the flow control model checkpoint |
+| 0010 | A 16 KiB floor on the read gate's share, resuming only the visitors the credit covers, with a re-check for unused credit; `SO_RCVBUF` on tunnel listeners, 32 KiB; `max-streams` 4,000; the heap held to 30% of the pod | the load test's decisions, before the production rollout |
 
 ## Extension points
 
@@ -969,24 +1031,10 @@ The deployment runbook's phase 2 section has the steps.
 
 The load test settled auto-tuning (not for phase 3, [Choosing the windows](#choosing-the-windows)),
 `SO_SNDBUF` (not needed, [Memory budget](#memory-budget)) and the server session window (512 KiB
-stays). It raised the first two questions below, and both need a decision before the production
-rollout.
+stays). It raised two more, both settled by ADR-0010: visitor receive buffers against the pod's
+memory ([Memory budget](#memory-budget)), and small frames when many visitors share a session's
+credit ([The read gate](#visitor-to-client-the-read-gate)). One stays open:
 
-- **Visitor receive buffers against the pod's memory.** A held-back visitor parks about 125 KB in
-  the server's kernel, so 20,000 of them would need about 2.3 GiB of a 1 GiB pod. The levers can be
-  combined. `SO_RCVBUF` on visitor channels caps each visitor, but it also turns off the kernel's
-  receive auto-tuning, so it caps that visitor's upload rate at the buffer ÷ its round trip, and it
-  bounds what epoll's `FIN` drain can move into direct memory. A lower `max-streams` caps the count.
-  The heap is the third lever: 36 MiB idle plus 2.8 KiB per stream is a small fraction of the 768 MiB
-  that 75% gives it, and the slack is what kernel socket memory needs. Whatever is chosen goes into
-  [Memory budget](#memory-budget) and the startup budget check.
-- **Small frames when many visitors share a session's credit.** The equal share
-  ([The read gate](#visitor-to-client-the-read-gate)) splits returned credit into frames of a few
-  hundred bytes once hundreds of visitors are in line, which cost 8 times the CPU and 22% of the
-  link's throughput in the load test. One candidate fix is a floor on the share, say 16 KiB, while
-  still resuming every visitor in line. Fairness then holds across successive grants rather than
-  within each one, and turns already rotate. The change would apply to both read gates and to
-  `ReadGateIntegrationTest`'s fairness check.
 - **Paused readers on HTTP tunnels (phase 3).** Two visitors that stop reading are enough to stop a
   session's client-to-visitor direction. With raw TCP that takes deliberate stalling. With HTTP it
   happens in ordinary use: a browser stops reading a media response once it has buffered enough.

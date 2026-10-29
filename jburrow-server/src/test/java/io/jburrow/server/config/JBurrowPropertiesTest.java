@@ -24,6 +24,7 @@ import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.bind.validation.BindValidationException;
 import org.springframework.boot.context.properties.bind.validation.ValidationBindHandler;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
+import org.springframework.util.unit.DataSize;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 
 class JBurrowPropertiesTest {
@@ -71,10 +72,11 @@ class JBurrowPropertiesTest {
         assertThat(edge.sessionWatermarks()).isEqualTo(new JBurrowProperties.Watermarks(64 * 1024, 256 * 1024));
         assertThat(edge.windows()).isEqualTo(new Windows(256 * 1024, 512 * 1024));
         assertThat(edge.maxConcurrentStreams()).isEqualTo(1_000);
-        assertThat(edge.maxStreams()).isEqualTo(20_000);
+        assertThat(edge.maxStreams()).isEqualTo(4_000);
         JBurrowProperties.Tcp tcp = properties.tcp();
         assertThat(tcp.bindAddress()).isEqualTo("0.0.0.0");
         assertThat(tcp.reuseDelay()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(tcp.visitorReceiveBuffer()).isEqualTo(DataSize.ofKilobytes(32));
         assertThat(tcp.parsedPortRange()).contains(new PortRange(21_000, 21_099));
     }
 
@@ -142,7 +144,9 @@ class JBurrowPropertiesTest {
                 arguments(Map.of("jburrow.tcp.port-range", "21000"), "jburrow.tcp.port-range"),
                 arguments(Map.of("jburrow.tcp.port-range", "7000-7999"), "jburrow.tcp.port-range"),
                 arguments(Map.of("jburrow.edge.port", "21050"), "jburrow.tcp.port-range"),
-                arguments(Map.of("jburrow.tcp.reuse-delay", "-1s"), "jburrow.tcp.reuse-delay"));
+                arguments(Map.of("jburrow.tcp.reuse-delay", "-1s"), "jburrow.tcp.reuse-delay"),
+                arguments(Map.of("jburrow.tcp.visitor-receive-buffer", "1KB"), "jburrow.tcp.visitor-receive-buffer"),
+                arguments(Map.of("jburrow.tcp.visitor-receive-buffer", "8MB"), "jburrow.tcp.visitor-receive-buffer"));
     }
 
     @ParameterizedTest
@@ -169,6 +173,13 @@ class JBurrowPropertiesTest {
 
         assertThat(properties.edge().windows()).isEqualTo(new Windows(65_536, Integer.MAX_VALUE));
         assertThat(properties.edge().maxStreams()).isEqualTo(7);
+    }
+
+    @Test
+    void aVisitorReceiveBufferOfZeroLeavesItToTheKernel() {
+        JBurrowProperties properties = bind(with(Map.of("jburrow.tcp.visitor-receive-buffer", "0")));
+
+        assertThat(properties.tcp().visitorReceiveBuffer().toBytes()).isZero();
     }
 
     @Test

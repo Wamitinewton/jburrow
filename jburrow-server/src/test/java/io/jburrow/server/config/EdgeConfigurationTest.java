@@ -32,7 +32,7 @@ class EdgeConfigurationTest {
         assertThat(settings.sessionWriteHigh()).isEqualTo(256 * 1024);
         assertThat(settings.windows()).isEqualTo(new Windows(256 * 1024, 512 * 1024));
         assertThat(settings.maxConcurrentStreams()).isEqualTo(1_000);
-        assertThat(settings.maxStreams()).isEqualTo(20_000);
+        assertThat(settings.maxStreams()).isEqualTo(4_000);
         assertThat(settings.serverVersion()).isEqualTo("1.2.3");
     }
 
@@ -90,6 +90,6 @@ class EdgeConfigurationTest {
                 DataSize.ofKilobytes(256),
                 DataSize.ofKilobytes(512),
                 1_000,
-                20_000);
+                4_000);
     }
 }

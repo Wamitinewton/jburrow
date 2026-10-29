@@ -38,7 +38,7 @@ import org.springframework.core.env.Environment;
  * Constructs the tunnel engine from {@code jburrow.edge.*} and {@code jburrow.tcp.*}: the port pool, the session and
  * stream caps, registration, the blocking executor, the metrics adapter, the TCP tunnel listeners and the
  * {@link EdgeServer}. Hands the engine plain values and an executor, so nothing here touches Netty. Logs the direct
- * memory budget the settings add up to.
+ * memory budget the settings add up to, and the kernel memory visitors' receive buffers can take.
  */
 @Configuration(proxyBeanMethods = false)
 class EdgeConfiguration {
@@ -115,7 +115,8 @@ class EdgeConfiguration {
             BlockingExecutor blocking) {
         JBurrowProperties.Tcp tcp = properties.tcp();
         TcpSettings tcpSettings = new TcpSettings(
-                ipLiteral(tcp.bindAddress(), "jburrow.tcp.bind-address").getHostAddress(), tcp.publicHost());
+                ipLiteral(tcp.bindAddress(), "jburrow.tcp.bind-address").getHostAddress(), tcp.publicHost(), (int)
+                        tcp.visitorReceiveBuffer().toBytes());
         EngineDependencies deps = new EngineDependencies(
                 registerTunnels, admission, streamQuota, ports, metrics, blocking.executor(), tcpSettings);
         EdgeSettings settings = edgeSettings(properties.edge(), build.current().version());
@@ -126,6 +127,7 @@ class EdgeConfiguration {
                         settings, deps, sessionRegistry, new NettyTunnelListeners(settings, deps)));
         metrics.bindDirectMemory(edge::usedDirectMemory);
         logBudget(DirectMemoryBudget.of(properties.edge(), edge.maxDirectMemory()));
+        logBudget(VisitorBufferBudget.of(properties.edge(), tcp));
         return edge;
     }
 
@@ -135,6 +137,15 @@ class EdgeConfiguration {
             log.warn("Direct memory budget: {}, which exceeds 90% of direct memory", budget.describe());
         } else {
             log.info("Direct memory budget: {}", budget.describe());
+        }
+    }
+
+    /** Kernel memory is outside the JVM, so this only states the figure; it is the pod limit's to absorb. */
+    static void logBudget(VisitorBufferBudget budget) {
+        if (budget.kernelSized()) {
+            log.warn("Visitor receive buffers: {}", budget.describe());
+        } else {
+            log.info("Visitor receive buffers: {}", budget.describe());
         }
     }
 
