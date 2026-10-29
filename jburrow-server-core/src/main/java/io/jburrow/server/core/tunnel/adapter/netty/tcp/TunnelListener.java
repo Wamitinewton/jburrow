@@ -2,12 +2,10 @@ package io.jburrow.server.core.tunnel.adapter.netty.tcp;
 
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.AdaptiveRecvByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoop;
-import io.netty.channel.WriteBufferWaterMark;
 import java.net.InetSocketAddress;
 import java.util.Objects;
 
@@ -20,13 +18,12 @@ import java.util.Objects;
  */
 final class TunnelListener {
 
-    static final int BACKLOG = 128;
-
-    /** The largest visitor read, and so the largest {@code DATA} payload: one socket read is exactly one frame. */
-    static final int MAX_READ = 65_536;
-
-    private static final int MIN_READ = 64;
-    private static final int INITIAL_READ = 2_048;
+    /**
+     * A session admits up to 1,000 streams, so a burst of that many visitors waits in the accept queue. A full queue
+     * drops a handshake's last ACK while the visitor already thinks it is connected, and it waits seconds for the
+     * kernel's retries. The kernel caps this at {@code net.core.somaxconn}.
+     */
+    static final int BACKLOG = 1_024;
 
     private final ChannelFuture bind;
 
@@ -36,16 +33,12 @@ final class TunnelListener {
 
     /**
      * Starts binding {@code address} on {@code loop}. Visitor connections start with {@code autoRead} off, half-closure
-     * allowed and {@code TCP_NODELAY} on, and {@code visitorHandler} is added to each.
+     * allowed and {@code TCP_NODELAY} on, and {@code visitorHandler} is added to each. Each visitor's read allocator is
+     * its own, set by its {@link VisitorHandler}, since it is sized by that visitor's credit.
      */
-    static TunnelListener bind(
-            EventLoop loop,
-            InetSocketAddress address,
-            WriteBufferWaterMark visitorWatermarks,
-            ChannelHandler visitorHandler) {
+    static TunnelListener bind(EventLoop loop, InetSocketAddress address, ChannelHandler visitorHandler) {
         Objects.requireNonNull(loop, "loop");
         Objects.requireNonNull(address, "address");
-        Objects.requireNonNull(visitorWatermarks, "visitorWatermarks");
         Objects.requireNonNull(visitorHandler, "visitorHandler");
         ChannelFuture bind = new ServerBootstrap()
                 .group(loop, loop)
@@ -55,10 +48,6 @@ final class TunnelListener {
                 .childOption(ChannelOption.TCP_NODELAY, true)
                 .childOption(ChannelOption.ALLOW_HALF_CLOSURE, true)
                 .childOption(ChannelOption.AUTO_READ, false)
-                .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, visitorWatermarks)
-                .childOption(
-                        ChannelOption.RECVBUF_ALLOCATOR,
-                        new AdaptiveRecvByteBufAllocator(MIN_READ, INITIAL_READ, MAX_READ))
                 .childHandler(visitorHandler)
                 .bind(address);
         return new TunnelListener(bind);

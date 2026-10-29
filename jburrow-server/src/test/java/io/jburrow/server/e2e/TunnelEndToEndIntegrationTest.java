@@ -136,25 +136,23 @@ class TunnelEndToEndIntegrationTest extends TunnelTestSupport {
     }
 
     @Test
-    void aSecondVisitorIsRefusedWhileTheFirstIsConnected() throws Exception {
+    void aSecondVisitorGetsItsOwnStreamAndBothRelayAtOnce() throws Exception {
         LocalService echo = closeAfterTest(LocalService.echo());
         Tunnel tunnel = openTunnel(echo);
         byte[] ping = "ping".getBytes(US_ASCII);
+        byte[] pong = "pong".getBytes(US_ASCII);
 
         Socket first = visit(tunnel.port());
         assertThat(roundTrip(first, ping)).isEqualTo(ping);
-
         Socket second = visit(tunnel.port());
-        assertThat(endOf(second)).as("the second visitor is closed at once").isTrue();
+
+        assertThat(roundTrip(second, pong)).isEqualTo(pong);
         assertThat(roundTrip(first, ping)).as("the first is unaffected").isEqualTo(ping);
-        assertThat(echo.accepted()).isOne();
+        assertThat(echo.accepted()).isEqualTo(2);
 
         first.close();
         tunnel.events().awaitStreamClosed(TIMEOUT);
-        awaitNoStreams();
-
-        Socket third = visit(tunnel.port());
-        assertThat(roundTrip(third, ping)).isEqualTo(ping);
+        assertThat(roundTrip(second, pong)).as("the second outlives the first").isEqualTo(pong);
     }
 
     @Test

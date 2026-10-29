@@ -8,6 +8,8 @@ import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
+import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamOutcome;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -71,6 +73,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     private final TunnelMetrics metrics;
     private final ServerInfo serverInfo;
     private final SessionLimits limits;
+    private final Windows windows;
     private final Duration handshakeTimeout;
 
     private boolean tornDown;
@@ -85,6 +88,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             TunnelMetrics metrics,
             ServerInfo serverInfo,
             SessionLimits limits,
+            Windows windows,
             Duration handshakeTimeout) {
         super(Object.class, false);
         this.context = Objects.requireNonNull(context, "context");
@@ -97,6 +101,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.serverInfo = Objects.requireNonNull(serverInfo, "serverInfo");
         this.limits = Objects.requireNonNull(limits, "limits");
+        this.windows = Objects.requireNonNull(windows, "windows");
         this.handshakeTimeout = Objects.requireNonNull(handshakeTimeout, "handshakeTimeout");
     }
 
@@ -136,6 +141,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                     handedOn = true;
                     onData(data);
                 }
+                case Frame.WindowUpdate update -> onWindowUpdate(update);
                 case Frame.Close close -> onClose(close);
                 case Frame.Error error -> closer.peerFailed(context, error.body());
                 default -> throw new IllegalStateException(frame.type() + " reached the session handler");
@@ -155,9 +161,25 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             return;
         }
         try {
-            onStreamFrame(data.streamId(), StreamEvent.DATA_RECEIVED);
+            if (!(session.onDataReceived(data.streamId(), data.payload().readableBytes())
+                    instanceof DataOutcome.Discard)) {
+                throw new IllegalStateException("Stream " + data.streamId() + " is open but has no relay");
+            }
         } finally {
             data.release();
+        }
+    }
+
+    /**
+     * Without streams the session still checks the update: no stream was opened without a listener, so one for a data
+     * stream is a protocol error.
+     */
+    private void onWindowUpdate(Frame.WindowUpdate update) {
+        Optional<SessionStreams> streams = context.streams();
+        if (streams.isPresent()) {
+            streams.get().onWindowUpdate(update);
+        } else {
+            session.onWindowUpdate(update.streamId(), update.increment());
         }
     }
 
@@ -188,8 +210,8 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     private void onHello(Hello hello) {
         session.onHello(hello);
         context.channel()
-                .writeAndFlush(
-                        new Frame.ServerHello(new ServerHello(session.id().value(), serverInfo, List.of(), limits)));
+                .writeAndFlush(new Frame.ServerHello(
+                        new ServerHello(session.id().value(), serverInfo, List.of(), limits, windows)));
         context.liveness().start();
     }
 
@@ -376,12 +398,14 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                     return end.name().toLowerCase(Locale.ROOT);
                 });
         log.info(
-                "session closed: session={} principal={} reason={} duration={}ms streams={} bytesIn={} bytesOut={}",
+                "session closed: session={} principal={} reason={} duration={}ms streams={} maxStreams={} bytesIn={}"
+                        + " bytesOut={}",
                 session.id(),
                 session.principal().map(Principal::name).orElse("-"),
                 reason,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - context.startedNanos()),
                 context.streamsServed(),
+                session.peakStreams(),
                 context.bytesIn(),
                 context.bytesOut());
     }

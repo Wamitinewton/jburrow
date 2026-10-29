@@ -23,6 +23,7 @@ import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameType;
@@ -60,15 +61,18 @@ class FrameCodecTest {
         return Stream.of(
                 sent(
                         CLIENT,
-                        () -> new Frame.Hello(
-                                new Hello(new ClientInfo("jburrow-cli", "0.2.0", null, null), List.of()))),
+                        () -> new Frame.Hello(new Hello(
+                                new ClientInfo("jburrow-cli", "0.2.0", null, null),
+                                List.of(),
+                                new Windows(262_144, 1_048_576)))),
                 sent(
                         SERVER,
                         () -> new Frame.ServerHello(new ServerHello(
                                 UUID.fromString("0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a"),
                                 new ServerInfo("jburrow-server", "0.2.0"),
                                 List.of(),
-                                new SessionLimits(65_536, 1, 1, 15_000, 45_000)))),
+                                new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+                                new Windows(262_144, 524_288)))),
                 sent(
                         CLIENT,
                         () -> new Frame.Register(
@@ -81,6 +85,9 @@ class FrameCodecTest {
                 sent(CLIENT, () -> new Frame.Data(3, ascii("hello"))),
                 sent(SERVER, () -> new Frame.Data(StreamIds.MAX, ALLOC.buffer().writeZero(65_536))),
                 sent(CLIENT, () -> new Frame.WindowUpdate(1, StreamIds.MAX)),
+                sent(SERVER, () -> new Frame.WindowUpdate(StreamIds.MAX, 1)),
+                sent(CLIENT, () -> new Frame.WindowUpdate(0, 262_144)),
+                sent(SERVER, () -> new Frame.WindowUpdate(0, StreamIds.MAX)),
                 sent(SERVER, () -> Frame.Close.half(1)),
                 sent(CLIENT, () -> Frame.Close.reset(1, ErrorCode.LOCAL_SERVICE_UNREACHABLE)),
                 sent(CLIENT, () -> new Frame.Ping(-1L)),
@@ -235,7 +242,8 @@ class FrameCodecTest {
     @Test
     void refusesToEncodeAFrameItsSideNeverSends() {
         Frame open = new Frame.Open(1, new Open(TUNNEL_ID, TunnelKind.TCP, new RemoteAddress("203.0.113.9", 1)));
-        Frame hello = new Frame.Hello(new Hello(new ClientInfo("a", "1", null, null), List.of()));
+        Frame hello = new Frame.Hello(
+                new Hello(new ClientInfo("a", "1", null, null), List.of(), new Windows(65_536, 65_536)));
         Frame registered = new Frame.Registered(
                 new Registered(List.of(RegisteredTunnel.of("a", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_000))));
 
@@ -277,6 +285,7 @@ class FrameCodecTest {
 
         assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Data(0, payload));
         assertThatIllegalArgumentException().isThrownBy(() -> new Frame.WindowUpdate(1, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new Frame.WindowUpdate(-1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> Frame.Close.half(0));
         assertThatIllegalArgumentException().isThrownBy(() -> Frame.Close.reset(1, ErrorCode.AUTHTOKEN_INVALID));
         assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Unsupported(1, FrameType.DATA));

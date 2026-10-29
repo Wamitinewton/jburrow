@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
@@ -37,7 +38,7 @@ class LivenessHandlerTest {
     void setUp() {
         channel = new EmbeddedChannel();
         channel.freezeTime();
-        session = new Session(SessionId.random(), 1);
+        session = new Session(SessionId.random(), 1, new Windows(262_144, 524_288));
         SessionCloser closer = new SessionCloser(metrics);
         SessionContext context = new SessionContext(
                 session,
@@ -125,30 +126,6 @@ class LivenessHandlerTest {
     }
 
     @Test
-    void pauseStopsTimeoutsKeepsPingingAndResumeRestartsTheClock() {
-        start();
-        advance(Duration.ofMillis(500));
-
-        liveness.pause();
-        advance(Duration.ZERO);
-        assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(1));
-        for (int ping = 2; ping <= 6; ping++) {
-            advance(PING_INTERVAL);
-            assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(ping));
-        }
-        assertThat((Object) channel.readOutbound()).isNull();
-        assertThat(session.state()).isNotEqualTo(SessionState.CLOSING);
-
-        liveness.resume();
-        advance(PING_INTERVAL.minusMillis(1));
-        assertThat((Object) channel.readOutbound()).isNull();
-        advance(Duration.ofMillis(1));
-        assertThat((Object) channel.readOutbound()).isEqualTo(new Frame.Ping(7));
-        advance(IDLE_TIMEOUT.minus(PING_INTERVAL));
-        assertHeartbeatTimeout();
-    }
-
-    @Test
     void answersEachPingWithItsPongWithoutForwardingIt() {
         start();
 
@@ -197,7 +174,7 @@ class LivenessHandlerTest {
     }
 
     private void start() {
-        session.onHello(new Hello(new ClientInfo("test", "1", null, null), List.of()));
+        session.onHello(new Hello(new ClientInfo("test", "1", null, null), List.of(), new Windows(262_144, 1_048_576)));
         liveness.start();
     }
 

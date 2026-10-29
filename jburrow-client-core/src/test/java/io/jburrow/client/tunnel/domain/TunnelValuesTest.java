@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-/** {@link LocalTarget}, {@link TunnelSpec}, {@link PendingData} and {@link TunnelClosed}. */
+/** {@link LocalTarget}, {@link TunnelSpec} and {@link TunnelClosed}. */
 class TunnelValuesTest {
 
     @Test
@@ -51,30 +51,6 @@ class TunnelValuesTest {
         assertThatThrownBy(() -> TunnelSpec.tcp("default", target).remotePort(0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("remotePort");
-    }
-
-    @Test
-    void pendingDataReportsTheMomentItPassesItsLimitOnce() {
-        PendingData pending = new PendingData(10);
-
-        assertThat(pending.add(10)).isFalse();
-        assertThat(pending.isOverLimit()).isFalse();
-        assertThat(pending.add(1)).isTrue();
-        assertThat(pending.add(5)).isFalse();
-        assertThat(pending.bytes()).isEqualTo(16);
-        assertThat(pending.isOverLimit()).isTrue();
-    }
-
-    @Test
-    void clearingPendingDataSaysWhetherReadingWasPaused() {
-        PendingData pending = new PendingData(10);
-        pending.add(4);
-
-        assertThat(pending.clear()).isFalse();
-        pending.add(11);
-        assertThat(pending.clear()).isTrue();
-        assertThat(pending.bytes()).isZero();
-        assertThat(pending.isOverLimit()).isFalse();
     }
 
     @Test

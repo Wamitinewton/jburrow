@@ -19,6 +19,7 @@ import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.protocol.wire.ProtocolVersion;
@@ -57,7 +58,7 @@ class ScriptedPeerTest {
     @Test
     void theClientSendsEveryFrameTypeItMay() {
         server.silence();
-        Hello hello = new Hello(new ClientInfo("jburrow-cli", "0.2.0", null, null), List.of());
+        Hello hello = hello(ScriptedPeer.CLIENT_WINDOWS);
         Register register = new Register("jb_example", List.of(new TunnelRequest("default", TunnelKind.TCP, null)));
 
         client.send(new Frame.Hello(hello));
@@ -90,7 +91,8 @@ class ScriptedPeerTest {
                 UUID.randomUUID(),
                 new ServerInfo("jburrow-server", "0.2.0"),
                 List.of(),
-                new SessionLimits(65_536, 1, 1, 15_000, 45_000));
+                new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+                ScriptedPeer.SERVER_WINDOWS);
         Registered registered =
                 new Registered(List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_037)));
         Open open = new Open(TUNNEL_ID, TunnelKind.TCP, new RemoteAddress("127.0.0.1", 50_000));
@@ -178,6 +180,214 @@ class ScriptedPeerTest {
     void aListeningPeerAcceptsOneConnection() {
         assertThatThrownBy(() -> ScriptedPeer.connect(server.uri(), ProtocolVersion.CURRENT))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void dataPastTheStreamWindowFailsTheTest() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 1_048_576))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(1)));
+
+        Frame.Data first = client.expect(Frame.Data.class, TIMEOUT);
+        first.release();
+        assertThatThrownBy(() -> client.expect(Frame.Data.class, TIMEOUT))
+                .isInstanceOf(AssertionError.class)
+                .hasMessage("Flow-control violation: the implementation sent 1 bytes of DATA on stream 1 with 0 bytes"
+                        + " of stream credit and 983040 bytes of session credit left (this peer announced windows"
+                        + " stream 65536, session 1048576)");
+    }
+
+    @Test
+    void dataPastTheSessionWindowFailsTheTest() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 100_000))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(3, zeros(65_536)));
+
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        assertThatThrownBy(() -> client.expect(Frame.Data.class, TIMEOUT))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining(
+                        "on stream 3 with 65536 bytes of stream credit and 34464 bytes of session credit");
+    }
+
+    @Test
+    void anOverrunNoCallReportedFailsTheClose() {
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(1)));
+        server.silence();
+        server.send(new Frame.Ping(7));
+        server.expect(Frame.Pong.class, TIMEOUT);
+
+        assertThatThrownBy(client::close)
+                .isInstanceOf(AssertionError.class)
+                .hasMessageStartingWith("Flow-control violation");
+    }
+
+    @Test
+    void grantsRaiseTheCreditThePeerPolices() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        server.send(new Frame.Data(1, zeros(65_536)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+
+        client.grant(1, 1_000);
+        client.grantSession(70_000);
+
+        assertThat(server.expect(Frame.WindowUpdate.class, TIMEOUT)).isEqualTo(new Frame.WindowUpdate(1, 1_000));
+        assertThat(server.expect(Frame.WindowUpdate.class, TIMEOUT)).isEqualTo(new Frame.WindowUpdate(0, 70_000));
+        assertThat(client.streamCredit(1)).isEqualTo(1_000);
+        assertThat(client.sessionCredit()).isEqualTo(135_536);
+        server.send(new Frame.Data(1, zeros(1_000)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        assertThat(client.dataReceived(1)).isEqualTo(66_536);
+        assertThat(client.dataReceived()).isEqualTo(66_536);
+        assertThat(client.streamCredit(1)).isZero();
+    }
+
+    @Test
+    void aWindowUpdateSentAsAFrameGrantsNothing() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        client.send(new Frame.WindowUpdate(1, 1_000));
+
+        assertThat(client.streamCredit(1)).isEqualTo(65_536);
+    }
+
+    @Test
+    void sendDataWaitsForTheCreditTheOtherSideGives() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+
+        server.sendData(1, zeros(65_536), TIMEOUT);
+        assertThatExceptionOfType(AssertionError.class)
+                .isThrownBy(() -> server.sendData(1, zeros(1_000), QUIET))
+                .withMessageContaining("No credit");
+        client.grant(1, 1_000);
+        server.sendData(1, zeros(1_000), TIMEOUT);
+
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        assertThat(client.dataReceived(1)).isEqualTo(66_536);
+        assertThat(server.peerStreamCredit(1)).isZero();
+        assertThat(server.peerSessionCredit()).isEqualTo(131_072 - 66_536);
+    }
+
+    @Test
+    void dataSentAsAFrameStillSpendsThePeersOwnCredit() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+
+        server.send(new Frame.Data(1, zeros(1_000)));
+
+        assertThat(server.peerStreamCredit(1)).isEqualTo(64_536);
+        client.expect(Frame.Data.class, TIMEOUT).release();
+    }
+
+    @Test
+    void ignoredWindowUpdatesStillAddCredit() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        server.ignoreWindowUpdates();
+
+        client.grant(1, 500);
+
+        server.sendData(1, zeros(65_536), TIMEOUT);
+        server.sendData(1, zeros(500), TIMEOUT);
+        assertThatExceptionOfType(AssertionError.class)
+                .isThrownBy(() -> server.expect(Frame.WindowUpdate.class, QUIET));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        client.expect(Frame.Data.class, TIMEOUT).release();
+    }
+
+    @Test
+    void creditIsWithheldUnlessATestReturnsIt() {
+        server.send(new Frame.Data(1, zeros(65_536)));
+        server.send(new Frame.Data(1, zeros(65_536)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        client.expect(Frame.Data.class, TIMEOUT).release();
+
+        assertThatExceptionOfType(AssertionError.class)
+                .isThrownBy(() -> server.expect(Frame.WindowUpdate.class, QUIET));
+    }
+
+    @Test
+    void autoGrantReturnsCreditAtHalfTheWindow() {
+        client.send(new Frame.Hello(hello(new Windows(131_072, 262_144))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        client.autoGrant();
+
+        server.send(new Frame.Data(1, zeros(65_535)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        assertThatExceptionOfType(AssertionError.class)
+                .isThrownBy(() -> server.expect(Frame.WindowUpdate.class, QUIET));
+        server.send(new Frame.Data(1, zeros(1)));
+
+        assertThat(server.expect(Frame.WindowUpdate.class, TIMEOUT)).isEqualTo(new Frame.WindowUpdate(1, 65_536));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+        assertThat(client.streamCredit(1)).isEqualTo(131_072);
+    }
+
+    @Test
+    void autoGrantReturnsWhatIsAlreadyOwed() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        server.send(new Frame.Data(1, zeros(40_000)));
+        client.expect(Frame.Data.class, TIMEOUT).release();
+
+        client.autoGrant();
+
+        assertThat(server.expect(Frame.WindowUpdate.class, TIMEOUT)).isEqualTo(new Frame.WindowUpdate(1, 40_000));
+    }
+
+    @Test
+    void noStreamCreditGoesBackAfterTheImplementationClosesTheStream() {
+        client.send(new Frame.Hello(hello(new Windows(65_536, 131_072))));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        client.autoGrant();
+
+        server.send(new Frame.Data(1, zeros(30_000)));
+        server.send(Frame.Close.half(1));
+        server.send(new Frame.Data(3, zeros(40_000)));
+
+        List<Frame.WindowUpdate> updates = List.of(
+                server.expect(Frame.WindowUpdate.class, TIMEOUT), server.expect(Frame.WindowUpdate.class, TIMEOUT));
+        assertThat(updates)
+                .containsExactlyInAnyOrder(new Frame.WindowUpdate(0, 70_000), new Frame.WindowUpdate(3, 40_000));
+        assertThatExceptionOfType(AssertionError.class)
+                .isThrownBy(() -> server.expect(Frame.WindowUpdate.class, QUIET));
+    }
+
+    @Test
+    void aServerPolicesItsOwnWindows() {
+        server.send(new Frame.ServerHello(new ServerHello(
+                UUID.randomUUID(),
+                new ServerInfo("jburrow-server", "0.2.0"),
+                List.of(),
+                new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+                new Windows(65_536, 65_536))));
+        client.expect(Frame.ServerHello.class, TIMEOUT);
+
+        client.send(new Frame.Data(1, zeros(65_536)));
+        client.send(new Frame.Data(3, zeros(1)));
+
+        server.expect(Frame.Data.class, TIMEOUT).release();
+        assertThatThrownBy(() -> server.expect(Frame.Data.class, TIMEOUT))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("with 65536 bytes of stream credit and 0 bytes of session credit");
+    }
+
+    private static Hello hello(Windows windows) {
+        return new Hello(new ClientInfo("jburrow-cli", "0.2.0", null, null), List.of(), windows);
+    }
+
+    private static ByteBuf zeros(int length) {
+        return ByteBufAllocator.DEFAULT.buffer(length).writeZero(length);
     }
 
     private static ByteBuf ascii(String text) {

@@ -1,5 +1,6 @@
 package io.jburrow.server.core.tunnel.adapter.netty.edge;
 
+import io.jburrow.protocol.control.Windows;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.List;
@@ -18,8 +19,9 @@ import java.util.Objects;
  * @param handshakeTimeout how long a session may take from the upgrade to its {@code REGISTER} reply
  * @param sessionWriteLow low write-buffer watermark of a session channel, in bytes
  * @param sessionWriteHigh high write-buffer watermark of a session channel, in bytes
- * @param visitorWriteLow low write-buffer watermark of a visitor channel, in bytes
- * @param visitorWriteHigh high write-buffer watermark of a visitor channel, in bytes
+ * @param windows the server's receive windows, announced in its {@code HELLO}
+ * @param maxConcurrentStreams streams one session may have open, announced in the server {@code HELLO}
+ * @param maxStreams streams open across every session; at least {@code maxConcurrentStreams}
  * @param serverVersion this build's version, announced in the server {@code HELLO}
  */
 public record EdgeSettings(
@@ -36,8 +38,9 @@ public record EdgeSettings(
         Duration idleTimeout,
         int sessionWriteLow,
         int sessionWriteHigh,
-        int visitorWriteLow,
-        int visitorWriteHigh,
+        Windows windows,
+        int maxConcurrentStreams,
+        int maxStreams,
         String serverVersion) {
 
     public EdgeSettings {
@@ -45,6 +48,7 @@ public record EdgeSettings(
         Objects.requireNonNull(connectHost, "connectHost");
         Objects.requireNonNull(transport, "transport");
         trustedProxies = List.copyOf(trustedProxies);
+        Objects.requireNonNull(windows, "windows");
         Objects.requireNonNull(serverVersion, "serverVersion");
         if (bind.isUnresolved()) {
             throw new IllegalArgumentException("The edge binds an IP address, not a name: " + bind);
@@ -60,7 +64,11 @@ public record EdgeSettings(
         requirePositive(pingInterval, "pingInterval");
         requirePositive(idleTimeout, "idleTimeout");
         requireWatermarks(sessionWriteLow, sessionWriteHigh, "sessionWrite");
-        requireWatermarks(visitorWriteLow, visitorWriteHigh, "visitorWrite");
+        requirePositive(maxConcurrentStreams, "maxConcurrentStreams");
+        if (maxStreams < maxConcurrentStreams) {
+            throw new IllegalArgumentException(
+                    "maxStreams must be at least maxConcurrentStreams: " + maxStreams + " < " + maxConcurrentStreams);
+        }
     }
 
     private static void requirePositive(int value, String name) {

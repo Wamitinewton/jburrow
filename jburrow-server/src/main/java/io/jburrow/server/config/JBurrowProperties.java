@@ -1,5 +1,7 @@
 package io.jburrow.server.config;
 
+import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.flow.FlowLimits;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import jakarta.validation.Valid;
@@ -78,8 +80,13 @@ public record JBurrowProperties(
      * @param trustedProxies CIDRs whose {@code X-Forwarded-For} is believed, checked by {@code EdgeConfiguration}
      * @param requestTimeout how long a connection may take to send its upgrade request
      * @param handshakeTimeout how long a session may take from the upgrade to its {@code REGISTER} reply
-     * @param sessionWriteBuffer low and high write-buffer watermarks of a session channel, {@code 128KB-512KB}
-     * @param visitorWriteBuffer low and high write-buffer watermarks of a visitor channel, {@code 32KB-128KB}
+     * @param sessionWriteBuffer low and high write-buffer watermarks of a session channel, {@code 64KB-256KB}
+     * @param streamWindow the server's receive window per stream, announced as {@code windows.stream}
+     * @param sessionWindow the server's receive window per session, announced as {@code windows.session}; what one
+     *     client can make the server hold
+     * @param maxConcurrentStreams streams one session may have open, announced as
+     *     {@code limits.maxConcurrentStreams}
+     * @param maxStreams streams open across every session
      */
     public record Edge(
             @Min(0) @Max(65_535) @DefaultValue("7080") int port,
@@ -98,10 +105,13 @@ public record JBurrowProperties(
             @NotNull @DefaultValue("10s") Duration handshakeTimeout,
             @NotNull @DefaultValue("15s") Duration pingInterval,
             @NotNull @DefaultValue("45s") Duration idleTimeout,
-            @NotBlank @DefaultValue("128KB-512KB") String sessionWriteBuffer,
-            @NotBlank @DefaultValue("32KB-128KB") String visitorWriteBuffer) {
+            @NotBlank @DefaultValue("64KB-256KB") String sessionWriteBuffer,
+            @NotNull @DefaultValue("256KB") DataSize streamWindow,
+            @NotNull @DefaultValue("512KB") DataSize sessionWindow,
+            @Positive @DefaultValue("1000") int maxConcurrentStreams,
+            @Positive @DefaultValue("20000") int maxStreams) {
 
-        /** The protocol's floor for the announced ping interval ({@code docs/protocol.md} §10). */
+        /** The protocol's floor for the announced ping interval ({@code docs/protocol.md} §11). */
         static final Duration MIN_PING_INTERVAL = Duration.ofSeconds(1);
 
         private static final int MIN_IO_THREADS = 2;
@@ -142,26 +152,43 @@ public record JBurrowProperties(
 
         @AssertTrue(
                 message = "jburrow.edge.session-write-buffer must be <low>-<high> sizes with low below high, such as"
-                        + " 128KB-512KB")
+                        + " 64KB-256KB")
         public boolean isSessionWriteBufferValid() {
             return sessionWriteBuffer == null
                     || Watermarks.parse(sessionWriteBuffer).isPresent();
         }
 
-        @AssertTrue(
-                message = "jburrow.edge.visitor-write-buffer must be <low>-<high> sizes with low below high, such as"
-                        + " 32KB-128KB")
-        public boolean isVisitorWriteBufferValid() {
-            return visitorWriteBuffer == null
-                    || Watermarks.parse(visitorWriteBuffer).isPresent();
+        @AssertTrue(message = "jburrow.edge.stream-window must be from 64KB to 2147483647B")
+        public boolean isStreamWindowValid() {
+            return streamWindow == null || isWindow(streamWindow);
+        }
+
+        @AssertTrue(message = "jburrow.edge.session-window must be from jburrow.edge.stream-window to 2147483647B")
+        public boolean isSessionWindowValid() {
+            if (sessionWindow == null) {
+                return true;
+            }
+            return isWindow(sessionWindow)
+                    && (streamWindow == null || sessionWindow.toBytes() >= streamWindow.toBytes());
+        }
+
+        @AssertTrue(message = "jburrow.edge.max-streams must be at least jburrow.edge.max-concurrent-streams")
+        public boolean isMaxStreamsValid() {
+            return maxStreams >= maxConcurrentStreams;
         }
 
         public Watermarks sessionWatermarks() {
             return Watermarks.parse(sessionWriteBuffer).orElseThrow();
         }
 
-        public Watermarks visitorWatermarks() {
-            return Watermarks.parse(visitorWriteBuffer).orElseThrow();
+        /** The server's receive windows, once validated. */
+        public Windows windows() {
+            return new Windows((int) streamWindow.toBytes(), (int) sessionWindow.toBytes());
+        }
+
+        private static boolean isWindow(DataSize size) {
+            long bytes = size.toBytes();
+            return bytes >= FlowLimits.MIN_STREAM_WINDOW && bytes <= FlowLimits.MAX_WINDOW;
         }
 
         private static boolean isPositive(Duration duration) {

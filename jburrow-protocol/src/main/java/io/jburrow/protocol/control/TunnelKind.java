@@ -2,7 +2,7 @@ package io.jburrow.protocol.control;
 
 import java.util.Optional;
 
-/** The kind of a tunnel. {@code jburrow.v1-draft.1} has only TCP tunnels. */
+/** The kind of a tunnel. {@code jburrow.v1-draft.2} has only TCP tunnels. */
 public enum TunnelKind {
     TCP("tcp");
 

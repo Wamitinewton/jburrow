@@ -99,6 +99,7 @@ class TcpCommandTest {
                         "jburrow " + new BuildInfo().version() + ", protocol " + ProtocolVersion.CURRENT,
                         "Forwarding  tcp://localhost:21000 -> localhost:22",
                         "");
+        assertThat(lines().getFirst()).endsWith(", protocol jburrow.v1-draft.2");
 
         stop.request();
         assertThat(exitCode(command)).isZero();
@@ -187,6 +188,20 @@ class TcpCommandTest {
                 .endsWith(" Run the command again; automatic reconnect arrives in a later release." + NL);
     }
 
+    @Test
+    void aFlowControlErrorFromTheServerExitsSixAndIsTheClosedEventsCode() throws Exception {
+        Future<Integer> command = establish("tcp", "22", "--output", "json");
+        awaitOutput(NL);
+
+        peer.send(Frame.Error.of(ErrorCode.FLOW_CONTROL_ERROR, "DATA on stream 1 exceeds its window."));
+
+        assertThat(exitCode(command)).isEqualTo(ExitCodes.PROTOCOL_MISMATCH);
+        JsonNode closed = jsonLines().getLast();
+        assertThat(closed.get("type").asString()).isEqualTo("closed");
+        assertThat(closed.get("reason").asString()).isEqualTo("SERVER_ERROR");
+        assertThat(closed.get("code").asString()).isEqualTo("FLOW_CONTROL_ERROR");
+    }
+
     // Sessions that never start.
 
     @Test
@@ -221,14 +236,7 @@ class TcpCommandTest {
 
     @Test
     void anUnsupportedVersionExitsSixNamingTheServersVersions() throws Exception {
-        String body = new String(
-                ControlJson.create()
-                        .writeRefusal(UpgradeRefusal.unsupportedVersion(
-                                "This server speaks jburrow.v1-draft.2.",
-                                List.of("jburrow.v1-draft.2"),
-                                Instant.now(),
-                                ScriptedPeer.CONNECT_PATH)),
-                StandardCharsets.UTF_8);
+        String body = versionRefusal("This server speaks jburrow.v1-draft.3.", "jburrow.v1-draft.3");
 
         try (RefusingServer server = RefusingServer.start(400, "application/json", body)) {
             int exitCode = run("tcp", "22", "--server", server.uri().toString());
@@ -236,7 +244,27 @@ class TcpCommandTest {
             assertThat(exitCode).isEqualTo(ExitCodes.PROTOCOL_MISMATCH);
             assertThat(err.toString())
                     .startsWith("Error UNSUPPORTED_PROTOCOL_VERSION: ")
-                    .endsWith(" This server speaks jburrow.v1-draft.2; upgrade jburrow." + NL);
+                    .endsWith(" This server speaks jburrow.v1-draft.3; upgrade jburrow." + NL);
+        }
+    }
+
+    /**
+     * What a phase 1 CLI prints against the phase 2 server: the server's refusal of draft 1, word for word, through a
+     * mapping that is unchanged since phase 1.
+     */
+    @Test
+    void aDraftOneCliRefusedByTheDraftTwoServerIsToldToUpgrade() throws Exception {
+        String body =
+                versionRefusal("This server speaks jburrow.v1-draft.2. Upgrade the jburrow CLI.", "jburrow.v1-draft.2");
+
+        try (RefusingServer server = RefusingServer.start(400, "application/json", body)) {
+            int exitCode = run("tcp", "22", "--server", server.uri().toString());
+
+            assertThat(exitCode).isEqualTo(ExitCodes.PROTOCOL_MISMATCH);
+            assertThat(err.toString())
+                    .isEqualTo("Error UNSUPPORTED_PROTOCOL_VERSION: This server speaks jburrow.v1-draft.2."
+                            + " Upgrade the jburrow CLI. This server speaks jburrow.v1-draft.2; upgrade jburrow." + NL);
+            assertThat(out.toString()).isEmpty();
         }
     }
 
@@ -331,10 +359,22 @@ class TcpCommandTest {
     }
 
     private void replyRegistered() {
-        peer.send(new Frame.ServerHello(
-                new ServerHello(SESSION_ID, new ServerInfo("jburrow-server", "0.2.0"), List.of(), LIMITS)));
+        peer.send(new Frame.ServerHello(new ServerHello(
+                SESSION_ID,
+                new ServerInfo("jburrow-server", "0.2.0"),
+                List.of(),
+                LIMITS,
+                ScriptedPeer.SERVER_WINDOWS)));
         peer.send(new Frame.Registered(new Registered(
                 List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_000)))));
+    }
+
+    private static String versionRefusal(String message, String... supported) {
+        return new String(
+                ControlJson.create()
+                        .writeRefusal(UpgradeRefusal.unsupportedVersion(
+                                message, List.of(supported), Instant.now(), ScriptedPeer.CONNECT_PATH)),
+                StandardCharsets.UTF_8);
     }
 
     private Future<Integer> runAsync(String... args) {

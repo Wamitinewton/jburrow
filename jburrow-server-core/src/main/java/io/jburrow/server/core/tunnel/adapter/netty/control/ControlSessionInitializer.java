@@ -26,9 +26,6 @@ import java.util.function.LongSupplier;
  */
 public final class ControlSessionInitializer implements SessionInitializer {
 
-    /** One stream per session until per-stream flow control exists to keep streams from stalling each other. */
-    static final int MAX_CONCURRENT_STREAMS = 1;
-
     static final String SERVER_NAME = "jburrow-server";
 
     static final String FRAME_DECODER = "frame-decoder";
@@ -40,7 +37,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
     private final EdgeSettings settings;
     private final EngineDependencies deps;
     private final TunnelListeners tunnelListeners;
-    private final SessionRegistry registry = new SessionRegistry();
+    private final SessionRegistry registry;
     private final SessionCloser closer;
     private final FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create());
     private final FrameCounter frameCounter;
@@ -49,8 +46,15 @@ public final class ControlSessionInitializer implements SessionInitializer {
     private final LongSupplier nanoTime = System::nanoTime;
 
     public ControlSessionInitializer(EdgeSettings settings, EngineDependencies deps, TunnelListeners tunnelListeners) {
+        this(settings, deps, new SessionRegistry(), tunnelListeners);
+    }
+
+    /** With a {@code registry} the composition root shares, so the live sessions can be found from outside the edge. */
+    public ControlSessionInitializer(
+            EdgeSettings settings, EngineDependencies deps, SessionRegistry registry, TunnelListeners tunnelListeners) {
         this.settings = Objects.requireNonNull(settings, "settings");
         this.deps = Objects.requireNonNull(deps, "deps");
+        this.registry = Objects.requireNonNull(registry, "registry");
         this.tunnelListeners = Objects.requireNonNull(tunnelListeners, "tunnelListeners");
         this.closer = new SessionCloser(deps.metrics());
         this.frameCounter = new FrameCounter(deps.metrics());
@@ -58,7 +62,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
         this.limits = new SessionLimits(
                 FrameLimits.MAX_DATA_PAYLOAD,
                 deps.registerTunnels().policy().maxTunnels(),
-                MAX_CONCURRENT_STREAMS,
+                settings.maxConcurrentStreams(),
                 settings.pingInterval().toMillis(),
                 settings.idleTimeout().toMillis());
     }
@@ -68,7 +72,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
         if (!channel.isActive()) {
             return;
         }
-        Session session = new Session(SessionId.random(), MAX_CONCURRENT_STREAMS);
+        Session session = new Session(SessionId.random(), settings.maxConcurrentStreams(), settings.windows());
         SessionContext context =
                 new SessionContext(session, channel, ticket, clientAddress, nanoTime.getAsLong(), closer);
         LivenessHandler liveness =
@@ -84,6 +88,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
                 deps.metrics(),
                 serverInfo,
                 limits,
+                settings.windows(),
                 settings.handshakeTimeout());
         channel.pipeline()
                 .addLast(FRAME_DECODER, new WebSocketFrameDecoder(codec))

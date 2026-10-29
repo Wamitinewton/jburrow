@@ -35,6 +35,14 @@ public interface TunnelMetrics {
         REMOTE
     }
 
+    /** Which credit a sender ran out of. */
+    enum FlowScope {
+        /** Its own stream's: the receiver of that stream is slower than its sender. */
+        STREAM,
+        /** The session's, shared by every stream: the client is slower than its visitors together. */
+        SESSION
+    }
+
     /** Why a session ended without a session error. */
     enum SessionEnd {
         CLIENT_CLOSED,
@@ -80,6 +88,9 @@ public interface TunnelMetrics {
 
     /** Reading one side stopped because the other couldn't keep up. */
     void backpressurePaused(Direction direction);
+
+    /** {@code jburrow_flow_blocked_total}: a visitor stopped being read because {@code scope}'s credit ran out. */
+    void flowBlocked(FlowScope scope);
 
     /** Binds {@code jburrow_tcp_ports} to the pool. */
     void bindPortPool(Supplier<PortPoolSnapshot> snapshot);

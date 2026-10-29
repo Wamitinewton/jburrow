@@ -3,6 +3,7 @@ package io.jburrow.server.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
@@ -11,6 +12,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
+import org.springframework.util.unit.DataSize;
 
 class EdgeConfigurationTest {
 
@@ -26,10 +28,11 @@ class EdgeConfigurationTest {
         assertThat(settings.transport()).isEqualTo(EdgeTransport.NIO);
         assertThat(settings.ioThreads()).isEqualTo(4);
         assertThat(settings.trustedProxies()).containsExactly(Cidr.parse("10.42.0.0/16"));
-        assertThat(settings.sessionWriteLow()).isEqualTo(128 * 1024);
-        assertThat(settings.sessionWriteHigh()).isEqualTo(512 * 1024);
-        assertThat(settings.visitorWriteLow()).isEqualTo(32 * 1024);
-        assertThat(settings.visitorWriteHigh()).isEqualTo(128 * 1024);
+        assertThat(settings.sessionWriteLow()).isEqualTo(64 * 1024);
+        assertThat(settings.sessionWriteHigh()).isEqualTo(256 * 1024);
+        assertThat(settings.windows()).isEqualTo(new Windows(256 * 1024, 512 * 1024));
+        assertThat(settings.maxConcurrentStreams()).isEqualTo(1_000);
+        assertThat(settings.maxStreams()).isEqualTo(20_000);
         assertThat(settings.serverVersion()).isEqualTo("1.2.3");
     }
 
@@ -83,7 +86,10 @@ class EdgeConfigurationTest {
                 Duration.ofSeconds(10),
                 Duration.ofSeconds(15),
                 Duration.ofSeconds(45),
-                "128KB-512KB",
-                "32KB-128KB");
+                "64KB-256KB",
+                DataSize.ofKilobytes(256),
+                DataSize.ofKilobytes(512),
+                1_000,
+                20_000);
     }
 }

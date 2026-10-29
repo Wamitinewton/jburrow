@@ -66,7 +66,14 @@ class NativeImageMetadataTest {
     void findsTheWholePayloadModel() {
         assertThat(payloadTypes())
                 .extracting(Class::getSimpleName)
-                .contains("Hello", "ClientInfo", "SessionLimits", "TunnelRequest", "RemoteAddress", "TunnelKind")
+                .contains(
+                        "Hello",
+                        "ClientInfo",
+                        "SessionLimits",
+                        "Windows",
+                        "TunnelRequest",
+                        "RemoteAddress",
+                        "TunnelKind")
                 .contains("UpgradeRefusal")
                 .contains("ErrorCode");
     }

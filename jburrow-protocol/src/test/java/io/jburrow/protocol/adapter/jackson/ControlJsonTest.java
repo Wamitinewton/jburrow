@@ -25,6 +25,7 @@ import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -60,13 +61,16 @@ class ControlJsonTest {
     private static final UUID SESSION_ID = UUID.fromString("0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a");
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
 
+    private static final Windows CLIENT_WINDOWS = new Windows(262_144, 1_048_576);
+    private static final Windows SERVER_WINDOWS = new Windows(262_144, 524_288);
     private static final Hello HELLO_RECORD =
-            new Hello(new ClientInfo("jburrow-cli", "0.2.0", "linux", "amd64"), List.of());
+            new Hello(new ClientInfo("jburrow-cli", "0.2.0", "linux", "amd64"), List.of(), CLIENT_WINDOWS);
     private static final ServerHello SERVER_HELLO_RECORD = new ServerHello(
             SESSION_ID,
             new ServerInfo("jburrow-server", "0.2.0"),
             List.of(),
-            new SessionLimits(65_536, 1, 1, 15_000, 45_000));
+            new SessionLimits(65_536, 1, 1, 15_000, 45_000),
+            SERVER_WINDOWS);
     private static final Register REGISTER_RECORD =
             new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417)));
     private static final Registered REGISTERED_RECORD = new Registered(
@@ -78,11 +82,12 @@ class ControlJsonTest {
 
     private static final String HELLO =
             "{\"client\":{\"name\":\"jburrow-cli\",\"version\":\"0.2.0\",\"os\":\"linux\",\"arch\":\"amd64\"},"
-                    + "\"capabilities\":[]}";
+                    + "\"capabilities\":[],\"windows\":{\"stream\":262144,\"session\":1048576}}";
     private static final String SERVER_HELLO = "{\"sessionId\":\"0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a\","
             + "\"server\":{\"name\":\"jburrow-server\",\"version\":\"0.2.0\"},\"capabilities\":[],"
             + "\"limits\":{\"maxFramePayload\":65536,\"maxTunnels\":1,\"maxConcurrentStreams\":1,"
-            + "\"pingIntervalMs\":15000,\"idleTimeoutMs\":45000}}";
+            + "\"pingIntervalMs\":15000,\"idleTimeoutMs\":45000},"
+            + "\"windows\":{\"stream\":262144,\"session\":524288}}";
     private static final String REGISTER = "{\"authtoken\":\"" + TOKEN + "\","
             + "\"tunnels\":[{\"ref\":\"default\",\"kind\":\"tcp\",\"remotePort\":20417}]}";
     private static final String REGISTERED = "{\"tunnels\":[{\"ref\":\"default\","
@@ -100,7 +105,8 @@ class ControlJsonTest {
                 arguments("""
                         {
                           "client": { "name": "jburrow-cli", "version": "0.2.0", "os": "linux", "arch": "amd64" },
-                          "capabilities": []
+                          "capabilities": [],
+                          "windows": { "stream": 262144, "session": 1048576 }
                         }
                         """, HELLO_RECORD),
                 arguments("""
@@ -114,7 +120,8 @@ class ControlJsonTest {
                             "maxConcurrentStreams": 1,
                             "pingIntervalMs": 15000,
                             "idleTimeoutMs": 45000
-                          }
+                          },
+                          "windows": { "stream": 262144, "session": 524288 }
                         }
                         """, SERVER_HELLO_RECORD),
                 arguments("""
@@ -172,8 +179,9 @@ class ControlJsonTest {
 
     @Test
     void omitsAbsentOptionalFields() {
-        assertThat(written(new Hello(new ClientInfo("jburrow-cli", "0.2.0", null, null), List.of())))
-                .isEqualTo("{\"client\":{\"name\":\"jburrow-cli\",\"version\":\"0.2.0\"},\"capabilities\":[]}");
+        assertThat(written(new Hello(new ClientInfo("jburrow-cli", "0.2.0", null, null), List.of(), CLIENT_WINDOWS)))
+                .isEqualTo("{\"client\":{\"name\":\"jburrow-cli\",\"version\":\"0.2.0\"},\"capabilities\":[],"
+                        + "\"windows\":{\"stream\":262144,\"session\":1048576}}");
         assertThat(written(new Register("jb_x", List.of(new TunnelRequest("default", TunnelKind.TCP, null)))))
                 .isEqualTo("{\"authtoken\":\"jb_x\",\"tunnels\":[{\"ref\":\"default\",\"kind\":\"tcp\"}]}");
         assertThat(written(new ErrorBody(ErrorCode.PROTOCOL_ERROR, "Bad frame.", null)))
@@ -221,6 +229,10 @@ class ControlJsonTest {
                         SERVER_HELLO_RECORD),
                 arguments(
                         SERVER_HELLO.replace("\"version\":\"0.2.0\"", "\"version\":\"0.2.0\",\"build\":null"),
+                        SERVER_HELLO_RECORD),
+                arguments(HELLO.replace("\"stream\":262144", "\"stream\":262144,\"auto\":true"), HELLO_RECORD),
+                arguments(
+                        SERVER_HELLO.replace("\"session\":524288", "\"session\":524288,\"maxWindow\":{\"x\":1}"),
                         SERVER_HELLO_RECORD),
                 arguments(
                         REGISTER.replace("\"ref\":\"default\"", "\"ref\":\"default\",\"subdomain\":\"x\""),
@@ -375,7 +387,7 @@ class ControlJsonTest {
         read(helloWithPad("\"" + "\\n".repeat(4_096) + "\""), Hello.class);
 
         assertProtocolError(helloWithPad("\"" + "s".repeat(4_097) + "\""), Hello.class);
-        assertProtocolError(HELLO.replace("[]}", "[],\"pad\":\"" + "s".repeat(4_097) + "\"}"), Hello.class);
+        assertProtocolError(HELLO.replace("[],", "[],\"pad\":\"" + "s".repeat(4_097) + "\","), Hello.class);
     }
 
     @Test
@@ -383,9 +395,9 @@ class ControlJsonTest {
         String badName = HELLO.replace("jburrow-cli", "not a name");
 
         assertValidationFailed(badName, Hello.class, "client.name must match [A-Za-z0-9._-]{1,64}");
-        assertProtocolError(badName.replace("[]}", "[],\"pad\":\"" + "s".repeat(4_097) + "\"}"), Hello.class);
-        assertProtocolError(badName.replace("[]}", "[],\"a\":1,\"a\":2}"), Hello.class);
-        assertProtocolError(badName.replace("[]}", "[],\"pad\":" + "1".repeat(21) + "}"), Hello.class);
+        assertProtocolError(badName.replace("[],", "[],\"pad\":\"" + "s".repeat(4_097) + "\","), Hello.class);
+        assertProtocolError(badName.replace("[],", "[],\"a\":1,\"a\":2,"), Hello.class);
+        assertProtocolError(badName.replace("[],", "[],\"pad\":" + "1".repeat(21) + ","), Hello.class);
     }
 
     @Test
@@ -560,6 +572,49 @@ class ControlJsonTest {
         assertValidationFailed(
                 SERVER_HELLO.replace("\"maxTunnels\":1,", ""), ServerHello.class, "limits.maxTunnels is required");
         assertValidationFailed(OPEN.replace(",\"port\":51234", ""), Open.class, "remote.port is required");
+    }
+
+    @Test
+    void windowsAreRequiredInBothHellos() {
+        String noWindows = ",\"windows\":{\"stream\":262144,\"session\":1048576}";
+        assertValidationFailed(HELLO.replace(noWindows, ""), Hello.class, "windows is required");
+        assertValidationFailed(
+                SERVER_HELLO.replace(",\"windows\":{\"stream\":262144,\"session\":524288}", ""),
+                ServerHello.class,
+                "windows is required");
+        assertValidationFailed(HELLO.replace("\"stream\":262144,", ""), Hello.class, "windows.stream is required");
+        assertValidationFailed(
+                SERVER_HELLO.replace(",\"session\":524288", ""), ServerHello.class, "windows.session is required");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "[]", "\"262144\"", "262144", "true"})
+    void windowsOfTheWrongJsonTypeAreAProtocolError(String value) {
+        assertProtocolError(HELLO.replace("{\"stream\":262144,\"session\":1048576}", value), Hello.class);
+        assertProtocolError(SERVER_HELLO.replace("{\"stream\":262144,\"session\":524288}", value), ServerHello.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "\"65536\"", "65536.0", "6.5536e4", "[65536]", "2147483648", "-2147483649"})
+    void windowSizesRejectAnythingButAnIntegerInIntRange(String value) {
+        assertProtocolError(HELLO.replace("262144", value), Hello.class);
+        assertProtocolError(SERVER_HELLO.replace("524288", value), ServerHello.class);
+    }
+
+    @Test
+    void windowRulesAreValidationFailuresNamingTheFieldPath() {
+        assertValidationFailed(
+                HELLO.replace("262144", "65535"), Hello.class, "windows.stream must be between 65536 and 2147483647");
+        assertValidationFailed(
+                HELLO.replace("262144", "-1"), Hello.class, "windows.stream must be between 65536 and 2147483647");
+        assertValidationFailed(
+                SERVER_HELLO.replace("524288", "262143"), ServerHello.class, "windows.session must be at least stream");
+        assertThat(read(HELLO.replace("262144", "65536").replace("1048576", "65536"), Hello.class)
+                        .windows())
+                .isEqualTo(new Windows(65_536, 65_536));
+        assertThat(read(SERVER_HELLO.replace("262144", "2147483647").replace("524288", "2147483647"), ServerHello.class)
+                        .windows())
+                .isEqualTo(new Windows(Integer.MAX_VALUE, Integer.MAX_VALUE));
     }
 
     @Test

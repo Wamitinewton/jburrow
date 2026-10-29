@@ -8,9 +8,9 @@ import org.junit.jupiter.api.Test;
 class ProtocolVersionTest {
 
     @Test
-    void currentIsTheFirstDraft() {
-        assertThat(ProtocolVersion.CURRENT).isEqualTo("jburrow.v1-draft.1");
-        assertThat(ProtocolVersion.supported()).containsExactly("jburrow.v1-draft.1");
+    void currentIsTheSecondDraftAndTheOnlyOneSpoken() {
+        assertThat(ProtocolVersion.CURRENT).isEqualTo("jburrow.v1-draft.2");
+        assertThat(ProtocolVersion.supported()).containsExactly("jburrow.v1-draft.2");
     }
 
     @Test
@@ -41,19 +41,19 @@ class ProtocolVersionTest {
 
     @Test
     void selectsTheFirstSupportedOffer() {
-        assertThat(ProtocolVersion.select(List.of("jburrow.v1-draft.9", "jburrow.v1-draft.1")))
-                .contains("jburrow.v1-draft.1");
+        assertThat(ProtocolVersion.select(List.of("jburrow.v1-draft.9", "jburrow.v1-draft.2")))
+                .contains("jburrow.v1-draft.2");
     }
 
     @Test
     void selectsNothingWhenNoOfferIsSupported() {
-        assertThat(ProtocolVersion.select(List.of("jburrow.v1-draft.2", "chat")))
+        assertThat(ProtocolVersion.select(List.of("jburrow.v1-draft.1", "chat")))
                 .isEmpty();
         assertThat(ProtocolVersion.select(List.of())).isEmpty();
     }
 
     @Test
     void tokensCompareExactly() {
-        assertThat(ProtocolVersion.select(List.of("JBURROW.V1-DRAFT.1"))).isEmpty();
+        assertThat(ProtocolVersion.select(List.of("JBURROW.V1-DRAFT.2"))).isEmpty();
     }
 }

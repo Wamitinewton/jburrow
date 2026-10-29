@@ -16,7 +16,7 @@ public enum FrameType {
     OPEN(0x03, StreamKind.DATA, 16_384),
     HEADERS(0x04, StreamKind.DATA, 16_384),
     DATA(0x05, StreamKind.DATA, 65_536),
-    WINDOW_UPDATE(0x06, StreamKind.DATA, 4),
+    WINDOW_UPDATE(0x06, StreamKind.ANY, 4),
     CLOSE(0x07, StreamKind.DATA, 64),
     PING(0x08, StreamKind.CONTROL, 8),
     PONG(0x09, StreamKind.CONTROL, 8),
@@ -28,7 +28,9 @@ public enum FrameType {
         /** Stream 0 only. */
         CONTROL,
         /** Any stream other than 0. */
-        DATA
+        DATA,
+        /** Stream 0 or any other stream. */
+        ANY
     }
 
     private static final int CODE_SPACE = 256;
@@ -61,8 +63,13 @@ public enum FrameType {
         return streamKind;
     }
 
-    public boolean onControlStream() {
-        return streamKind == StreamKind.CONTROL;
+    /** Whether a frame of this type may be on {@code streamId}. */
+    public boolean allowsStream(int streamId) {
+        return switch (streamKind) {
+            case CONTROL -> streamId == StreamIds.CONTROL;
+            case DATA -> streamId != StreamIds.CONTROL;
+            case ANY -> true;
+        };
     }
 
     public int maxPayload() {

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs a real tunnel through the native jburrow binary and checks the bytes that come back.
+# Runs a real tunnel through the native jburrow binary and checks the bytes that come back: 50
+# concurrent streams on one session, then one 4 MiB stream.
 #
 # Needs: Docker, a JDK 21 on the PATH, python3, jq, curl, and both builds already in target/:
 #   ./mvnw -pl jburrow-server,jburrow-cli -am package -DskipTests
@@ -24,6 +25,9 @@ EDGE_URL="ws://localhost:$EDGE_PORT/v1/connect"
 READINESS_URL="http://localhost:$MANAGEMENT_PORT/actuator/health/readiness"
 # The local profile's documented development token (CONTRIBUTING.md). It unlocks only a server on this machine.
 AUTHTOKEN="jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00"
+# 256 KiB per stream passes half the stream window, so every stream has credit returned at least once.
+CONCURRENT_STREAMS=50
+CONCURRENT_BYTES=$((256 * 1024))
 PAYLOAD_BYTES=$((4 * 1024 * 1024))
 
 WORK="target/native-smoke"
@@ -106,6 +110,86 @@ registered() {
   grep -q '"type":"registered"' "$EVENTS"
 }
 
+events_of() {
+  grep -c "\"type\":\"$1\"" "$EVENTS" || true
+}
+
+streams_closed() {
+  alive "$CLI_PID" "the native CLI"
+  (($(events_of stream_closed) >= $1))
+}
+
+# echo_through <port> <streams> <bytes>: opens the streams together, then sends each its own random
+# bytes and reads them back, sending and receiving at once. Prints the sha256 of the first stream's
+# bytes; fails naming every stream whose echo differs.
+echo_through() {
+  python3 - "$@" <<'PY'
+import hashlib
+import os
+import socket
+import sys
+import threading
+
+port, streams, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+# Every connection is open before any sends, so the session carries all of them at once.
+opened = threading.Barrier(streams)
+results = [None] * streams
+
+
+def stream(index):
+    payload = os.urandom(size)
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=60)
+    except OSError as e:
+        opened.abort()
+        results[index] = f"connect failed: {e}"
+        return
+    with sock:
+        try:
+            opened.wait()
+        except threading.BrokenBarrierError:
+            results[index] = "another stream failed to connect"
+            return
+        errors = []
+
+        def send():
+            try:
+                sock.sendall(payload)
+                sock.shutdown(socket.SHUT_WR)
+            except OSError as e:
+                errors.append(e)
+
+        sender = threading.Thread(target=send)
+        sender.start()
+        received = bytearray()
+        try:
+            while chunk := sock.recv(65536):
+                received += chunk
+        except OSError as e:
+            errors.append(e)
+        sender.join()
+    sent_sha = hashlib.sha256(payload).hexdigest()
+    received_sha = hashlib.sha256(received).hexdigest()
+    if errors:
+        results[index] = f"failed: {errors[0]}"
+    elif sent_sha != received_sha:
+        results[index] = f"sent {size} bytes ({sent_sha}), received {len(received)} bytes ({received_sha})"
+    else:
+        results[index] = sent_sha
+
+
+threads = [threading.Thread(target=stream, args=(i,)) for i in range(streams)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+failed = [f"stream {i}: {r}" for i, r in enumerate(results) if len(r) != 64]
+if failed:
+    sys.exit(f"echo differs on {len(failed)} of {streams} streams:\n" + "\n".join(failed))
+print(results[0])
+PY
+}
+
 for tool in docker java python3 jq curl; do
   command -v "$tool" >/dev/null || fail "$tool is not on the PATH"
 done
@@ -150,47 +234,20 @@ public_port="$(jq -r 'select(.type == "registered") | .tunnels[0].publicPort' "$
 [[ "$public_port" =~ ^[0-9]+$ ]] || fail "no public port in the registered event"
 log "Tunnel open on localhost:$public_port"
 
+log "Sending $CONCURRENT_BYTES random bytes on each of $CONCURRENT_STREAMS concurrent streams"
+echo_through "$public_port" "$CONCURRENT_STREAMS" "$CONCURRENT_BYTES" >/dev/null ||
+  fail "the concurrent echo differs"
+wait_until 15 "$CONCURRENT_STREAMS stream_closed events" streams_closed "$CONCURRENT_STREAMS"
+opened_events="$(events_of stream_opened)"
+closed_events="$(events_of stream_closed)"
+[[ $opened_events -eq $CONCURRENT_STREAMS && $closed_events -eq $CONCURRENT_STREAMS ]] ||
+  fail "expected $CONCURRENT_STREAMS stream_opened and stream_closed events, got $opened_events and $closed_events"
+resets="$(grep '"type":"stream_closed"' "$EVENTS" | jq -r 'select(.reset != null) | "stream \(.streamId): \(.reset)"')"
+[[ -z "$resets" ]] || fail "streams were reset: $resets"
+log "All $CONCURRENT_STREAMS echoes match"
+
 log "Sending $PAYLOAD_BYTES random bytes through the tunnel"
-head -c "$PAYLOAD_BYTES" /dev/urandom >"$WORK/sent.bin"
-python3 - "$public_port" "$WORK/sent.bin" "$WORK/received.bin" <<'PY'
-import socket
-import sys
-import threading
-
-port, sent_path, received_path = int(sys.argv[1]), sys.argv[2], sys.argv[3]
-with open(sent_path, "rb") as f:
-    payload = f.read()
-
-sock = socket.create_connection(("127.0.0.1", port), timeout=30)
-send_error = []
-
-
-def send():
-    try:
-        sock.sendall(payload)
-        sock.shutdown(socket.SHUT_WR)
-    except OSError as e:
-        send_error.append(e)
-
-
-# Send and receive at once: the echo comes back while bytes are still going out.
-sender = threading.Thread(target=send)
-sender.start()
-with open(received_path, "wb") as out:
-    while True:
-        chunk = sock.recv(65536)
-        if not chunk:
-            break
-        out.write(chunk)
-sender.join()
-sock.close()
-if send_error:
-    sys.exit(f"send failed: {send_error[0]}")
-PY
-sent_sha="$(sha256sum "$WORK/sent.bin" | cut -d' ' -f1)"
-received_sha="$(sha256sum "$WORK/received.bin" | cut -d' ' -f1)"
-[[ "$sent_sha" == "$received_sha" ]] ||
-  fail "echo differs: sent $(stat -c %s "$WORK/sent.bin") bytes ($sent_sha), received $(stat -c %s "$WORK/received.bin") bytes ($received_sha)"
+sent_sha="$(echo_through "$public_port" 1 "$PAYLOAD_BYTES")" || fail "the echo differs"
 log "Echo matches (sha256 $sent_sha)"
 
 log "Stopping the CLI with SIGINT"

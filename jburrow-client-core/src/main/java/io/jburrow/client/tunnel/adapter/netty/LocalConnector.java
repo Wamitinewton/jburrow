@@ -3,18 +3,19 @@ package io.jburrow.client.tunnel.adapter.netty;
 import io.jburrow.client.tunnel.domain.ActiveTunnel;
 import io.jburrow.client.tunnel.domain.ClientSession;
 import io.jburrow.client.tunnel.domain.LocalTarget;
-import io.jburrow.client.tunnel.domain.PendingData;
+import io.jburrow.protocol.adapter.netty.CreditBoundedRecvByteBufAllocator;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.flow.Credit;
+import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamOutcome;
 import io.jburrow.protocol.stream.StreamState;
 import io.jburrow.protocol.wire.ErrorCode;
-import io.jburrow.protocol.wire.FrameLimits;
+import io.jburrow.protocol.wire.StreamIds;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.channel.AdaptiveRecvByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
@@ -22,19 +23,16 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
-import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.socket.DuplexChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.Future;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -48,20 +46,23 @@ import org.slf4j.LoggerFactory;
  * with "visitor" read as "local connection". The {@link ClientSession} decides what each event means; this class does
  * the I/O.
  *
- * <p>Opening is optimistic (§9.4): {@code DATA} that arrives while a local connection is being made is held, and past
- * {@link #MAX_PENDING_BYTES} the control connection is no longer read until the connection is made or fails.
+ * <p>Flow control ({@code docs/phase-2-multiplexing/ARCHITECTURE.md} §The client): a local connection is read only as
+ * far as its stream may send, which the session's {@link ReadGate} decides, and the server's {@code DATA} returns its
+ * credit only once its write to the local connection has completed, successfully or not. A local service that stops
+ * reading so holds back only its own stream, and the control connection is always read.
  *
- * <p>Backpressure, ARCHITECTURE.md §Backpressure in phase 1: when the control connection can't take more, no local
- * connection is read; when a local connection can't take more, or holds too much while connecting, the control
- * connection isn't read and its liveness clock is paused. TCP's own flow control carries the pressure on from there.
+ * <p>Opening is optimistic (§9.4): {@code DATA} that arrives while a local connection is being made is held, with no
+ * limit but the client's stream window, which the server can't pass until that data is written and released. If the
+ * connection fails, the held data is released and its session credit returned.
+ *
+ * <p>Writes are flushed once per read batch, never per frame: towards the server when a local connection's read batch
+ * completes, towards local connections when the control connection's does.
  *
  * <p>Every local connection is registered on the session's event loop, so all of this is confined to one thread.
  */
 final class LocalConnector {
 
-    static final int MAX_PENDING_BYTES = 256 * 1024;
     static final int CONNECT_TIMEOUT_MILLIS = 10_000;
-    static final WriteBufferWaterMark LOCAL_WRITE_BUFFER = new WriteBufferWaterMark(32 * 1024, 128 * 1024);
 
     private static final Logger log = LoggerFactory.getLogger(LocalConnector.class);
 
@@ -74,39 +75,53 @@ final class LocalConnector {
     private final ControlConnection connection;
     private final ClientSession session;
     private final Channel control;
-    private final ClientLivenessHandler liveness;
-    private final Dialer dialer;
-    private final Bootstrap bootstrap;
+    private final LocalDial dial;
     private final LongSupplier nanoTime;
+    private final ReadGate gate;
     private final Map<Integer, LocalRelayHandler> streams = new LinkedHashMap<>();
     private final List<LocalRelayHandler> written = new ArrayList<>();
-    /** The streams that keep the control connection from being read. */
-    private final Set<LocalRelayHandler> pausing = new LinkedHashSet<>();
 
-    LocalConnector(
-            ControlConnection connection,
-            Channel control,
-            ClientLivenessHandler liveness,
-            Dialer dialer,
-            LongSupplier nanoTime) {
+    /** Carried bytes went out outside a local connection's read batch, and wait for the control channel's next flush. */
+    private boolean controlFlushPending;
+
+    /**
+     * Makes the connection to a stream's local target. The future completes on the session's event loop with a
+     * {@link DuplexChannel} that isn't reading yet ({@code autoRead} off) and has no handlers.
+     */
+    @FunctionalInterface
+    interface LocalDial {
+        Future<Channel> dial(LocalTarget target);
+    }
+
+    LocalConnector(ControlConnection connection, Channel control, Dialer dialer, LongSupplier nanoTime) {
+        this(connection, control, tcp(dialer, control), nanoTime);
+    }
+
+    LocalConnector(ControlConnection connection, Channel control, LocalDial dial, LongSupplier nanoTime) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.session = connection.session();
         this.control = Objects.requireNonNull(control, "control");
-        this.liveness = Objects.requireNonNull(liveness, "liveness");
-        this.dialer = Objects.requireNonNull(dialer, "dialer");
+        this.dial = Objects.requireNonNull(dial, "dial");
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
-        this.bootstrap = new Bootstrap()
+        this.gate = new ReadGate(session, control, new CarriedOutput());
+    }
+
+    /** TCP connections on the control connection's event loop, so every stream is confined to the session's thread. */
+    private static LocalDial tcp(Dialer dialer, Channel control) {
+        Objects.requireNonNull(dialer, "dialer");
+        Bootstrap bootstrap = new Bootstrap()
                 .group(control.eventLoop())
                 .channelFactory((ChannelFactory<NioSocketChannel>) NioSocketChannel::new)
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.ALLOW_HALF_CLOSURE, true)
                 .option(ChannelOption.AUTO_READ, false)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MILLIS)
-                .option(
-                        ChannelOption.RECVBUF_ALLOCATOR,
-                        new AdaptiveRecvByteBufAllocator(64, 2_048, FrameLimits.MAX_DATA_PAYLOAD))
-                .option(ChannelOption.WRITE_BUFFER_WATER_MARK, LOCAL_WRITE_BUFFER)
                 .handler(NO_HANDLERS);
+        return target -> dialer.dial(bootstrap, control.eventLoop(), target.host(), target.port());
+    }
+
+    ReadGate gate() {
+        return gate;
     }
 
     // Server to local target.
@@ -115,8 +130,7 @@ final class LocalConnector {
     void open(Frame.Open open) {
         int streamId = open.streamId();
         ActiveTunnel tunnel = session.onOpen(streamId, open.message());
-        LocalRelayHandler stream =
-                new LocalRelayHandler(this, streamId, tunnel, nanoTime.getAsLong(), new PendingData(MAX_PENDING_BYTES));
+        LocalRelayHandler stream = new LocalRelayHandler(this, streamId, tunnel, nanoTime.getAsLong());
         streams.put(streamId, stream);
         RemoteAddress remote = open.message().remote();
         log.debug(
@@ -126,40 +140,57 @@ final class LocalConnector {
                 remote.port(),
                 tunnel.target());
         connection.tell(events -> events.onStreamOpened(streamId, tunnel.ref(), remote.address(), remote.port()));
-        LocalTarget target = tunnel.target();
-        Future<Channel> dialing = dialer.dial(bootstrap, control.eventLoop(), target.host(), target.port());
+        Future<Channel> dialing = dial.dial(tunnel.target());
         stream.dialing(dialing);
         dialing.addListener(done -> onDialed(stream, dialing));
     }
 
-    /** Takes over the frame's buffer. */
+    /**
+     * The server's {@code DATA}. Takes over the frame's buffer. A delivered payload is held against the windows until
+     * its write to the local connection completes, successfully or not; only then does its credit go back. While the
+     * connection is being made, it waits in the stream's queue.
+     */
     void onData(Frame.Data data) {
-        StreamOutcome outcome;
+        int streamId = data.streamId();
+        int length = data.payload().readableBytes();
+        DataOutcome outcome;
         try {
-            outcome = session.onStreamFrame(data.streamId(), StreamEvent.DATA_RECEIVED);
+            outcome = session.onDataReceived(streamId, length);
         } catch (RuntimeException e) {
             data.release();
             throw e;
         }
         switch (outcome) {
-            case StreamOutcome.Accept accepted -> {
-                LocalRelayHandler stream = require(data.streamId());
-                ByteBuf payload = data.payload();
-                stream.countIn(payload.readableBytes());
+            case DataOutcome.Deliver deliver -> {
+                LocalRelayHandler stream = require(streamId);
+                stream.countIn(length);
                 if (stream.isConnected()) {
-                    stream.channel().write(payload, stream.channel().voidPromise());
+                    deliver(stream, data.payload());
                     if (stream.markFlushPending()) {
                         written.add(stream);
                     }
-                } else if (stream.hold(payload)) {
-                    reassess(stream);
+                } else {
+                    stream.hold(data.payload());
                 }
             }
-            case StreamOutcome.ResetStream reset -> {
+            case DataOutcome.Reset reset -> {
                 data.release();
-                resetFromServerFault(require(data.streamId()), reset.code());
+                sendCredit(streamId, reset.credit());
+                resetFromServerFault(require(streamId), reset.code());
             }
-            case StreamOutcome.Discard discarded -> data.release();
+            case DataOutcome.Discard discarded -> {
+                data.release();
+                sendCredit(streamId, discarded.credit());
+            }
+        }
+    }
+
+    /** Credit from the server: the streams it unblocks are read again, their carried bytes first. */
+    void onWindowUpdate(Frame.WindowUpdate update) {
+        switch (session.onWindowUpdate(update.streamId(), update.increment())) {
+            case SESSION -> gate.onSessionCredit();
+            case STREAM -> gate.onStreamCredit(require(update.streamId()));
+            case IGNORED, DISCARDED -> {}
         }
     }
 
@@ -195,6 +226,7 @@ final class LocalConnector {
 
     /** The control connection's read batch is done: flush every local connection it wrote to. */
     void onReadComplete() {
+        flushCarried();
         if (written.isEmpty()) {
             return;
         }
@@ -204,62 +236,96 @@ final class LocalConnector {
         written.clear();
     }
 
+    /** Headroom on the control channel is one term of what a stream may send; nothing else reacts to writability. */
     void onControlWritabilityChanged(boolean writable) {
-        if (session.isClosing()) {
+        if (!session.isClosing()) {
+            gate.onControlWritable(writable);
+            flushCarried();
+        }
+    }
+
+    /** A payload's write to its local connection completed or failed: it is no longer held, so its credit goes back. */
+    private void onDelivered(int streamId, int bytes) {
+        sendCredit(streamId, session.onReleased(streamId, bytes));
+    }
+
+    /**
+     * Sends the {@code WINDOW_UPDATE}s {@code credit} names, each flushed at once: updates are rare, one per half
+     * window. Nothing goes to a session that is closing, whose credit no longer matters.
+     */
+    private void sendCredit(int streamId, Credit credit) {
+        if (credit.isEmpty() || !control.isActive() || session.isClosing()) {
             return;
         }
-        for (LocalRelayHandler stream : streams.values()) {
-            if (stream.isConnected() && (!writable || !stream.channel().isInputShutdown())) {
-                stream.channel().config().setAutoRead(writable);
-            }
+        if (credit.session() > 0) {
+            control.writeAndFlush(new Frame.WindowUpdate(StreamIds.CONTROL, credit.session()), control.voidPromise());
+        }
+        if (credit.stream() > 0) {
+            control.writeAndFlush(new Frame.WindowUpdate(streamId, credit.stream()), control.voidPromise());
         }
     }
 
     // Local target to server.
 
-    /** Takes over {@code bytes}. Splits them into {@code DATA} frames no longer than the server allows (§6.5). */
+    /**
+     * Takes over {@code bytes}. A read the gate sized is sent whole, as one {@code DATA} no longer than the server
+     * allows (§6.5). A read it couldn't size, one byte with nothing sendable, goes behind whatever the stream already
+     * carries, and out as credit returns.
+     */
     void onLocalData(LocalRelayHandler stream, ByteBuf bytes) {
         if (!isOpen(stream) || session.isClosing() || !bytes.isReadable()) {
             bytes.release();
             return;
         }
+        if (stream.hasCarry() || bytes.readableBytes() > gate.sendable(stream)) {
+            gate.hold(stream, bytes);
+            return;
+        }
+        sendData(stream, bytes);
+        gate.afterSend(stream);
+    }
+
+    /** Spends the stream's and the session's credit, then writes, unflushed. Takes over {@code bytes}. */
+    private void sendData(LocalRelayHandler stream, ByteBuf bytes) {
         int streamId = stream.streamId();
-        int maxPayload = session.maxFramePayload();
-        stream.countOut(bytes.readableBytes());
+        int length = bytes.readableBytes();
         try {
-            while (bytes.readableBytes() > maxPayload) {
-                session.onStreamSent(streamId, StreamEvent.DATA_SENT);
-                control.write(new Frame.Data(streamId, bytes.readRetainedSlice(maxPayload)), control.voidPromise());
-            }
-            session.onStreamSent(streamId, StreamEvent.DATA_SENT);
+            session.onDataSent(streamId, length);
         } catch (RuntimeException e) {
             bytes.release();
             throw e;
         }
+        stream.countOut(length);
         control.write(new Frame.Data(streamId, bytes), control.voidPromise());
     }
 
     void onLocalReadComplete() {
+        controlFlushPending = false;
         control.flush();
     }
 
-    /** The local target sent {@code FIN}: half-close the stream, and finish it if the server had closed its half. */
+    /**
+     * The local target sent {@code FIN}: half-close the stream, and finish it if the server had closed its half. A
+     * half-close follows the stream's last byte, so while bytes are carried it waits for them.
+     */
     void onLocalInputShutdown(LocalRelayHandler stream) {
         if (!isOpen(stream) || session.isClosing()) {
             return;
         }
+        if (stream.hasCarry()) {
+            stream.closeAfterCarry();
+            return;
+        }
+        halfClose(stream);
+    }
+
+    private void halfClose(LocalRelayHandler stream) {
         int streamId = stream.streamId();
         session.onStreamSent(streamId, StreamEvent.CLOSE_SENT);
         control.writeAndFlush(Frame.Close.half(streamId), control.voidPromise());
         if (session.streamState(streamId).isEmpty()) {
             finish(stream, Optional.empty(), "closed");
             closeAfterWrites(stream.channel());
-        }
-    }
-
-    void onLocalWritabilityChanged(LocalRelayHandler stream) {
-        if (isOpen(stream)) {
-            reassess(stream);
         }
     }
 
@@ -322,14 +388,33 @@ final class LocalConnector {
             resetConnection(channel);
             return;
         }
+        // autoRead is off until the gate turns it on, and Netty makes a channel's read handle on its first read, so
+        // this allocator sizes every read.
+        channel.config().setRecvByteBufAllocator(new CreditBoundedRecvByteBufAllocator(() -> gate.sendable(stream)));
         stream.connected(channel);
         channel.pipeline().addLast(stream);
-        stream.writePending();
+        writePending(stream);
         if (stream.isShutdownOutputOnConnect()) {
             shutdownOutputAfterWrites(channel);
         }
-        reassess(stream);
-        channel.config().setAutoRead(control.isWritable());
+        gate.onConnected(stream);
+    }
+
+    /** Writes what arrived while the connection was being made, in order, each releasing its credit once written. */
+    private void writePending(LocalRelayHandler stream) {
+        for (ByteBuf payload = stream.pollPending(); payload != null; payload = stream.pollPending()) {
+            deliver(stream, payload);
+        }
+        stream.channel().flush();
+    }
+
+    /** Writes a payload to the stream's local connection, unflushed. Its credit goes back when the write completes. */
+    private void deliver(LocalRelayHandler stream, ByteBuf payload) {
+        int streamId = stream.streamId();
+        int length = payload.readableBytes();
+        ChannelPromise delivered = stream.channel().newPromise();
+        delivered.addListener(written -> onDelivered(streamId, length));
+        stream.channel().write(payload, delivered);
     }
 
     /** Nothing accepted the connection to the local target: the stream is reset, the session stays up (§9.4). */
@@ -379,14 +464,15 @@ final class LocalConnector {
         return stream;
     }
 
-    /** Forgets a stream the session has closed, and reports it. */
+    /**
+     * Forgets a stream the session has closed, and reports it. What it still held, waiting for its connection, is
+     * released into the flow, so its session credit comes back.
+     */
     private void finish(LocalRelayHandler stream, Optional<ErrorCode> reset, String ending) {
         streams.remove(stream.streamId());
         written.remove(stream);
-        stream.releasePending();
-        if (pausing.remove(stream) && pausing.isEmpty()) {
-            resumeControl();
-        }
+        gate.onRemoved(stream);
+        releasePending(stream);
         long durationMillis = TimeUnit.NANOSECONDS.toMillis(nanoTime.getAsLong() - stream.openedNanos());
         log.debug(
                 "stream closed: stream={} bytesIn={} bytesOut={} duration={}ms ending=\"{}\"",
@@ -399,39 +485,22 @@ final class LocalConnector {
                 events.onStreamClosed(stream.streamId(), stream.bytesIn(), stream.bytesOut(), durationMillis, reset));
     }
 
-    /**
-     * Whether {@code stream} keeps the control connection from being read: it holds too much while connecting, or its
-     * local connection can't take more. The control connection is read again once no stream holds it.
-     */
-    private void reassess(LocalRelayHandler stream) {
-        boolean holds = stream.isPendingOverLimit() || (stream.isConnected() && isFull(stream.channel()));
-        if (holds) {
-            if (pausing.add(stream) && pausing.size() == 1) {
-                control.config().setAutoRead(false);
-                liveness.pause();
-            }
-        } else if (pausing.remove(stream) && pausing.isEmpty()) {
-            resumeControl();
+    private void releasePending(LocalRelayHandler stream) {
+        for (ByteBuf payload = stream.pollPending(); payload != null; payload = stream.pollPending()) {
+            int length = payload.readableBytes();
+            payload.release();
+            sendCredit(stream.streamId(), session.onReleased(stream.streamId(), length));
         }
     }
 
-    private void resumeControl() {
-        if (control.isActive()) {
-            control.config().setAutoRead(true);
-            liveness.resume();
+    private void flushCarried() {
+        if (controlFlushPending) {
+            controlFlushPending = false;
+            control.flush();
         }
     }
 
     // Connection handling.
-
-    /**
-     * Whether a local connection can't take more. Netty reports a channel whose output is shut down as unwritable for
-     * good, but it holds nothing back, so it doesn't count: otherwise the control connection would stay unread until
-     * the local target closed.
-     */
-    private static boolean isFull(DuplexChannel channel) {
-        return !channel.isOutputShutdown() && !channel.isWritable();
-    }
 
     /** Gives up on a connection being made, or cuts one that is made. */
     private static void resetConnection(LocalRelayHandler stream) {
@@ -468,5 +537,20 @@ final class LocalConnector {
 
     private static void closeAfterWrites(Channel channel) {
         channel.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
+    }
+
+    /** Where the gate's carried bytes, and the {@code CLOSE} that waited for them, go out. */
+    private final class CarriedOutput implements ReadGate.Output {
+
+        @Override
+        public void sendCarried(LocalRelayHandler stream, ByteBuf bytes) {
+            sendData(stream, bytes);
+            controlFlushPending = true;
+        }
+
+        @Override
+        public void sendDeferredClose(LocalRelayHandler stream) {
+            halfClose(stream);
+        }
     }
 }

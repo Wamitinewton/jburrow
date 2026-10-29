@@ -91,6 +91,13 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "io.jburrow.protocol.control.Windows",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
     "name": "io.jburrow.protocol.control.TunnelKind",
     "allDeclaredFields": true,
     "allDeclaredMethods": true

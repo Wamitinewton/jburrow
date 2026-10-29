@@ -7,8 +7,8 @@ import picocli.CommandLine.IExitCodeExceptionMapper;
 import picocli.CommandLine.ParameterException;
 
 /**
- * The process exit codes, as ARCHITECTURE.md §The CLI lists them. A script decides on these, so a code's meaning never
- * changes once released.
+ * The process exit codes, as phase 1's ARCHITECTURE.md §The CLI lists them, with {@code FLOW_CONTROL_ERROR} added to
+ * 6 by phase 2's §Failure modes. A script decides on these, so a code's meaning never changes once released.
  */
 final class ExitCodes {
 

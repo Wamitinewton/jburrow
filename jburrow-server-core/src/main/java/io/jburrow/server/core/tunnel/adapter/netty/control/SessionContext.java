@@ -94,8 +94,8 @@ public final class SessionContext {
         return taken;
     }
 
-    /** Pauses and resumes the liveness clock around backpressure. */
-    public LivenessHandler liveness() {
+    /** Keeps the session's liveness clock, which starts when the server's {@code HELLO} is sent. */
+    LivenessHandler liveness() {
         if (liveness == null) {
             throw new IllegalStateException("The session's pipeline is not built");
         }

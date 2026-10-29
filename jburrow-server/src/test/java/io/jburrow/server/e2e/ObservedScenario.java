@@ -26,6 +26,9 @@ import java.util.Arrays;
  *
  * <p>The tunnel's local service echoes, except that a stream starting with {@link #RESET} is reset.
  *
+ * <p>The refused visitor needs a session that takes one stream at a time, so the tests that run this scenario set
+ * {@code jburrow.edge.max-concurrent-streams} to 1.
+ *
  * @param sessionId the established session's id
  * @param tunnelPort its tunnel's public port
  * @param echoedBytes the size of the first stream, each way

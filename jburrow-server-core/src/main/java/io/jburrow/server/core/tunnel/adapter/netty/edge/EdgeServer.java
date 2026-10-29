@@ -250,6 +250,11 @@ public final class EdgeServer {
                 : -1;
     }
 
+    /** The most direct memory Netty's buffers may hold, in bytes: the budget the edge's settings are checked against. */
+    public long maxDirectMemory() {
+        return PlatformDependent.maxDirectMemory();
+    }
+
     /** Connections accepted and not yet closed. A connection still in the kernel's accept queue isn't counted. */
     int openConnections() {
         return connections.size();

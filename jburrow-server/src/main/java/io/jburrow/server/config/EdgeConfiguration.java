@@ -5,6 +5,7 @@ import io.jburrow.server.core.portpool.application.PortReservationService;
 import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
+import io.jburrow.server.core.tunnel.adapter.netty.control.SessionRegistry;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
@@ -14,6 +15,7 @@ import io.jburrow.server.core.tunnel.adapter.netty.tcp.NettyTunnelListeners;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
 import io.jburrow.server.observability.MicrometerTunnelMetrics;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -26,17 +28,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 
 /**
- * Constructs the tunnel engine from {@code jburrow.edge.*} and {@code jburrow.tcp.*}: the port pool, the session caps,
- * registration, the blocking executor, the metrics adapter, the TCP tunnel listeners and the {@link EdgeServer}.
- * Hands the engine plain values and an executor, so nothing here touches Netty.
+ * Constructs the tunnel engine from {@code jburrow.edge.*} and {@code jburrow.tcp.*}: the port pool, the session and
+ * stream caps, registration, the blocking executor, the metrics adapter, the TCP tunnel listeners and the
+ * {@link EdgeServer}. Hands the engine plain values and an executor, so nothing here touches Netty. Logs the direct
+ * memory budget the settings add up to.
  */
 @Configuration(proxyBeanMethods = false)
 class EdgeConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(EdgeConfiguration.class);
 
     /** Phase 1 serves one tunnel per session; phase 2 raises it with multiplexing. */
     static final int TUNNELS_PER_SESSION = 1;
@@ -60,6 +67,11 @@ class EdgeConfiguration {
     }
 
     @Bean
+    StreamQuota streamQuota(JBurrowProperties properties) {
+        return new StreamQuota(properties.edge().maxStreams());
+    }
+
+    @Bean
     RegisterTunnels registerTunnels(
             AuthtokenVerifier verifier,
             SessionAdmission admission,
@@ -79,6 +91,12 @@ class EdgeConfiguration {
         return metrics;
     }
 
+    /** Every live session, which the edge keeps and anything outside it finds sessions through. */
+    @Bean
+    SessionRegistry sessionRegistry() {
+        return new SessionRegistry();
+    }
+
     @Bean
     BlockingExecutor blockingExecutor() {
         return new BlockingExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -90,21 +108,34 @@ class EdgeConfiguration {
             BuildIdentitySource build,
             RegisterTunnels registerTunnels,
             SessionAdmission admission,
+            StreamQuota streamQuota,
             PortReservationService ports,
             MicrometerTunnelMetrics metrics,
+            SessionRegistry sessionRegistry,
             BlockingExecutor blocking) {
         JBurrowProperties.Tcp tcp = properties.tcp();
         TcpSettings tcpSettings = new TcpSettings(
                 ipLiteral(tcp.bindAddress(), "jburrow.tcp.bind-address").getHostAddress(), tcp.publicHost());
-        EngineDependencies deps =
-                new EngineDependencies(registerTunnels, admission, ports, metrics, blocking.executor(), tcpSettings);
+        EngineDependencies deps = new EngineDependencies(
+                registerTunnels, admission, streamQuota, ports, metrics, blocking.executor(), tcpSettings);
         EdgeSettings settings = edgeSettings(properties.edge(), build.current().version());
         EdgeServer edge = new EdgeServer(
                 settings,
                 deps,
-                new ControlSessionInitializer(settings, deps, new NettyTunnelListeners(settings, deps)));
+                new ControlSessionInitializer(
+                        settings, deps, sessionRegistry, new NettyTunnelListeners(settings, deps)));
         metrics.bindDirectMemory(edge::usedDirectMemory);
+        logBudget(DirectMemoryBudget.of(properties.edge(), edge.maxDirectMemory()));
         return edge;
+    }
+
+    /** Warns rather than failing: the worst case needs every session saturated at once, and may be overcommitted. */
+    static void logBudget(DirectMemoryBudget budget) {
+        if (budget.exceedsWarnShare()) {
+            log.warn("Direct memory budget: {}, which exceeds 90% of direct memory", budget.describe());
+        } else {
+            log.info("Direct memory budget: {}", budget.describe());
+        }
     }
 
     @Bean
@@ -114,7 +145,6 @@ class EdgeConfiguration {
 
     static EdgeSettings edgeSettings(JBurrowProperties.Edge edge, String serverVersion) {
         JBurrowProperties.Watermarks session = edge.sessionWatermarks();
-        JBurrowProperties.Watermarks visitor = edge.visitorWatermarks();
         return new EdgeSettings(
                 new InetSocketAddress(ipLiteral(edge.bindAddress(), "jburrow.edge.bind-address"), edge.port()),
                 edge.connectHost(),
@@ -129,8 +159,9 @@ class EdgeConfiguration {
                 edge.idleTimeout(),
                 session.low(),
                 session.high(),
-                visitor.low(),
-                visitor.high(),
+                edge.windows(),
+                edge.maxConcurrentStreams(),
+                edge.maxStreams(),
                 serverVersion);
     }
 

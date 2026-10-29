@@ -85,7 +85,7 @@ final class ControlConnection implements TunnelHandle {
 
     ControlConnection(ClientSettings settings) {
         this.settings = Objects.requireNonNull(settings, "settings");
-        this.session = new ClientSession(settings.tunnels());
+        this.session = new ClientSession(settings.tunnels(), settings.windows());
     }
 
     ClientSession session() {
@@ -196,7 +196,7 @@ final class ControlConnection implements TunnelHandle {
             return;
         }
         session.onUpgraded();
-        channel.write(new Frame.Hello(new Hello(settings.clientInfo(), List.of())));
+        channel.write(new Frame.Hello(new Hello(settings.clientInfo(), List.of(), session.windows())));
         channel.write(new Frame.Register(session.register(settings.authtoken())));
         channel.flush();
     }
@@ -349,7 +349,7 @@ final class ControlConnection implements TunnelHandle {
         }
     }
 
-    /** Whether reading the connection is paused, for backpressure. */
+    /** Whether reading the connection is paused, which flow control never does. */
     boolean isReadPaused() {
         return channel != null && !channel.config().isAutoRead();
     }

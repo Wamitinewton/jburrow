@@ -77,7 +77,7 @@ class ConsoleOutputTest {
 
         assertThat(out.toString().lines())
                 .containsExactly(
-                        "jburrow 0.2.0, protocol jburrow.v1-draft.1",
+                        "jburrow 0.2.0, protocol jburrow.v1-draft.2",
                         "Forwarding  tcp://tcp.cloudnativehub.app:20417 -> localhost:22",
                         "");
     }
@@ -103,14 +103,14 @@ class ConsoleOutputTest {
     void aStartFailureIsOneLineOnStderrWithItsAdvice() {
         output.onStartFailed(new TunnelStartException(
                 Kind.UPGRADE_REFUSED,
-                "This server speaks jburrow.v1-draft.2",
+                "This server speaks jburrow.v1-draft.3",
                 Optional.of(ErrorCode.UNSUPPORTED_PROTOCOL_VERSION),
-                List.of("jburrow.v1-draft.2", "jburrow.v1-draft.3"),
+                List.of("jburrow.v1-draft.3", "jburrow.v1-draft.4"),
                 null));
 
         assertThat(err.toString().lines())
-                .containsExactly("Error UNSUPPORTED_PROTOCOL_VERSION: This server speaks jburrow.v1-draft.2."
-                        + " This server speaks jburrow.v1-draft.2, jburrow.v1-draft.3; upgrade jburrow.");
+                .containsExactly("Error UNSUPPORTED_PROTOCOL_VERSION: This server speaks jburrow.v1-draft.3."
+                        + " This server speaks jburrow.v1-draft.3, jburrow.v1-draft.4; upgrade jburrow.");
         assertThat(out.toString()).isEmpty();
     }
 

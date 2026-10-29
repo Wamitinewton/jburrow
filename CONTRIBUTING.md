@@ -137,7 +137,7 @@ directory (or into `jburrow-protocol/` if it can't find the source tree). In CI 
 1. Put the file in the target's inputs directory and rename it `finding-<what it does>`.
    `SeedCorpusTest` refuses any other name. The target now fails in every build.
 2. Fix the cause. If the fix adds or clarifies a receiver rule, add a conformance vector and
-   update the receiver rules in `docs/protocol.md` §12.
+   update the receiver rules in `docs/protocol.md` §13.
 3. Keep the finding in the corpus.
 
 ### The native CLI binary
@@ -162,6 +162,11 @@ of what went out and what came back. Finally it stops the CLI with `SIGINT`, as 
 expects exit status 0 and a final `closed` event with reason `USER_CLOSED`. Logs land in
 `target/native-smoke/` and are printed on failure. `JBURROW_BIN=<path>` runs the same scenario
 against another binary.
+
+For load rather than correctness, `scripts/load/StreamLoad.java` drives many concurrent streams
+through a running tunnel and checks every byte; [`scripts/load/README.md`](scripts/load/README.md)
+covers running it and the scenarios behind phase 2's measurements. It is run by hand and is not
+part of the build.
 
 Native-image configuration lives with the code that needs it, and is picked up from each jar:
 

@@ -22,7 +22,7 @@ import java.util.Objects;
  * Turns one binary WebSocket message into a {@link Frame} and back. The only code that reads untrusted bytes as
  * frames.
  *
- * <p>Decoding applies receiver rules 1 to 8 of {@code docs/protocol.md} §12, in that order, and stops at the first
+ * <p>Decoding applies receiver rules 1 to 8 of {@code docs/protocol.md} §13, in that order, and stops at the first
  * failure with the {@link ProtocolException} the specification names. Rule 9, whether the frame fits the session's
  * state, is the session's. The direction rules of §6 are checked with rule 4: a peer that sends a type its
  * role never sends fails here, before any session sees it.
@@ -153,8 +153,11 @@ public final class FrameCodec {
 
     // Rule 5.
     private static int requireStreamForType(FrameType type, int streamId) {
-        if (type.onControlStream() != (streamId == StreamIds.CONTROL)) {
-            throw protocolError(type + (type.onControlStream() ? " must be on stream 0" : " must not be on stream 0"));
+        if (!type.allowsStream(streamId)) {
+            throw protocolError(type
+                    + (type.streamKind() == FrameType.StreamKind.CONTROL
+                            ? " must be on stream 0"
+                            : " must not be on stream 0"));
         }
         return streamId;
     }

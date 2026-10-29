@@ -13,7 +13,6 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.IoHandlerFactory;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
-import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollIoHandler;
 import io.netty.channel.nio.NioIoHandler;
@@ -31,7 +30,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 class TunnelListenerTest {
 
-    private static final WriteBufferWaterMark WATERMARKS = new WriteBufferWaterMark(32 * 1024, 128 * 1024);
     private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
 
     private EventLoopGroup group;
@@ -47,8 +45,7 @@ class TunnelListenerTest {
     void visitorsRunOnTheListenersEventLoopWithTheirOptions() throws Exception {
         EventLoop loop = loop(NioIoHandler.newFactory());
         CompletableFuture<Channel> accepted = new CompletableFuture<>();
-        TunnelListener listener =
-                TunnelListener.bind(loop, new InetSocketAddress(LOOPBACK, 0), WATERMARKS, recorder(accepted));
+        TunnelListener listener = TunnelListener.bind(loop, new InetSocketAddress(LOOPBACK, 0), recorder(accepted));
         listener.bindFuture().syncUninterruptibly();
 
         try (Socket visitor = new Socket(LOOPBACK, port(listener))) {
@@ -58,7 +55,6 @@ class TunnelListenerTest {
             assertThat(channel.config().getOption(ChannelOption.ALLOW_HALF_CLOSURE))
                     .isTrue();
             assertThat(channel.config().getOption(ChannelOption.TCP_NODELAY)).isTrue();
-            assertThat(channel.config().getWriteBufferWaterMark().high()).isEqualTo(WATERMARKS.high());
         } finally {
             listener.close().syncUninterruptibly();
         }
@@ -67,7 +63,7 @@ class TunnelListenerTest {
     @Test
     void noSecondSocketCanShareTheTunnelPortWhileItIsOpen() throws Exception {
         TunnelListener listener = TunnelListener.bind(
-                loop(NioIoHandler.newFactory()), new InetSocketAddress(LOOPBACK, 0), WATERMARKS, recorder(null));
+                loop(NioIoHandler.newFactory()), new InetSocketAddress(LOOPBACK, 0), recorder(null));
         listener.bindFuture().syncUninterruptibly();
         int port = port(listener);
 
@@ -118,7 +114,7 @@ class TunnelListenerTest {
         EventLoop loop = loop(handlers);
         try (ServerSocket occupant = new ServerSocket(0, 50, LOOPBACK)) {
             ChannelFuture bind = TunnelListener.bind(
-                            loop, new InetSocketAddress(LOOPBACK, occupant.getLocalPort()), WATERMARKS, recorder(null))
+                            loop, new InetSocketAddress(LOOPBACK, occupant.getLocalPort()), recorder(null))
                     .bindFuture()
                     .awaitUninterruptibly();
 
@@ -137,7 +133,7 @@ class TunnelListenerTest {
 
     private int bindThenClose(IoHandlerFactory handlers) {
         TunnelListener listener =
-                TunnelListener.bind(loop(handlers), new InetSocketAddress(LOOPBACK, 0), WATERMARKS, recorder(null));
+                TunnelListener.bind(loop(handlers), new InetSocketAddress(LOOPBACK, 0), recorder(null));
         listener.bindFuture().syncUninterruptibly();
         int port = port(listener);
         listener.close().syncUninterruptibly();

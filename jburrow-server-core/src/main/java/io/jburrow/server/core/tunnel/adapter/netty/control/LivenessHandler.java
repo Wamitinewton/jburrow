@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Keeps one session's {@link Liveness} ({@code docs/protocol.md} §10): answers and rate-limits the client's
+ * Keeps one session's {@link Liveness} ({@code docs/protocol.md} §11): answers and rate-limits the client's
  * {@code PING}s, consumes {@code PONG}s, sends {@code PING} after silence, and ends the session with
  * {@code HEARTBEAT_TIMEOUT} when the client has been silent for the idle timeout.
  *
@@ -71,25 +71,6 @@ public final class LivenessHandler extends ChannelInboundHandlerAdapter {
         liveness = new Liveness(pingIntervalNanos, idleTimeoutNanos, now);
         pingRate = PingRateLimit.standard(now);
         reschedule();
-    }
-
-    /**
-     * Stops the clock while the session's connection isn't read, for backpressure, and keeps sending {@code PING}s so
-     * the client still hears from this server.
-     */
-    public void pause() {
-        if (liveness != null) {
-            liveness.pause();
-            reschedule();
-        }
-    }
-
-    /** Restarts the clock from zero once the connection is read again. */
-    public void resume() {
-        if (liveness != null) {
-            liveness.resume(nanoTime.getAsLong());
-            reschedule();
-        }
     }
 
     @Override
