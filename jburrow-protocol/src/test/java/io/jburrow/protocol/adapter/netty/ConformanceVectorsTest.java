@@ -9,6 +9,7 @@ import io.jburrow.protocol.adapter.netty.FrameCodec.Role;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.testsupport.ConformanceVectors;
 import io.jburrow.protocol.testsupport.Hex;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameType;
@@ -141,6 +142,7 @@ class ConformanceVectorsTest {
             case Frame.Register register -> node.set("payload", payload(register.message()));
             case Frame.Registered registered -> node.set("payload", payload(registered.message()));
             case Frame.Open open -> node.set("payload", payload(open.message()));
+            case Frame.Headers headers -> node.set("payload", payload(headers.head()));
             case Frame.Error error -> node.set("payload", payload(error.body()));
             case Frame.Data data -> node.put("payloadHex", ByteBufUtil.hexDump(data.payload()));
             case Frame.WindowUpdate update -> node.put("increment", update.increment());
@@ -174,11 +176,15 @@ class ConformanceVectorsTest {
     }
 
     private static FrameCodec receiver(JsonNode vector) {
-        return new FrameCodec(role(vector), JSON);
+        return new FrameCodec(role(vector), JSON, () -> http(vector));
     }
 
     private static FrameCodec sender(JsonNode vector) {
-        return new FrameCodec(role(vector) == Role.SERVER ? Role.CLIENT : Role.SERVER, JSON);
+        return new FrameCodec(role(vector) == Role.SERVER ? Role.CLIENT : Role.SERVER, JSON, () -> http(vector));
+    }
+
+    private static boolean http(JsonNode vector) {
+        return ConformanceVectors.capabilities(vector).contains(Capability.HTTP.wireName());
     }
 
     private static Role role(JsonNode vector) {

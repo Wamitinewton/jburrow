@@ -1,0 +1,1 @@
+{"status":201,"headers":[["set-cookie","a=1; Path=/"],["location","/items/7"],["set-cookie","b=2; HttpOnly"]],"body":"empty"}

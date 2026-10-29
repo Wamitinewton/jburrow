@@ -15,13 +15,19 @@ can run the same files. Any bug found by fuzzing or in production becomes a new 
 
 | File | Each entry |
 |---|---|
-| `valid.json` | `{ "name", "role", "hex", "frame" }`: the message decodes to `frame` |
-| `invalid.json` | `{ "name", "role", "hex", "error" }`: decoding fails with the error code `error` |
+| `valid.json` | `{ "name", "role", "capabilities", "hex", "frame" }`: the message decodes to `frame` |
+| `invalid.json` | `{ "name", "role", "capabilities", "hex", "error" }`: decoding fails with the error code `error` |
 
 - **`name`** is unique across both files and stable, so a failure can be reported by name.
 - **`role`** is the side that *receives* the message: `"server"` decodes what a client sends,
   `"client"` decodes what a server sends. It matters for types whose payload differs by direction
   (`HELLO`, `REGISTER`) and for types only one side may send (`OPEN`, `HEADERS`, `GOAWAY`).
+- **`capabilities`** lists the capabilities the receiver's session has negotiated
+  ([§4.2](../../../../../../../../docs/protocol.md#42-capabilities)). Absent means none. It matters
+  for what a capability introduces: with `["http"]` a server decodes `HEADERS`, and either side
+  accepts the `"http"` tunnel kind and the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and
+  `LOCAL_SERVICE_ERROR`; without it, each is refused as anything unknown is. Many HTTP vectors come
+  in pairs, one with the capability and one without.
 - **`error`** is the protocol error code, for example `FRAME_SIZE_ERROR`. When several rules are
   broken, the expected code is the first broken step in receiver-rule order. Several vectors exist
   only to check that order.
@@ -50,13 +56,13 @@ A neutral description of the decoded frame. Every frame has `type` (the registry
 
 | Type | Fields |
 |---|---|
-| `HELLO`, `REGISTER`, `OPEN`, `ERROR` | `payload`: the control payload as the receiver understands it, a JSON object. Compare it as JSON, not as text: key order and whitespace don't matter, and keys the receiver must ignore are absent. |
+| `HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR` | `payload`: the control payload as the receiver understands it, a JSON object. Compare it as JSON, not as text: key order and whitespace don't matter, and keys the receiver must ignore are absent. Header fields are arrays of `[name, value]` pairs, and their order matters. |
 | `DATA` | `payloadHex`: the payload, in the same `hex` format |
 | `WINDOW_UPDATE` | `increment`: the credit, a number |
 | `CLOSE` | `reset`: the error code, present only for a reset (`RST` flag). Absent means a half-close. |
 | `PING`, `PONG` | `opaqueHex`: the 8 opaque bytes |
-| `HEADERS`, `GOAWAY` | nothing else. Their payloads belong to later drafts; a receiver of this draft decodes the header and then treats the frame as a session error. |
+| `GOAWAY` | nothing else. Its payload belongs to a later draft; a receiver of this draft decodes the header and then treats the frame as a session error. |
 
 A vector holds for one draft only: drafts are not compatible, and a `HELLO` of one is not a `HELLO`
 of another. These files change with the draft, and `docs/protocol.md` §1 lists what each draft
-changed.
+changed. A capability adds vectors to its draft's files without changing the others.

@@ -36,7 +36,8 @@ capitals, as shown here.
 
 ## 1. Status and version
 
-This document specifies `jburrow.v1-draft.2`. It is the authority on the wire. Other JBurrow
+This document specifies `jburrow.v1-draft.2` and its one capability, `http` (§4.2). It is the
+authority on the wire. Other JBurrow
 documents that describe the protocol summarize this one, and where they disagree, this one is
 right.
 
@@ -55,6 +56,7 @@ Section numbers refer to the document of the draft in the same row.
 | `jburrow.v1-draft.1` | 2026-10-25 | 3.3, 3.5 | Clarified, not a wire change: a request that isn't valid HTTP/1.1 is refused with `PROTOCOL_ERROR` before the checks; `SERVER_SHUTTING_DOWN` refusals carry `Retry-After` too. |
 | `jburrow.v1-draft.1` | 2026-10-25 | 10 | A side that has paused reading keeps sending `PING` every `pingIntervalMs`, so its peer doesn't end a healthy session during a long stall. Not a wire change: every peer already answers a `PING`. |
 | `jburrow.v1-draft.2` | 2026-10-26 | 1, 2.1, 4.1, 4.2, 6, 6.5, 6.6, 7.3, 7.4, 8.2, 8.3, 8.5, 9.2–9.5, 10–17 | Flow control. Each side announces its receive windows in its `HELLO` (`windows`, required). `WINDOW_UPDATE` is defined, on stream 0 for the session window and on a data stream for that stream's window. `DATA` past a window, or credit past `2^31 - 1`, is the new session error `FLOW_CONTROL_ERROR`. Optimistic data is bounded by the client's stream window, and a client no longer stops reading the connection while it connects to a local target. New §10; §10–§16 of draft 1 are §11–§17. Not compatible with draft 1. |
+| `jburrow.v1-draft.2` | 2026-10-29 | 1, 2.1, 4.2, 4.3, 6, 6.4, 7, 7.5–7.7, 7.9, 7.10, 8.2–8.4, 9, 9.7, 12.2, 13–17 | The `http` capability, draft 2's first: HTTP tunnels. `HEADERS` is defined, the `"http"` tunnel kind, `subdomain` in `REGISTER`, `request` in `OPEN` and the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR` are added, and a stream of an HTTP tunnel carries one exchange: a request head, a response head and two bodies without their HTTP/1.1 framing (§9.7). Additive: a peer that doesn't offer `http` sees draft 2 unchanged, except that `subdomain` and `request`, now known fields, are refused on a `"tcp"` entry rather than ignored. |
 
 ## 2. Conventions
 
@@ -69,16 +71,19 @@ Section numbers refer to the document of the draft in the same row.
 | message | One WebSocket message (RFC 6455 §5.6), after reassembly of its fragments. |
 | frame | The protocol unit of §5. Exactly one frame is carried in each binary message. |
 | session | One WebSocket connection between a client and a server, from the upgrade to the close (§8). |
-| tunnel | A public endpoint the server creates for the client in a session: in this draft, a public TCP port. |
-| visitor | Anyone who connects to a tunnel's public endpoint. |
+| tunnel | A public endpoint the server creates for the client in a session: a public TCP port, or with `http` a public host name (§9.7). |
+| visitor | Anyone who connects to a tunnel's public endpoint, or with `http` sends it a request. |
 | local target | The address on the client's side a tunnel forwards to. Only the client knows it. |
-| stream | One visitor connection carried over a session (§9). |
+| stream | One visitor connection carried over a session, or one HTTP exchange: a request and its response (§9). |
 | control stream | Stream `0`. It carries the frames about the session itself. |
 | data stream | Any stream other than `0`. |
 | code | An error code from the registry in §12. |
 | credit | How many more bytes of `DATA` a sender may send, on one stream or on the session (§10). |
 | window | The credit a receiver gives its peer to start with, announced in its `HELLO`: one for each new stream and one for the session (§10.1). |
 | release | A receiver releases a byte of `DATA` when it no longer holds it: it has written the byte to its destination, or discarded it (§10.4). |
+| capability | An optional feature of a version, negotiated in `HELLO` (§4.2). "In a session with `http`" means one whose server listed `http` in its `HELLO`. |
+| head | The request line or status line of an HTTP message and its header fields, as a JSON object (§7.7, §7.9). |
+| body | The content of an HTTP message, carried as `DATA` without its HTTP/1.1 framing (§9.7). |
 
 ### 2.2 Notation
 
@@ -267,9 +272,23 @@ lists the capabilities it supports in its `HELLO` (§7.3). The server answers in
   sent in a session unless the capability is in the server's list.
 - A server ignores capabilities in the client's list that it doesn't know.
 - A client ignores capabilities in the server's list that it didn't offer.
+- A receiver treats what a capability introduces, in a session without it, as it treats anything
+  it doesn't know (§4.3): an unknown frame type, field value or code.
+- A capability is fixed for the session once the server's `HELLO` is sent. The client learns it
+  when that `HELLO` arrives, so a client that needs a capability for its `REGISTER` sends it only
+  then (§8.3).
 
-`jburrow.v1-draft.2` defines no capabilities. A client of this draft sends an empty list, and a
-server of this draft answers with an empty list.
+`jburrow.v1-draft.2` defines one capability:
+
+| Capability | Introduces | Defined in |
+|---|---|---|
+| `http` | HTTP tunnels: the `HEADERS` frame; the value `"http"` of `tunnels[].kind` and `OPEN.kind`; the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR`; and the stream rules of §9.7 | §6.4, §7.5–§7.7, §7.9, §7.10, §9.7, §12 |
+
+The fields `tunnels[].subdomain` (§7.5) and `request` (§7.7) belong to `http` too, but they are
+only valid with the kind `"http"`, so a session without it refuses them with the kind they arrive
+with. In a session without `http` the server's `HELLO` lists no capability, and draft 2 is
+exactly as it was before `http` existed. A server MAY leave `http` out of its answer even when it
+supports HTTP tunnels, for example when its operator has turned them off.
 
 ### 4.3 What a receiver doesn't know
 
@@ -284,6 +303,7 @@ A receiver ignores JSON object keys it doesn't know (§7.1). That is the only th
 | A code in a `CLOSE` reset | `PROTOCOL_ERROR` |
 | A code in an `ERROR` | `VALIDATION_FAILED` |
 | A value of an enumerated field, such as a tunnel kind | `VALIDATION_FAILED` |
+| Anything a capability introduces, in a session without it (§4.2) | as above, by what it is |
 
 So a new optional field in a control payload needs no negotiation, and anything else new needs a
 capability or a new version. A receiver never has to guess whether something unknown is safe to
@@ -324,7 +344,7 @@ truncation and framing bugs at the first bad frame.
 | `0x01` | `HELLO` | 0 | both, once each | JSON, 0–16,384 | none | §6.1 |
 | `0x02` | `REGISTER` | 0 | both: client once, server once | JSON, 0–16,384 | none | §6.2 |
 | `0x03` | `OPEN` | new data stream | server | JSON, 0–16,384 | none | §6.3 |
-| `0x04` | `HEADERS` | data stream | client | 0–16,384 | none | reserved (§6.4) |
+| `0x04` | `HEADERS` | data stream | client, with `http` | JSON, 0–16,384 | none | §6.4 |
 | `0x05` | `DATA` | data stream | both | bytes, 1–65,536 | none | §6.5 |
 | `0x06` | `WINDOW_UPDATE` | 0 or data stream | both | `u32`, exactly 4 | none | §6.6 |
 | `0x07` | `CLOSE` | data stream | both | empty, or a code of 1–64 | `0x01` `RST` | §6.7 |
@@ -337,7 +357,9 @@ Type `0x00` and types `0x0C` to `0xFF` are unassigned, and receiving one is `PRO
 assigned code is never reused for another type.
 
 "Sent by" is part of the type: a server that receives `OPEN` or `GOAWAY`, or a client that receives
-`HEADERS`, raises `PROTOCOL_ERROR` before looking at anything else about the frame (§13, step 4).
+`HEADERS`, raises `PROTOCOL_ERROR` before looking at anything else about the frame (§13, step 4). A
+type that a capability introduces is sent only in a session with it, and a server that receives
+`HEADERS` in a session without `http` raises `PROTOCOL_ERROR` at the same step.
 "none" in the flags column means that no flag is defined, so the flags byte MUST be `0x00`.
 
 A JSON payload of length 0 passes the length check and then fails to parse, as `PROTOCOL_ERROR`
@@ -368,13 +390,16 @@ The server opens a new stream for a visitor connection to one of the client's tu
 
 ### 6.4 `HEADERS` (0x04)
 
-Reserved for HTTP tunnels, defined in a later draft. In this draft no peer may send it.
+Carries a response head on a stream of an HTTP tunnel (§9.7). Introduced by `http` (§4.2): it is
+sent only in a session with `http`.
 
-- Sent by the client only, on a data stream. No flags. Payload: up to 16,384 bytes, which a
-  receiver of this draft doesn't parse.
-- A client that receives `HEADERS` raises `PROTOCOL_ERROR` at step 4 of §13. A server that receives
-  one decodes the header, checks the length and the flags, and then raises `PROTOCOL_ERROR` at
-  step 9.
+- Sent by the client only, on a data stream. No flags. Payload: one JSON object (§7.9), at most
+  16,384 bytes. Like every control payload it is not flow-controlled, so a response head always
+  gets through, whatever the windows (§10.2).
+- A client that receives `HEADERS` raises `PROTOCOL_ERROR` at step 4 of §13, and so does a server
+  in a session without `http`. A server in a session with `http` parses the payload at step 8, and
+  checks at step 10 that the stream is an HTTP tunnel's and that the head comes when §9.7 allows.
+  An example is in §7.9.
 
 ### 6.5 `DATA` (0x05)
 
@@ -515,7 +540,7 @@ Reports a session error. The sender closes the connection right after it (§8.6)
 
 ## 7. Control payloads
 
-`HELLO`, `REGISTER`, `OPEN` and `ERROR` each carry one JSON object
+`HELLO`, `REGISTER`, `OPEN`, `HEADERS` and `ERROR` each carry one JSON object
 ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) encoded in UTF-8, at most 16,384 bytes.
 
 ### 7.1 Encoding rules
@@ -545,7 +570,7 @@ A receiver MUST reject a payload, as `PROTOCOL_ERROR`, that:
 7. Gives an integer field a value outside the range of the field's integer type, which the field
    tables give as 32-bit (`-2^31` to `2^31 - 1`) or 64-bit (`-2^63` to `2^63 - 1`) signed.
 
-A payload that is well-formed under these rules but breaks a field rule of §7.3 to §7.8 (a missing
+A payload that is well-formed under these rules but breaks a field rule of §7.3 to §7.10 (a missing
 required field, a length, a range, a pattern, an unknown enumerated value, a uniqueness rule) is
 `VALIDATION_FAILED`. Its message names the field by its path from the payload root, for example
 `tunnels[0].ref must match [a-z0-9][a-z0-9-]{0,31}`, and never quotes any part of the payload.
@@ -571,6 +596,8 @@ tables.
 
 - Field names are camelCase.
 - Enumerated values are lower-case strings, such as `"tcp"`, and compared exactly.
+- In a field table, a value or field marked "with `http`" is one the `http` capability introduces:
+  in a session without it, it is unknown (§4.2).
 - Durations are integer milliseconds, in fields whose names end in `Ms`.
 - Identifiers the server issues (`sessionId`, `tunnelId`) are UUIDs in the canonical lower-case
   form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` of hexadecimal digits `[0-9a-f]`. Any other form,
@@ -691,8 +718,12 @@ side announces what it is willing to receive, and neither side's windows change 
 | `authtoken` | string | Length 1 to 256. The client's credential. A receiver never logs it and never repeats it, not even in an error message. |
 | `tunnels` | array of object | 1 to 32 entries. More than `limits.maxTunnels` but no more than 32 is well-formed, and the server refuses it as `TUNNEL_LIMIT_EXCEEDED` (§8.4). |
 | `tunnels[].ref` | string | `[a-z0-9][a-z0-9-]{0,31}`, no two equal in the request. Chosen by the client to match the reply and errors to the request. |
-| `tunnels[].kind` | string | `"tcp"`, the only kind in this draft. |
-| `tunnels[].remotePort` | integer (32-bit) | Optional. 1 to 65,535. Asks for this public port. Without it, the server chooses. |
+| `tunnels[].kind` | string | `"tcp"`, or with `http` `"http"`. |
+| `tunnels[].remotePort` | integer (32-bit) | Optional, `"tcp"` only. 1 to 65,535. Asks for this public port. Without it, the server chooses. |
+| `tunnels[].subdomain` | string | Optional, `"http"` only. `[a-z0-9][a-z0-9-]{1,61}[a-z0-9]` with no `--` anywhere: 3 to 63 characters. Asks for this name under the server's HTTP domain. Without it, the server chooses. |
+
+A `remotePort` on an `"http"` entry, or a `subdomain` on a `"tcp"` entry, is `VALIDATION_FAILED`.
+Whether a requested name is free, and allowed on this server, is the server's to decide (§8.4).
 
 The tunnel's local target is not part of `REGISTER`. The server never needs it, and the client maps
 each `ref` to its local target itself.
@@ -721,6 +752,29 @@ each `ref` to its local target itself.
 The token in this example is the documented development token of the reference server, which only
 unlocks a server running on the developer's own machine.
 
+In a session with `http`, the client asks for an HTTP tunnel named `myapp`:
+
+<!-- example:register-request-http -->
+```json
+{
+  "authtoken": "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00",
+  "tunnels": [{ "ref": "default", "kind": "http", "subdomain": "myapp" }]
+}
+```
+
+```text
+00 00 00 00 02 00 00 00 00 7e
+7b 22 61 75 74 68 74 6f 6b 65 6e 22 3a 22 6a 62
+5f 4c 4f 43 41 4c 2d 44 45 56 45 4c 4f 50 4d 45
+4e 54 2d 4f 4e 4c 59 2d 75 6e 6c 6f 63 6b 73 2d
+6c 6f 63 61 6c 68 6f 73 74 2d 30 30 22 2c 22 74
+75 6e 6e 65 6c 73 22 3a 5b 7b 22 72 65 66 22 3a
+22 64 65 66 61 75 6c 74 22 2c 22 6b 69 6e 64 22
+3a 22 68 74 74 70 22 2c 22 73 75 62 64 6f 6d 61
+69 6e 22 3a 22 6d 79 61 70 70 22 7d 5d 7d
+```
+<!-- /example -->
+
 ### 7.6 `REGISTER`, server to client
 
 | Field | Type | Rule |
@@ -728,10 +782,10 @@ unlocks a server running on the developer's own machine.
 | `tunnels` | array of object | 1 to 32 entries, no two with the same `ref`. One entry per requested tunnel, in request order (§8.4). |
 | `tunnels[].ref` | string | The rule of the request's `ref`: the `ref` of the request entry it answers. |
 | `tunnels[].tunnelId` | string | A UUID (§7.2). Identifies the tunnel in `OPEN`. |
-| `tunnels[].kind` | string | `"tcp"`, the request entry's kind. |
+| `tunnels[].kind` | string | The request entry's kind: `"tcp"`, or with `http` `"http"`. |
 | `tunnels[].publicHost` | string | A lower-case DNS name or an IPv4 address, at most 253 characters: dot-separated labels of 1 to 63 characters from `[a-z0-9-]` that neither start nor end with `-`, with no trailing dot. An IPv6 host would need brackets in `url`, and this draft has no IPv6 tunnels. |
-| `tunnels[].publicPort` | integer (32-bit) | 1 to 65,535. With a `remotePort` in the request, that port. |
-| `tunnels[].url` | string | Exactly `<kind>://<publicHost>:<publicPort>`, with `publicPort` in decimal without leading zeros. |
+| `tunnels[].publicPort` | integer (32-bit) | 1 to 65,535. With a `remotePort` in the request, that port. For an `"http"` tunnel, the port visitors connect to. |
+| `tunnels[].url` | string | For `"tcp"`, exactly `tcp://<publicHost>:<publicPort>`. For `"http"`, `http://<publicHost>` or `https://<publicHost>`, followed by `:<publicPort>` unless `publicPort` is that scheme's default (80 for `http`, 443 for `https`). `publicPort` is in decimal without leading zeros. |
 
 <!-- example:register-reply -->
 ```json
@@ -766,15 +820,57 @@ unlocks a server running on the developer's own machine.
 ```
 <!-- /example -->
 
+For an HTTP tunnel the server chooses the scheme, and the URL leaves out the scheme's default port.
+The reply to the request above, with a name the server chose:
+
+<!-- example:register-reply-http -->
+```json
+{
+  "tunnels": [
+    {
+      "ref": "default",
+      "tunnelId": "5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23",
+      "kind": "http",
+      "publicHost": "quiet-otter-4f2a.example.dev",
+      "publicPort": 443,
+      "url": "https://quiet-otter-4f2a.example.dev"
+    }
+  ]
+}
+```
+
+```text
+00 00 00 00 02 00 00 00 00 c9
+7b 22 74 75 6e 6e 65 6c 73 22 3a 5b 7b 22 72 65
+66 22 3a 22 64 65 66 61 75 6c 74 22 2c 22 74 75
+6e 6e 65 6c 49 64 22 3a 22 35 64 30 66 34 66 30
+65 2d 33 31 61 36 2d 34 61 33 39 2d 38 64 35 31
+2d 30 63 30 66 37 66 31 66 36 63 32 33 22 2c 22
+6b 69 6e 64 22 3a 22 68 74 74 70 22 2c 22 70 75
+62 6c 69 63 48 6f 73 74 22 3a 22 71 75 69 65 74
+2d 6f 74 74 65 72 2d 34 66 32 61 2e 65 78 61 6d
+70 6c 65 2e 64 65 76 22 2c 22 70 75 62 6c 69 63
+50 6f 72 74 22 3a 34 34 33 2c 22 75 72 6c 22 3a
+22 68 74 74 70 73 3a 2f 2f 71 75 69 65 74 2d 6f
+74 74 65 72 2d 34 66 32 61 2e 65 78 61 6d 70 6c
+65 2e 64 65 76 22 7d 5d 7d
+```
+<!-- /example -->
+
 ### 7.7 `OPEN`, server to client
 
 | Field | Type | Rule |
 |---|---|---|
 | `tunnelId` | string | A UUID (§7.2): the tunnel the visitor connected to, from the `REGISTER` reply. |
-| `kind` | string | `"tcp"`, the tunnel's kind. |
+| `kind` | string | The tunnel's kind: `"tcp"`, or with `http` `"http"`. |
 | `remote` | object | The visitor's address, as the server saw it. |
 | `remote.address` | string | An IP address literal, checked by its text alone and never resolved: an IPv4 address in dotted-decimal form with no leading zeros (`203.0.113.9`, not `203.0.113.09`), or an IPv6 address in any text form of [RFC 4291 §2.2](https://www.rfc-editor.org/rfc/rfc4291#section-2.2), hexadecimal digits in either case, an embedded IPv4 part following the IPv4 rule, at most 45 characters, without brackets and without a zone. |
 | `remote.port` | integer (32-bit) | 0 to 65,535. The visitor's port. |
+| `request` | object | Required when `kind` is `"http"`, and `VALIDATION_FAILED` otherwise. The request head of the stream's exchange (§9.7). |
+| `request.method` | string | An HTTP token (RFC 9110 §5.6.2), ``[A-Za-z0-9!#$%&'*+.^_`\|~-]{1,32}``, case kept. Not `CONNECT`. |
+| `request.target` | string | Origin form: `/` followed by 0 to 4,095 visible ASCII characters (`0x21` to `0x7E`), the path and query exactly as the server received them, never decoded or normalised. Or exactly `*` when the method is `OPTIONS`. |
+| `request.headers` | array | The header fields (§7.10), with exactly one `host`. |
+| `request.body` | string | `"empty"`, `"length"` or `"chunked"`: how the request body is framed (§9.7). |
 
 <!-- example:open -->
 ```json
@@ -797,6 +893,65 @@ unlocks a server running on the developer's own machine.
 ```
 <!-- /example -->
 
+In a session with `http`, the server opens stream 1 for a request to an HTTP tunnel. The request
+body, 27 bytes, follows as `DATA`:
+
+<!-- example:open-http -->
+```json
+{
+  "tunnelId": "5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23",
+  "kind": "http",
+  "remote": { "address": "203.0.113.9", "port": 51234 },
+  "request": {
+    "method": "POST",
+    "target": "/api/items?page=2",
+    "headers": [
+      ["host", "quiet-otter-4f2a.example.dev"],
+      ["content-type", "application/json"],
+      ["content-length", "27"],
+      ["x-forwarded-for", "203.0.113.9"],
+      ["x-forwarded-proto", "https"],
+      ["x-forwarded-host", "quiet-otter-4f2a.example.dev"],
+      ["via", "1.1 jburrow"]
+    ],
+    "body": "length"
+  }
+}
+```
+
+```text
+00 00 00 01 03 00 00 00 01 b4
+7b 22 74 75 6e 6e 65 6c 49 64 22 3a 22 35 64 30
+66 34 66 30 65 2d 33 31 61 36 2d 34 61 33 39 2d
+38 64 35 31 2d 30 63 30 66 37 66 31 66 36 63 32
+33 22 2c 22 6b 69 6e 64 22 3a 22 68 74 74 70 22
+2c 22 72 65 6d 6f 74 65 22 3a 7b 22 61 64 64 72
+65 73 73 22 3a 22 32 30 33 2e 30 2e 31 31 33 2e
+39 22 2c 22 70 6f 72 74 22 3a 35 31 32 33 34 7d
+2c 22 72 65 71 75 65 73 74 22 3a 7b 22 6d 65 74
+68 6f 64 22 3a 22 50 4f 53 54 22 2c 22 74 61 72
+67 65 74 22 3a 22 2f 61 70 69 2f 69 74 65 6d 73
+3f 70 61 67 65 3d 32 22 2c 22 68 65 61 64 65 72
+73 22 3a 5b 5b 22 68 6f 73 74 22 2c 22 71 75 69
+65 74 2d 6f 74 74 65 72 2d 34 66 32 61 2e 65 78
+61 6d 70 6c 65 2e 64 65 76 22 5d 2c 5b 22 63 6f
+6e 74 65 6e 74 2d 74 79 70 65 22 2c 22 61 70 70
+6c 69 63 61 74 69 6f 6e 2f 6a 73 6f 6e 22 5d 2c
+5b 22 63 6f 6e 74 65 6e 74 2d 6c 65 6e 67 74 68
+22 2c 22 32 37 22 5d 2c 5b 22 78 2d 66 6f 72 77
+61 72 64 65 64 2d 66 6f 72 22 2c 22 32 30 33 2e
+30 2e 31 31 33 2e 39 22 5d 2c 5b 22 78 2d 66 6f
+72 77 61 72 64 65 64 2d 70 72 6f 74 6f 22 2c 22
+68 74 74 70 73 22 5d 2c 5b 22 78 2d 66 6f 72 77
+61 72 64 65 64 2d 68 6f 73 74 22 2c 22 71 75 69
+65 74 2d 6f 74 74 65 72 2d 34 66 32 61 2e 65 78
+61 6d 70 6c 65 2e 64 65 76 22 5d 2c 5b 22 76 69
+61 22 2c 22 31 2e 31 20 6a 62 75 72 72 6f 77 22
+5d 5d 2c 22 62 6f 64 79 22 3a 22 6c 65 6e 67 74
+68 22 7d 7d
+```
+<!-- /example -->
+
 ### 7.8 `ERROR`, either direction
 
 | Field | Type | Rule |
@@ -806,7 +961,8 @@ unlocks a server running on the developer's own machine.
 | `ref` | string | Optional. The rule of a tunnel `ref`: the tunnel the error is about. |
 
 Codes are for programs and messages are for people. A receiver MUST decide what to do on `code`
-alone. A server of this draft only sends codes with session scope in `ERROR`.
+alone. A server of this draft only sends codes with session scope in `ERROR`, and a code a
+capability introduces only in a session with it.
 
 <!-- example:error -->
 ```json
@@ -823,6 +979,65 @@ alone. A server of this draft only sends codes with session scope in `ERROR`.
 75 6c 74 22 7d
 ```
 <!-- /example -->
+
+### 7.9 `HEADERS`, client to server
+
+With `http`. A response head on a stream of an HTTP tunnel (§9.7).
+
+| Field | Type | Rule |
+|---|---|---|
+| `status` | integer (32-bit) | 100 to 599, except 101. `101 Switching Protocols` is reserved for a later capability, and `VALIDATION_FAILED` here. |
+| `headers` | array | The header fields (§7.10). |
+| `body` | string | `"empty"`, `"length"` or `"chunked"`: how the response body is framed (§9.7). Absent for a status of 100 to 199, and required otherwise. A `204` or `304` is always `"empty"`. |
+
+A head with a status of 200 or more is the **final** head; one of 100 to 199 is **informational**
+and comes before it. When each may be sent is in §9.7.
+
+The client answers the request in §7.7:
+
+<!-- example:headers -->
+```json
+{
+  "status": 200,
+  "headers": [
+    ["content-type", "text/html; charset=utf-8"],
+    ["content-length", "1043"]
+  ],
+  "body": "length"
+}
+```
+
+```text
+00 00 00 01 04 00 00 00 00 70
+7b 22 73 74 61 74 75 73 22 3a 32 30 30 2c 22 68
+65 61 64 65 72 73 22 3a 5b 5b 22 63 6f 6e 74 65
+6e 74 2d 74 79 70 65 22 2c 22 74 65 78 74 2f 68
+74 6d 6c 3b 20 63 68 61 72 73 65 74 3d 75 74 66
+2d 38 22 5d 2c 5b 22 63 6f 6e 74 65 6e 74 2d 6c
+65 6e 67 74 68 22 2c 22 31 30 34 33 22 5d 5d 2c
+22 62 6f 64 79 22 3a 22 6c 65 6e 67 74 68 22 7d
+```
+<!-- /example -->
+
+### 7.10 Header fields
+
+`request.headers` (§7.7) and `headers` (§7.9) hold header fields the same way: an array of 0 to
+256 entries, each a two-element array `[name, value]` of strings, in the order of the message.
+An entry of any other shape is `VALIDATION_FAILED`, named by its index, as in
+`headers[3] must be an array of two strings`.
+
+| Part | Rule |
+|---|---|
+| name | An HTTP token in lower case, ``[a-z0-9!#$%&'*+.^_`\|~-]{1,256}``. Lower case is what HTTP/2 and HTTP/3 require, so names compare without case folding. A sender lower-cases names it read from HTTP/1.1; a receiver never does. |
+| value | 0 to 4,096 characters, each U+0009 (tab), U+0020 to U+007E, or U+0080 to U+00FF, with no space or tab at either end. Each character stands for the byte of the same number (ISO 8859-1), so the bytes HTTP allows in a field value (`obs-text`) survive while the JSON stays UTF-8. CR, LF and NUL can't occur. |
+| repeats | The list keeps every field and its order. Nothing is joined: `set-cookie` can't be joined with commas, and no other field is either. |
+| connection-specific fields | `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`, `te`, `trailer` and `upgrade` MUST NOT appear. They describe one HTTP/1.1 connection, not the message: a sender removes them, and the fields its `connection` field names, before it builds a head. |
+| `content-length` | At most once, 1 to 16 decimal digits, at most `2^53 - 1`, the largest integer every JSON implementation reads exactly. Whether it may appear depends on `body` (§9.7). |
+
+A field breaking one of these rules is `VALIDATION_FAILED`. The 4,096-character limit on a value is
+the limit on any JSON string (§7.1), which a longer value already breaks, as `PROTOCOL_ERROR`. The
+whole payload, head and all, stays within 16,384 bytes: a side whose head doesn't fit refuses the
+message on its own HTTP connection rather than sending it (§9.7).
 
 ## 8. Sessions
 
@@ -861,15 +1076,15 @@ receives the `REGISTER` reply.
 
 | From | Before the session is established | Once it is established |
 |---|---|---|
-| Client | `HELLO` first; then `REGISTER`, exactly once; `PING`, `PONG` | `DATA`, `CLOSE` and `WINDOW_UPDATE` on streams the server opened; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
+| Client | `HELLO` first; then `REGISTER`, exactly once; `PING`, `PONG` | `DATA`, `CLOSE` and `WINDOW_UPDATE` on streams the server opened, and with `http` `HEADERS` on streams of HTTP tunnels; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
 | Server | `HELLO` first, after the client's `HELLO` arrives; then the `REGISTER` reply, exactly once, after the client's `REGISTER` arrives; `PING`, `PONG` | `OPEN`, `DATA`, `CLOSE` and `WINDOW_UPDATE` on data streams; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
 
 Either side may send `ERROR` at any point, including first, and it ends the session (§8.6).
 
 Any frame outside this table is `PROTOCOL_ERROR`, in either direction. In particular: a frame
 other than `HELLO` or `ERROR` before the peer's `HELLO`; a second `HELLO`; a second `REGISTER`;
-`OPEN`, `DATA`, `CLOSE` or `WINDOW_UPDATE` before the session is established; and in this draft any
-`HEADERS` or `GOAWAY`.
+`OPEN`, `DATA`, `CLOSE`, `WINDOW_UPDATE` or `HEADERS` before the session is established; `HEADERS`
+in a session without `http`; and in this draft any `GOAWAY`.
 
 Stream 0 is processed in order. A receiver handles each control frame completely, including any
 error it raises, before the next one.
@@ -879,6 +1094,10 @@ error it raises, before the next one.
 The client SHOULD send `REGISTER` immediately after its `HELLO`, without waiting for the server's
 `HELLO`. The server processes them in order, so if it refuses the `HELLO`, it never acts on the
 `REGISTER` behind it. Session setup then takes one round trip after the upgrade.
+
+A `REGISTER` that asks for an `"http"` tunnel uses what `http` introduces, so the client sends it
+only once the server's `HELLO` has arrived and lists `http` (§4.2). Setting up an HTTP tunnel takes
+one more round trip, and a client learns before it registers that a server can't give it one.
 
 ```mermaid
 sequenceDiagram
@@ -913,9 +1132,13 @@ that fails:
 | 2 | The authtoken is valid. | `AUTHTOKEN_INVALID` |
 | 3 | The token's owner may open another session. | `SESSION_LIMIT_EXCEEDED` |
 | 4 | Each tunnel can be created. A requested `remotePort` that is outside the server's range or in use fails; so does running out of ports. | `PORT_UNAVAILABLE`, `PORT_POOL_EXHAUSTED` |
+| 5 | With `http`, each requested `subdomain` may be claimed. A name the server reserves for itself, or that contains a term it blocks, fails first; then a name another tunnel holds, or the server holds for someone else for a while after their session ended. | `SUBDOMAIN_FORBIDDEN`, `SUBDOMAIN_UNAVAILABLE` |
 
 A payload that breaks a field rule fails earlier, as `VALIDATION_FAILED` (§7.1), and an unexpected
 failure in the server is `INTERNAL_ERROR`.
+
+Which names a server reserves, blocks or holds, and for how long, is the server's policy, not
+the protocol's. An `"http"` entry without a `subdomain` gets a name the server chooses.
 
 Registration is **all or nothing**. If every check passes, the server creates every requested
 tunnel and sends the `REGISTER` reply: one entry per request entry, in the same order, with the same
@@ -961,8 +1184,8 @@ server removes every tunnel the session created. A tunnel never outlives its ses
 
 ## 9. Streams
 
-A stream carries one visitor connection: in this draft, one TCP connection to a tunnel's public
-port.
+A stream carries one visitor connection to a TCP tunnel's public port, or, with `http`, one
+exchange with an HTTP tunnel: a request and its response (§9.7).
 
 ### 9.1 Stream ids
 
@@ -1016,6 +1239,9 @@ The complete table. "CLOSE" is the half-close, and "RST" is `CLOSE` with the `RS
 - A side sends no `WINDOW_UPDATE` on a stream whose peer has finished sending on it (§10.4).
 - `DATA` that is discarded, or that is a stream error, still counts against the session window
   (§10.3).
+- `HEADERS` (§9.7) has the cells of `DATA` in each state: it starts the client's direction of an
+  HTTP stream. Received in HalfClosedRemote it is the stream error `STREAM_CLOSED`; received in
+  Closed it is discarded.
 
 ### 9.3 Closed versus never opened
 
@@ -1038,7 +1264,8 @@ Opening is **optimistic**: the server MAY send the visitor's bytes as `DATA` rig
 `OPEN`, without waiting for the client, as far as its credit for the new stream allows (§10.2). This
 saves a round trip per connection. The client:
 
-- MUST treat an `OPEN` naming a `tunnelId` that isn't one of its tunnels as `PROTOCOL_ERROR`.
+- MUST treat an `OPEN` naming a `tunnelId` that isn't one of its tunnels, or whose `kind` isn't
+  that tunnel's, as `PROTOCOL_ERROR`.
 - Connects to the tunnel's local target. `DATA` that arrives before that connection is ready is
   not an error: the client holds it. It is never more than the client's `windows.stream`, since
   nothing on the stream is released, and no credit for it returned, until it is written.
@@ -1071,6 +1298,63 @@ tunnel as it does directly.
 When a session ends, every stream on it ends as if it had been reset. A side that is ending a
 session while its connection still works MAY first send `CLOSE RST CANCELLED` for each of its open
 streams. Either way, each side closes the connections its streams carried with a TCP `RST`.
+
+### 9.7 Streams and HTTP
+
+With `http`. A stream of an HTTP tunnel carries one **exchange**: one request and its response.
+Each side parses HTTP once, at its own end, and the stream carries the parsed messages, never
+HTTP/1.1 bytes:
+
+| The server sends | The client sends |
+|---|---|
+| `OPEN` with `kind` `"http"` and the request head (§7.7) | |
+| `DATA`: the request body, if any | `HEADERS`: informational heads, if any, then the final head, once (§7.9) |
+| `CLOSE`: the request body is complete | `DATA`: the response body, if any |
+| | `CLOSE`: the response body is complete |
+
+The two directions are independent, as on a TCP stream. The response may start, and end, before the
+request body does: a local service may answer `413` to an upload it won't take. A client whose
+response is complete while the request body is still arriving sends `CLOSE` and then
+`CLOSE RST CANCELLED`, so the server stops sending the body; frames on one connection arrive in
+order, so the reset can't overtake the response. Either side may reset the stream at any point,
+with the stream codes of §12 and one more, `LOCAL_SERVICE_ERROR`: the local service's response wasn't
+valid HTTP/1.1, or its connection ended before the response did.
+
+**Bodies.** A body is the content of the message, with its HTTP/1.1 framing removed: no chunk sizes,
+no trailers. The head's `body` tells the receiver how to frame it again on its own connection:
+
+| `body` | The body | `content-length` |
+|---|---|---|
+| `"empty"` | None. The sender's `CLOSE` follows the head. | A request: absent, or `0`. A response: any value, since it may answer `HEAD` or be a `304`. |
+| `"length"` | Exactly `content-length` bytes of `DATA`, then `CLOSE`. | Exactly one (§7.10). |
+| `"chunked"` | Any number of bytes of `DATA`, ended by `CLOSE`. The receiver frames it as `transfer-encoding: chunked`, or, for a response it can't send that way, closes its connection after it. | Absent. |
+
+A response to `HEAD`, and every `1xx`, `204` and `304` response, has no body, whatever its headers
+say, as HTTP/1.1 itself requires (RFC 9112 §6.3): its `body` is `"empty"`, or absent for `1xx`.
+Trailers aren't carried: the receiver of a chunked body ends it with an empty trailer section.
+
+**Heads.** The client sends any number of informational heads (`103 Early Hints`), then exactly one
+final head, before any response `DATA`. A server answers `Expect: 100-continue` itself and removes
+`Expect`, so a client never has to send `100`. A side that receives a message whose head wouldn't
+fit a 16,384-byte payload refuses it on its own connection, with `431` for a request at the server
+and a `502` for a response at the client, which resets the stream with `LOCAL_SERVICE_ERROR`.
+
+**Violations.** Each of these is a session error, raised at the first frame that commits it
+(§13, step 10):
+
+| Received | Error |
+|---|---|
+| `HEADERS` on a stream of a TCP tunnel | `PROTOCOL_ERROR` |
+| A second final `HEADERS` on a stream, or an informational one after the final one | `PROTOCOL_ERROR` |
+| `DATA` or `CLOSE` from the client on an HTTP stream before its final `HEADERS` | `PROTOCOL_ERROR` |
+| `DATA` on a body that is `"empty"`; more `DATA` than a `"length"` body's `content-length`; or `CLOSE` before it is reached | `PROTOCOL_ERROR` |
+| A final head whose `body` isn't `"empty"`, answering a `HEAD` request | `VALIDATION_FAILED` |
+
+`HEADERS` after the client's own `CLOSE` on the stream is a stream error, `STREAM_CLOSED`, as `DATA`
+is (§9.2). A client whose local service sends fewer bytes than its `content-length` and closes
+doesn't send `CLOSE`, which would break the rule above: it resets the stream with
+`LOCAL_SERVICE_ERROR`. A server never sends a request body that breaks these rules either; the
+rules are the same for both bodies.
 
 ## 10. Flow control
 
@@ -1108,8 +1392,9 @@ A sender keeps two credits towards its peer: one for each data stream, starting 
   on a data stream adds it to that stream's credit, unless the stream's state says otherwise (§9.2).
 - A sender MAY send less than its credit allows. A sender without enough credit waits for a
   `WINDOW_UPDATE`.
-- `OPEN`, `CLOSE`, `WINDOW_UPDATE` and the frames on stream 0 are not flow-controlled: a sender with
-  no credit can still open, close or reset a stream, return credit, and answer a `PING`.
+- `OPEN`, `HEADERS`, `CLOSE`, `WINDOW_UPDATE` and the frames on stream 0 are not flow-controlled: a
+  sender with no credit can still open, close or reset a stream, send a response head, return
+  credit, and answer a `PING`.
 
 ### 10.3 Receiving
 
@@ -1209,7 +1494,8 @@ one of three places, which make up its **scope**:
 ### 12.2 The registry
 
 The registry for `jburrow.v1-draft.2`. The upgrade status is the HTTP status of a refused upgrade;
-the close code is the WebSocket close status that follows an `ERROR` (§8.6).
+the close code is the WebSocket close status that follows an `ERROR` (§8.6). A code marked "with
+`http`" is introduced by that capability, and is unknown in a session without it (§4.2).
 
 | Code | Scope | Meaning | Upgrade status | Close code |
 |---|---|---|---|---|
@@ -1228,13 +1514,16 @@ the close code is the WebSocket close status that follows an `ERROR` (§8.6).
 | `SESSION_LIMIT_EXCEEDED` | session | The authtoken's owner already has the most sessions the server allows. | | 1008 |
 | `PORT_UNAVAILABLE` | session | A requested `remotePort` is outside the server's range or in use. | | 1008 |
 | `PORT_POOL_EXHAUSTED` | session | The server has no free port left. | | 1008 |
+| `SUBDOMAIN_UNAVAILABLE` | session | With `http`. A requested `subdomain` is in use, or held for someone else (§8.4). | | 1008 |
+| `SUBDOMAIN_FORBIDDEN` | session | With `http`. A requested `subdomain` is reserved or blocked on this server (§8.4). | | 1008 |
 | `HEARTBEAT_TIMEOUT` | session | Nothing was received for `limits.idleTimeoutMs`. | | 1008 |
 | `PING_RATE_EXCEEDED` | session | The client sent `PING`s faster than the server allows. | | 1008 |
 | `INTERNAL_ERROR` | session, stream | A bug or an unexpected failure in the sender. | | 1011 |
 | `PEER_RESET` | stream | The visitor's or the local target's connection was reset. | | |
 | `LOCAL_SERVICE_UNREACHABLE` | stream | The client couldn't connect to the tunnel's local target. | | |
 | `STREAM_CLOSED` | stream | A frame arrived for a direction of the stream that was already closed. | | |
-| `CANCELLED` | stream | The stream was cut because its session is ending. | | |
+| `CANCELLED` | stream | The stream was cut because its session is ending, or because its side no longer needs it, such as the rest of a request body after its response (§9.7). | | |
+| `LOCAL_SERVICE_ERROR` | stream | With `http`. The local service's response wasn't valid HTTP/1.1, didn't fit a head, or its connection ended before the response did (§9.7). | | |
 
 ### 12.3 Rules
 
@@ -1260,15 +1549,17 @@ expensive.
 | 1 | The message is binary, and at least 10 bytes long. | `PROTOCOL_ERROR` for a text message, `FRAME_SIZE_ERROR` for a short one |
 | 2 | The reserved bit `R` is 0. | `PROTOCOL_ERROR` |
 | 3 | The length field equals the message length minus 10. | `FRAME_SIZE_ERROR` |
-| 4 | The type is assigned (§6), and the peer's role sends it: a server never receives `OPEN` or `GOAWAY`, a client never receives `HEADERS`. | `PROTOCOL_ERROR` |
+| 4 | The type is assigned (§6), and the peer's role sends it: a server never receives `OPEN` or `GOAWAY`, a client never receives `HEADERS`. A server receives `HEADERS` only in a session with `http`. | `PROTOCOL_ERROR` |
 | 5 | The stream id is 0 for a type sent on stream 0, and not 0 for a type sent on a data stream. `WINDOW_UPDATE` may be on either. | `PROTOCOL_ERROR` |
 | 6 | The length is allowed for the type (§6), for `CLOSE` given its `RST` bit. | `FRAME_SIZE_ERROR` |
 | 7 | Every flag bit the type doesn't define is 0. | `PROTOCOL_ERROR` |
-| 8 | The payload is valid for the type: a control payload follows §7 (`PROTOCOL_ERROR` for an encoding rule, `VALIDATION_FAILED` for a field rule); a `CLOSE` reset holds a known stream code (§6.7); a `WINDOW_UPDATE` increment is 1 to `2^31 - 1` (§6.6). `DATA`, `PING` and `PONG` payloads are opaque, and `HEADERS` and `GOAWAY` payloads are not parsed in this draft. | `PROTOCOL_ERROR`, or `VALIDATION_FAILED` |
+| 8 | The payload is valid for the type: a control payload, `HEADERS` included, follows §7 (`PROTOCOL_ERROR` for an encoding rule, `VALIDATION_FAILED` for a field rule); a `CLOSE` reset holds a known stream code (§6.7); a `WINDOW_UPDATE` increment is 1 to `2^31 - 1` (§6.6). A value or code a capability introduces is known only in a session with it (§4.2). `DATA`, `PING` and `PONG` payloads are opaque, and `GOAWAY` payloads are not parsed in this draft. | `PROTOCOL_ERROR`, or `VALIDATION_FAILED` |
 | 9 | The frame is allowed in the session's state (§8.2) and in its stream's state (§9.2, §9.3), and respects the limits the receiver announced (§8.5). A `DATA` frame fits the receiver's windows, and a `WINDOW_UPDATE` doesn't take a credit past `2^31 - 1` (§10.5). | The error those sections give |
+| 10 | On a stream of an HTTP tunnel, the frame keeps the exchange's rules: heads in order, and bodies as their heads frame them (§9.7). `HEADERS` is only on an HTTP tunnel's stream. | The error §9.7 gives |
 
-Steps 1 to 8 depend only on the bytes of the message and on which side receives it, and the
-conformance vectors cover them (§15). Step 9 depends on the session.
+Steps 1 to 8 depend only on the bytes of the message, on which side receives it, and on the
+capabilities of its session, and the conformance vectors cover them (§15). Steps 9 and 10 depend on
+the session and the stream.
 
 ## 14. Limits
 
@@ -1277,7 +1568,7 @@ conformance vectors cover them (§15). Step 9 depends on the session.
 | Frame header | 10 bytes | protocol |
 | WebSocket message | at most 65,546 bytes | protocol |
 | `DATA` payload | 1 to 65,536 bytes | protocol; `limits.maxFramePayload` may lower it for the client |
-| Control payload (`HELLO`, `REGISTER`, `OPEN`, `ERROR`), and `HEADERS` and `GOAWAY` in this draft | at most 16,384 bytes | protocol |
+| Control payload (`HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR`), and `GOAWAY` in this draft | at most 16,384 bytes | protocol |
 | `PING` and `PONG` payload | exactly 8 bytes | protocol |
 | `WINDOW_UPDATE` payload | exactly 4 bytes | protocol |
 | Stream window | 65,536 to `2^31 - 1` bytes | each side, in its `HELLO`; 256 KiB in the reference server and client |
@@ -1290,6 +1581,13 @@ conformance vectors cover them (§15). Step 9 depends on the session.
 | JSON number | 20 digits | protocol |
 | Capabilities in a `HELLO` | 32 | protocol |
 | Tunnels in a `REGISTER` and its reply | 32 | protocol; `limits.maxTunnels` lowers it |
+| HTTP method | 1 to 32 characters | protocol, with `http` |
+| HTTP request target | 1 to 4,096 characters | protocol, with `http` |
+| Header fields in a head | 256 | protocol, with `http` |
+| Header field name | 1 to 256 characters | protocol, with `http` |
+| Header field value | 0 to 4,096 characters | protocol, with `http`; the JSON string limit |
+| `content-length` | `2^53 - 1` | protocol, with `http` |
+| Subdomain | 3 to 63 characters | protocol, with `http` |
 | Stream ids per session | `2^31 - 1` | protocol |
 | Tunnels per session | `limits.maxTunnels` | server; 1 in the reference server |
 | Concurrent streams per session | `limits.maxConcurrentStreams` | server; 1 in the reference server |
@@ -1306,19 +1604,23 @@ The conformance vectors are in
 - `invalid.json`: messages that MUST be rejected, each with the code of the first broken rule in
   the order of §13.
 
-Each vector names the side that receives the message, since what a message means depends on it.
+Each vector names the side that receives the message, since what a message means depends on it,
+and the capabilities its session has negotiated, since a capability changes what a receiver knows.
+Many HTTP vectors come in pairs, one with `http` and one without.
 The format of the files, including the hex notation and the neutral description of a decoded frame,
 is in the [`README.md`](../jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/README.md)
 next to them.
 
 **An implementation conforms to the framing layer of `jburrow.v1-draft.2` when it passes every
-vector for each role it implements.** A client runs the vectors whose role is `client`, and a
-server those whose role is `server`.
+vector for each role it implements, and for each capability it implements.** A client runs the
+vectors whose role is `client`, and a server those whose role is `server`. An implementation
+without `http` runs the vectors without capabilities.
 
-The vectors cover steps 1 to 8 of §13. They don't cover the session and stream rules of step 9, the
-transport, liveness, flow control or registration, which need a running peer. JBurrow tests those
-against a scripted peer that can send any sequence of frames, valid or not, and that fails a test the
-moment the implementation sends `DATA` past one of the peer's windows.
+The vectors cover steps 1 to 8 of §13. They don't cover the session and stream rules of steps 9 and
+10, the transport, liveness, flow control or registration, which need a running peer. JBurrow tests
+those against a scripted peer that can send any sequence of frames, valid or not, and that fails a
+test the moment the implementation sends `DATA` past one of the peer's windows, or breaks a rule of
+an HTTP stream.
 
 The reference decoder is fuzzed continuously, and every input that ever found a bug is kept. A bug
 found that way, or in production, becomes a new vector.
@@ -1358,7 +1660,26 @@ how much a side sends, and how much it queues for its peer, remains its own choi
 
 **What a server logs.** A server SHOULD log codes, session and stream ids, sizes, durations and
 addresses. It MUST NOT log `DATA` payloads, the authtoken, or the text of a control payload it
-received; and an error message sent to a peer never quotes a payload (§7.1, §7.8).
+received; and an error message sent to a peer never quotes a payload (§7.1, §7.8). For an HTTP
+tunnel that includes the request target, whose path and query often carry tokens, and every header
+value.
+
+**No request smuggling across the tunnel.** Smuggling works when two HTTP parsers disagree on where
+a message ends. An HTTP stream never carries HTTP/1.1 framing: each side parses its own connection,
+and the other side frames the body again from `body` and the `DATA` it receives (§9.7). The
+connection-specific fields, `transfer-encoding` among them, can't appear in a head (§7.10), so a
+peer can't pass framing through as a header. A server should still refuse, on its own connection,
+a request whose framing is ambiguous (`content-length` with `transfer-encoding`, repeated or
+differing lengths, or a coding other than `chunked`) rather than choose an interpretation.
+
+**No header injection.** A value can't hold CR, LF or NUL (§7.10), and every receiver checks that
+before it builds anything from a head, so a field can't end a header line early and add a field or
+a message on the far side.
+
+**Cookies across tunnels.** Every HTTP tunnel of a server is a host under one domain. A tunnel that
+sets a cookie for the parent domain could set it for the server's own hosts and every other tunnel.
+The protocol carries `set-cookie` unchanged; a server should remove a `Domain` attribute that names
+anything other than the tunnel's own host before the response reaches the visitor.
 
 **The visitor's address goes to the client.** `OPEN` tells the client each visitor's IP address and
 port (§7.7), as other tunnelling services do for HTTP through `X-Forwarded-For`. A tunnel owner
@@ -1370,7 +1691,7 @@ Nothing in the protocol accepts one as proof of anything.
 ## 17. Reference implementation
 
 The `jburrow-protocol` module of the [JBurrow repository](../README.md) is a Java implementation of
-this document: the frame codec, the control payloads, and the stream, flow-control and liveness rules that both
-JBurrow's server and its client use. Every example in this document is checked against it, and it
+this document: the frame codec, the control payloads, and the stream, HTTP exchange, flow-control and liveness
+rules that both JBurrow's server and its client use. Every example in this document is checked against it, and it
 passes every conformance vector. It is not normative: where it and this document disagree, the
 document is right, and the difference is a bug to fix in one or the other.

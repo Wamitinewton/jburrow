@@ -86,6 +86,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line, ending with a `closed` event. Exit codes 2 to 6 tell usage errors, a refused authtoken, a
   lost connection, a refused registration and a protocol mismatch or violation (such as
   `FLOW_CONTROL_ERROR`) apart. The authtoken comes from `JBURROW_AUTHTOKEN` or `--authtoken`.
+- The `http` capability of protocol draft 2, specified in [`docs/protocol.md`](docs/protocol.md)
+  §4.2, §7.9, §7.10 and §9.7 with conformance vectors for sessions with and without it: HTTP
+  tunnels on the wire, one stream per request, the request head in `OPEN`, response heads in
+  `HEADERS`, both bodies as `DATA` without their HTTP/1.1 framing, and the codes
+  `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR`
+  ([ADR-0011](docs/adr/0011-http-tunnels.md)). A peer that doesn't offer `http` sees draft 2
+  unchanged; neither the server nor the client offers it yet. `jburrow-protocol` gains the heads as
+  validated records, `HttpExchangeRules` for the order and body length of an exchange, and a Jazzer
+  target for them.
 - A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
   x64 and runs a real tunnel with it, 50 concurrent streams on one session and then one 4 MiB
   stream, publishing nothing

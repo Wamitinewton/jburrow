@@ -7,6 +7,8 @@ import io.jburrow.protocol.adapter.netty.WebSocketFrameDecoder;
 import io.jburrow.protocol.adapter.netty.WebSocketFrameEncoder;
 import io.jburrow.protocol.control.ErrorBody;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.stream.HttpExchangeRules;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -57,11 +59,13 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SNIServerName;
@@ -87,6 +91,16 @@ import javax.net.ssl.SSLEngine;
  * and the {@code WINDOW_UPDATE}s it receives, so {@link #sendData} can send as a correct sender would, waiting for
  * credit. Every {@code DATA} it sends spends that credit, however it was sent.
  *
+ * <p>It negotiates capabilities as its {@code HELLO}s say: a listening peer has {@code http} once it sends a
+ * {@code HELLO} listing it, a connecting peer once the implementation's {@code HELLO} lists it and its own offered it.
+ * Until then its codec refuses {@code HEADERS} and everything else {@code http} introduces, in both directions, as a
+ * correct peer would; {@link #sendRaw} still sends anything.
+ *
+ * <p>It also polices HTTP streams. It holds an {@link HttpExchangeRules} for each stream whose {@code OPEN} carried a
+ * request, and the first frame from the implementation that breaks one of the stream's rules (request {@code DATA} past
+ * its {@code content-length}, a second final {@code HEADERS}, a response that ends short) fails the test as an overrun
+ * does. A head that breaks a field rule never gets that far: the codec refuses it, and the next {@code expect} fails.
+ *
  * <p>Each peer has its own event loop. A listening peer accepts one connection and refuses any after it.
  */
 public final class ScriptedPeer implements AutoCloseable {
@@ -109,10 +123,15 @@ public final class ScriptedPeer implements AutoCloseable {
     private final CompletableFuture<TlsHello> tlsHello = new CompletableFuture<>();
     private final BlockingQueue<Object> received = new LinkedBlockingQueue<>();
     private final AtomicBoolean closeRecorded = new AtomicBoolean();
+    private final FrameCodec.Role role;
     private final Ledger ledger;
     private final SendCredit sendCredit;
-    private volatile AssertionError overrun;
-    private volatile boolean overrunReported;
+    private final Map<Integer, HttpExchangeRules> exchanges = new ConcurrentHashMap<>();
+    private final Set<Integer> tcpStreams = ConcurrentHashMap.newKeySet();
+    private volatile boolean httpOffered;
+    private volatile boolean http;
+    private volatile AssertionError violation;
+    private volatile boolean violationReported;
     private volatile boolean autoGrant;
     private volatile boolean ignoreWindowUpdates;
     private volatile boolean silenced;
@@ -126,8 +145,8 @@ public final class ScriptedPeer implements AutoCloseable {
     /** The WebSocket connection ended, with the peer's close status, or 1006 if it closed without one. */
     private record Closed(WebSocketCloseStatus status) {}
 
-    /** Wakes a test waiting in {@link #expect} once the implementation has overrun a window. */
-    private record Overrun() {}
+    /** Wakes a test waiting in {@link #expect} once the implementation has broken a rule this peer polices. */
+    private record Violation() {}
 
     /**
      * What a TLS client asked for in its ClientHello, as a peer from {@link #listenTls} saw it.
@@ -137,7 +156,8 @@ public final class ScriptedPeer implements AutoCloseable {
      */
     public record TlsHello(List<String> serverNames, List<String> applicationProtocols) {}
 
-    private ScriptedPeer(Windows windows, Windows peerWindows) {
+    private ScriptedPeer(FrameCodec.Role role, Windows windows, Windows peerWindows) {
+        this.role = role;
         this.group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         this.ledger = new Ledger(windows);
         this.sendCredit = new SendCredit(peerWindows);
@@ -148,8 +168,8 @@ public final class ScriptedPeer implements AutoCloseable {
         if (!"ws".equals(uri.getScheme())) {
             throw new IllegalArgumentException("A scripted client speaks ws:// only: " + uri);
         }
-        ScriptedPeer peer = new ScriptedPeer(CLIENT_WINDOWS, SERVER_WINDOWS);
-        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, ControlJson.create());
+        ScriptedPeer peer = new ScriptedPeer(FrameCodec.Role.CLIENT, CLIENT_WINDOWS, SERVER_WINDOWS);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, ControlJson.create(), peer::httpNegotiated);
         WebSocketClientProtocolConfig config = WebSocketClientProtocolConfig.newBuilder()
                 .webSocketUri(uri)
                 .subprotocol(subprotocol)
@@ -202,8 +222,8 @@ public final class ScriptedPeer implements AutoCloseable {
     }
 
     private static ScriptedPeer listen(int port, String subprotocol, SslContext tls) {
-        ScriptedPeer peer = new ScriptedPeer(SERVER_WINDOWS, CLIENT_WINDOWS);
-        FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create());
+        ScriptedPeer peer = new ScriptedPeer(FrameCodec.Role.SERVER, SERVER_WINDOWS, CLIENT_WINDOWS);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create(), peer::httpNegotiated);
         WebSocketServerProtocolConfig config = WebSocketServerProtocolConfig.newBuilder()
                 .websocketPath(CONNECT_PATH)
                 .subprotocols(subprotocol)
@@ -248,25 +268,46 @@ public final class ScriptedPeer implements AutoCloseable {
         return URI.create("ws://" + InetAddress.getLoopbackAddress().getHostAddress() + ":" + port() + CONNECT_PATH);
     }
 
+    /** Whether this session has the {@code http} capability, by the {@code HELLO}s sent and received so far. */
+    public boolean httpNegotiated() {
+        return http;
+    }
+
     /**
      * Sends {@code frame} through the real codec. Takes over the frame's buffer. The first {@code HELLO} sets the
-     * windows this peer polices; a {@code WINDOW_UPDATE} sent this way grants nothing, so a test can send one the
-     * implementation must refuse without changing the credit the peer expects it to hold.
+     * windows this peer polices and the capabilities it offers or answers with; a {@code WINDOW_UPDATE} sent this way
+     * grants nothing, so a test can send one the implementation must refuse without changing the credit the peer
+     * expects it to hold. An {@code OPEN} with a request starts policing that HTTP stream's response.
      */
     public void send(Frame frame) {
         Objects.requireNonNull(frame, "frame");
         Channel channel;
         try {
-            failOnOverrun();
+            failOnViolation();
             channel = awaitConnection();
         } catch (RuntimeException | AssertionError e) {
             frame.release();
             throw e;
         }
         switch (frame) {
-            case Frame.Hello hello -> ledger.announce(hello.message().windows());
-            case Frame.ServerHello hello -> ledger.announce(hello.message().windows());
-            case Frame.Close close when close.reset().isPresent() -> ledger.finish(close.streamId());
+            case Frame.Hello hello -> {
+                ledger.announce(hello.message().windows());
+                httpOffered = offersHttp(hello.message().capabilities());
+            }
+            case Frame.ServerHello hello -> {
+                ledger.announce(hello.message().windows());
+                http = offersHttp(hello.message().capabilities());
+            }
+            case Frame.Open open
+            when open.message().request() != null ->
+                exchanges.put(
+                        open.streamId(), new HttpExchangeRules(open.message().request()));
+            case Frame.Open open -> tcpStreams.add(open.streamId());
+            case Frame.Close close
+            when close.reset().isPresent() -> {
+                ledger.finish(close.streamId());
+                exchanges.remove(close.streamId());
+            }
             case Frame.Data data ->
                 sendCredit.spend(data.streamId(), data.payload().readableBytes());
             default -> {}
@@ -280,7 +321,7 @@ public final class ScriptedPeer implements AutoCloseable {
      */
     public void sendData(int streamId, ByteBuf payload, Duration timeout) {
         try {
-            failOnOverrun();
+            failOnViolation();
             sendCredit.await(streamId, payload.readableBytes(), timeout);
         } catch (RuntimeException | AssertionError e) {
             payload.release();
@@ -326,7 +367,7 @@ public final class ScriptedPeer implements AutoCloseable {
      * released at once, so credit already owed goes back now.
      */
     public void autoGrant() {
-        failOnOverrun();
+        failOnViolation();
         autoGrant = true;
         Channel channel = awaitConnection();
         for (Frame.WindowUpdate update : ledger.due()) {
@@ -360,7 +401,7 @@ public final class ScriptedPeer implements AutoCloseable {
     }
 
     private void sendGrant(Frame.WindowUpdate update) {
-        failOnOverrun();
+        failOnViolation();
         Channel channel = awaitConnection();
         ledger.grant(update.streamId(), update.increment());
         write(channel, update);
@@ -369,7 +410,7 @@ public final class ScriptedPeer implements AutoCloseable {
     /** Sends arbitrary bytes, in the conformance vectors' hex notation, as one binary WebSocket message. */
     public void sendRaw(String hex) {
         byte[] bytes = Hex.decode(hex);
-        failOnOverrun();
+        failOnViolation();
         Channel channel = awaitConnection();
         write(
                 channel,
@@ -377,7 +418,7 @@ public final class ScriptedPeer implements AutoCloseable {
     }
 
     public void sendText(String text) {
-        failOnOverrun();
+        failOnViolation();
         write(awaitConnection(), new TextWebSocketFrame(text));
     }
 
@@ -470,8 +511,8 @@ public final class ScriptedPeer implements AutoCloseable {
         for (Object event = received.poll(); event != null; event = received.poll()) {
             ReferenceCountUtil.release(event);
         }
-        if (!overrunReported) {
-            failOnOverrun();
+        if (!violationReported) {
+            failOnViolation();
         }
     }
 
@@ -538,7 +579,7 @@ public final class ScriptedPeer implements AutoCloseable {
     }
 
     private <T> T next(Class<T> type, Duration timeout) {
-        failOnOverrun();
+        failOnViolation();
         Object event;
         try {
             event = received.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -549,8 +590,8 @@ public final class ScriptedPeer implements AutoCloseable {
         if (event == null) {
             throw new AssertionError("Expected " + type.getSimpleName() + " within " + timeout + ", got nothing");
         }
-        if (event instanceof Overrun) {
-            failOnOverrun();
+        if (event instanceof Violation) {
+            failOnViolation();
         }
         if (!type.isInstance(event)) {
             String description = describe(event);
@@ -570,28 +611,77 @@ public final class ScriptedPeer implements AutoCloseable {
         };
     }
 
-    private void failOnOverrun() {
-        AssertionError failure = overrun;
+    private void failOnViolation() {
+        AssertionError failure = violation;
         if (failure != null) {
-            overrunReported = true;
+            violationReported = true;
             throw failure;
         }
     }
 
+    /** Records the first rule the implementation broke; the next call on the peer throws it. */
+    private void violate(String message) {
+        if (violation == null) {
+            violation = new AssertionError(message);
+            received.add(new Violation());
+        }
+    }
+
     private void onData(ChannelHandlerContext ctx, Frame.Data data) {
-        String violation = ledger.receive(data.streamId(), data.payload().readableBytes());
-        if (violation != null) {
+        String overrun = ledger.receive(data.streamId(), data.payload().readableBytes());
+        if (overrun != null) {
             data.release();
-            if (overrun == null) {
-                overrun = new AssertionError(violation);
-                received.add(new Overrun());
-            }
+            violate(overrun);
             return;
         }
+        int bytes = data.payload().readableBytes();
+        checkExchange(data.streamId(), rules -> {
+            if (role == FrameCodec.Role.CLIENT) {
+                rules.onRequestData(bytes);
+            } else {
+                rules.onResponseData(bytes);
+            }
+        });
         received.add(data);
         if (autoGrant) {
             ledger.due().forEach(ctx::writeAndFlush);
         }
+    }
+
+    private void onClose(Frame.Close close) {
+        if (close.reset().isPresent()) {
+            exchanges.remove(close.streamId());
+            return;
+        }
+        checkExchange(close.streamId(), rules -> {
+            if (role == FrameCodec.Role.CLIENT) {
+                rules.onRequestEnd();
+            } else {
+                rules.onResponseEnd();
+            }
+        });
+    }
+
+    /**
+     * Applies a frame from the implementation to its stream's HTTP rules, if the stream is an HTTP stream. The rules
+     * throw {@link IllegalStateException} for the request side, which this peer receives as a client, and
+     * {@link ProtocolException} for the response side, which it receives as a server; either way the implementation
+     * broke the rule.
+     */
+    private void checkExchange(int streamId, Consumer<HttpExchangeRules> frame) {
+        HttpExchangeRules rules = exchanges.get(streamId);
+        if (rules == null) {
+            return;
+        }
+        try {
+            frame.accept(rules);
+        } catch (IllegalStateException | ProtocolException broken) {
+            violate("The implementation broke an HTTP stream rule on stream " + streamId + ": " + broken.getMessage());
+        }
+    }
+
+    private static boolean offersHttp(List<String> capabilities) {
+        return capabilities.contains(Capability.HTTP.wireName());
     }
 
     private void recordClosed(WebSocketCloseStatus status) {
@@ -622,7 +712,24 @@ public final class ScriptedPeer implements AutoCloseable {
                 case Frame.Data data -> onData(ctx, data);
                 case Frame.Close close -> {
                     ledger.finish(close.streamId());
+                    onClose(close);
                     received.add(close);
+                }
+                case Frame.Open open -> {
+                    if (open.message().request() != null) {
+                        exchanges.put(
+                                open.streamId(),
+                                new HttpExchangeRules(open.message().request()));
+                    }
+                    received.add(open);
+                }
+                case Frame.Headers headers -> {
+                    if (tcpStreams.contains(headers.streamId())) {
+                        violate("The implementation sent HEADERS on stream " + headers.streamId()
+                                + ", a TCP tunnel's stream");
+                    }
+                    checkExchange(headers.streamId(), rules -> rules.onResponseHead(headers.head()));
+                    received.add(headers);
                 }
                 case Frame.Hello hello -> {
                     sendCredit.announce(hello.message().windows());
@@ -630,6 +737,7 @@ public final class ScriptedPeer implements AutoCloseable {
                 }
                 case Frame.ServerHello hello -> {
                     sendCredit.announce(hello.message().windows());
+                    http = httpOffered && offersHttp(hello.message().capabilities());
                     received.add(hello);
                 }
                 case Frame.WindowUpdate update -> {

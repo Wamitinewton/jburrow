@@ -3,6 +3,9 @@ package io.jburrow.protocol.adapter.netty;
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.HttpResponseHead;
+import io.jburrow.protocol.control.TunnelKind;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameFlags;
@@ -16,18 +19,28 @@ import io.netty.buffer.ByteBufInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Turns one binary WebSocket message into a {@link Frame} and back. The only code that reads untrusted bytes as
  * frames.
  *
  * <p>Decoding applies receiver rules 1 to 8 of {@code docs/protocol.md} §13, in that order, and stops at the first
- * failure with the {@link ProtocolException} the specification names. Rule 9, whether the frame fits the session's
- * state, is the session's. The direction rules of §6 are checked with rule 4: a peer that sends a type its
- * role never sends fails here, before any session sees it.
+ * failure with the {@link ProtocolException} the specification names. Rules 9 and 10, whether the frame fits the
+ * session's and the stream's state, are the session's. The direction rules of §6 are checked with rule 4: a peer that
+ * sends a type its role never sends fails here, before any session sees it.
  *
- * <p>Stateless and thread-safe. Each side holds one instance for its {@link Role}.
+ * <p>What the {@code http} capability introduces (§4.2) is decoded and encoded only while {@code httpEnabled} says the
+ * session has it: {@code HEADERS}, the {@code "http"} tunnel kind and the capability's error codes. Without it, each is
+ * refused as the draft refuses anything unknown. Which tunnel a stream belongs to, and every ordering rule of an HTTP
+ * stream, is the session's, not the codec's.
+ *
+ * <p>Thread-safe. A codec built without {@code httpEnabled} keeps no state and may be shared by every session of its
+ * {@link Role}; one built with it belongs to the session whose capabilities it reads.
  */
 public final class FrameCodec {
 
@@ -44,10 +57,21 @@ public final class FrameCodec {
 
     private final Role localRole;
     private final ControlJson json;
+    private final BooleanSupplier httpEnabled;
 
+    /** A codec for a session without capabilities. */
     public FrameCodec(Role localRole, ControlJson json) {
+        this(localRole, json, () -> false);
+    }
+
+    /**
+     * A codec for one session. {@code httpEnabled} answers whether the session has negotiated {@code http}: false
+     * until the {@code HELLO}s are exchanged, then fixed. It is read on the thread that decodes or encodes.
+     */
+    public FrameCodec(Role localRole, ControlJson json, BooleanSupplier httpEnabled) {
         this.localRole = Objects.requireNonNull(localRole, "localRole");
         this.json = Objects.requireNonNull(json, "json");
+        this.httpEnabled = Objects.requireNonNull(httpEnabled, "httpEnabled");
     }
 
     public Role localRole() {
@@ -70,6 +94,7 @@ public final class FrameCodec {
         int length = requireLengthMatchesMessage(message.getUnsignedInt(base + LENGTH_OFFSET), messageLength);
         FrameType type = requireAssignedType(message.getUnsignedByte(base + TYPE_OFFSET));
         requireSentByPeer(type);
+        requireTypeNegotiated(type);
         int streamId = requireStreamForType(type, message.getInt(base + STREAM_ID_OFFSET));
         int flags = message.getUnsignedByte(base + FLAGS_OFFSET);
         requireLengthForType(type, flags, length);
@@ -82,14 +107,16 @@ public final class FrameCodec {
      * {@link Frame.Data} becomes a component of the returned buffer, without a copy, or is released if encoding
      * fails.
      *
-     * @throws IllegalArgumentException if this side never sends the frame, or a {@link Frame.Data} payload is empty or
-     *     over 65,536 bytes: a bug in the caller, not something a peer did
+     * @throws IllegalArgumentException if this side never sends the frame, the frame needs a capability the session
+     *     hasn't negotiated, or a {@link Frame.Data} payload is empty or over 65,536 bytes: a bug in the caller, not
+     *     something a peer did
      */
     public ByteBuf encode(Frame frame, ByteBufAllocator alloc) {
         Objects.requireNonNull(frame, "frame");
         try {
             Objects.requireNonNull(alloc, "alloc");
             requireSentByUs(frame);
+            requireNegotiatedToSend(frame);
             return switch (frame) {
                 case Frame.Data data -> encodeData(data, alloc);
                 case Frame.Hello hello -> encodeControl(hello, hello.message(), alloc);
@@ -97,6 +124,7 @@ public final class FrameCodec {
                 case Frame.Register register -> encodeControl(register, register.message(), alloc);
                 case Frame.Registered registered -> encodeControl(registered, registered.message(), alloc);
                 case Frame.Open open -> encodeControl(open, open.message(), alloc);
+                case Frame.Headers headers -> encodeControl(headers, headers.head(), alloc);
                 case Frame.Error error -> encodeControl(error, error.body(), alloc);
                 case Frame.WindowUpdate update ->
                     header(alloc, update, 0, FrameLimits.WINDOW_UPDATE_PAYLOAD_LENGTH)
@@ -151,6 +179,13 @@ public final class FrameCodec {
         }
     }
 
+    // Rule 4, the capability half: HEADERS is unknown to a session without http.
+    private void requireTypeNegotiated(FrameType type) {
+        if (type == FrameType.HEADERS && !httpEnabled.getAsBoolean()) {
+            throw protocolError("HEADERS is not allowed in a session without the http capability");
+        }
+    }
+
     // Rule 5.
     private static int requireStreamForType(FrameType type, int streamId) {
         if (!type.allowsStream(streamId)) {
@@ -187,13 +222,17 @@ public final class FrameCodec {
                                 readJson(message, offset, length, io.jburrow.protocol.control.ServerHello.class));
             case REGISTER ->
                 localRole == Role.SERVER
-                        ? new Frame.Register(
-                                readJson(message, offset, length, io.jburrow.protocol.control.Register.class))
-                        : new Frame.Registered(
-                                readJson(message, offset, length, io.jburrow.protocol.control.Registered.class));
+                        ? new Frame.Register(requireKindsNegotiated(
+                                readJson(message, offset, length, io.jburrow.protocol.control.Register.class)))
+                        : new Frame.Registered(requireKindsNegotiated(
+                                readJson(message, offset, length, io.jburrow.protocol.control.Registered.class)));
             case OPEN ->
-                new Frame.Open(streamId, readJson(message, offset, length, io.jburrow.protocol.control.Open.class));
-            case ERROR -> new Frame.Error(readJson(message, offset, length, ErrorBody.class));
+                new Frame.Open(
+                        streamId,
+                        requireKindsNegotiated(
+                                readJson(message, offset, length, io.jburrow.protocol.control.Open.class)));
+            case HEADERS -> new Frame.Headers(streamId, readJson(message, offset, length, HttpResponseHead.class));
+            case ERROR -> new Frame.Error(requireCodeNegotiated(readJson(message, offset, length, ErrorBody.class)));
             case WINDOW_UPDATE -> new Frame.WindowUpdate(streamId, readIncrement(message.getUnsignedInt(offset)));
             case CLOSE ->
                 (flags & FrameFlags.RST) == 0
@@ -201,7 +240,7 @@ public final class FrameCodec {
                         : Frame.Close.reset(streamId, readResetCode(message, offset, length));
             case PING -> new Frame.Ping(message.getLong(offset));
             case PONG -> new Frame.Pong(message.getLong(offset));
-            case HEADERS, GOAWAY -> new Frame.Unsupported(streamId, type);
+            case GOAWAY -> new Frame.Unsupported(streamId, type);
         };
     }
 
@@ -223,15 +262,17 @@ public final class FrameCodec {
 
     /**
      * Checks every byte before building a string from them, so a code is only ever made of {@code [A-Z0-9_]}. A
-     * code the registry doesn't know, or one that isn't a stream error, is a broken rule: a peer may not invent codes.
+     * code the registry doesn't know, one the session's capabilities don't include, or one that isn't a stream error,
+     * is a broken rule: a peer may not invent codes.
      */
-    private static ErrorCode readResetCode(ByteBuf message, int offset, int length) {
+    private ErrorCode readResetCode(ByteBuf message, int offset, int length) {
         for (int i = offset; i < offset + length; i++) {
             if (!isErrorCodeByte(message.getByte(i))) {
                 throw protocolError("reset code must be [A-Z0-9_] only");
             }
         }
         ErrorCode code = ErrorCode.fromCode(message.toString(offset, length, StandardCharsets.US_ASCII))
+                .filter(known -> negotiated(known.capability()))
                 .orElseThrow(() -> protocolError("reset code is not in the error code registry"));
         if (!code.scopes().contains(ErrorScope.STREAM)) {
             throw protocolError("reset code " + code + " is not a stream error");
@@ -241,6 +282,80 @@ public final class FrameCodec {
 
     private static boolean isErrorCodeByte(byte b) {
         return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_';
+    }
+
+    /** Without its capability a tunnel kind is as unknown as any other value the field doesn't have: §4.3. */
+    private <T extends ControlMessage> T requireKindsNegotiated(T message) {
+        List<TunnelKind> kinds = kinds(message);
+        for (int i = 0; i < kinds.size(); i++) {
+            if (!negotiated(kinds.get(i).capability())) {
+                String field = message instanceof io.jburrow.protocol.control.Open ? "kind" : "tunnels[" + i + "].kind";
+                List<String> known = Arrays.stream(TunnelKind.values())
+                        .filter(kind -> negotiated(kind.capability()))
+                        .map(TunnelKind::wireName)
+                        .toList();
+                throw ProtocolException.session(ErrorCode.VALIDATION_FAILED, field + " must be one of " + known);
+            }
+        }
+        return message;
+    }
+
+    /** Without its capability an error code is as unknown as one the registry doesn't have: §4.3. */
+    private ErrorBody requireCodeNegotiated(ErrorBody body) {
+        if (!negotiated(body.code().capability())) {
+            throw ProtocolException.session(ErrorCode.VALIDATION_FAILED, "code must be a known error code");
+        }
+        return body;
+    }
+
+    private void requireNegotiatedToSend(Frame frame) {
+        Optional<Capability> missing =
+                switch (frame) {
+                    case Frame.Headers ignored -> missing(Optional.of(Capability.HTTP));
+                    case Frame.Register register -> missingForKinds(register.message());
+                    case Frame.Registered registered -> missingForKinds(registered.message());
+                    case Frame.Open open -> missingForKinds(open.message());
+                    case Frame.Error error -> missing(error.body().code().capability());
+                    case Frame.Close close -> close.reset().flatMap(code -> missing(code.capability()));
+                    default -> Optional.empty();
+                };
+        missing.ifPresent(capability -> {
+            throw new IllegalArgumentException(frame.getClass().getSimpleName() + " needs the " + capability.wireName()
+                    + " capability, which this session hasn't negotiated");
+        });
+    }
+
+    private Optional<Capability> missingForKinds(ControlMessage message) {
+        return kinds(message).stream()
+                .map(kind -> missing(kind.capability()))
+                .flatMap(Optional::stream)
+                .findFirst();
+    }
+
+    private static List<TunnelKind> kinds(ControlMessage message) {
+        return switch (message) {
+            case io.jburrow.protocol.control.Register register ->
+                register.tunnels().stream()
+                        .map(io.jburrow.protocol.control.TunnelRequest::kind)
+                        .toList();
+            case io.jburrow.protocol.control.Registered registered ->
+                registered.tunnels().stream()
+                        .map(io.jburrow.protocol.control.RegisteredTunnel::kind)
+                        .toList();
+            case io.jburrow.protocol.control.Open open -> List.of(open.kind());
+            default -> List.of();
+        };
+    }
+
+    private boolean negotiated(Optional<Capability> capability) {
+        return missing(capability).isEmpty();
+    }
+
+    /** {@code capability} if the session hasn't negotiated it, otherwise empty. */
+    private Optional<Capability> missing(Optional<Capability> capability) {
+        return capability.filter(needed -> switch (needed) {
+            case HTTP -> !httpEnabled.getAsBoolean();
+        });
     }
 
     private void requireSentByUs(Frame frame) {

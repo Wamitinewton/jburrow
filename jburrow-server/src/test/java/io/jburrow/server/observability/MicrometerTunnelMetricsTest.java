@@ -116,6 +116,7 @@ class MicrometerTunnelMetricsTest {
                         .count())
                 .isOne();
         assertThat(registry.get("jburrow.tunnel.bytes")
+                        .tag("kind", "tcp")
                         .tag("direction", "inbound")
                         .counter()
                         .count())

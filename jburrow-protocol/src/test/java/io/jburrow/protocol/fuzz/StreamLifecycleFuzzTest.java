@@ -21,7 +21,7 @@ import io.jburrow.protocol.wire.ErrorCode;
  * Drives one {@link StreamLifecycle} through an arbitrary sequence of events.
  *
  * <p>The property: an event from the peer never throws; once {@code CLOSED}, the stream stays {@code CLOSED}; and every
- * outcome is the one the table in {@code docs/protocol.md} §9.2 gives for the state the stream was in. Events from this
+ * outcome is the one the table in {@code docs/protocol.md} §9.2 gives, {@code HEADERS} following {@code DATA}'s column, for the state the stream was in. Events from this
  * side are only applied where the table allows them, since sending one it forbids is a bug in the caller, which
  * {@code StreamLifecycleTest} covers. Without them a stream could never reach {@code HALF_CLOSED_LOCAL}.
  */
@@ -52,21 +52,27 @@ class StreamLifecycleFuzzTest {
         return switch (state) {
             case OPEN ->
                 switch (event) {
-                    case DATA_RECEIVED, DATA_SENT, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> new Accept(OPEN);
+                    case DATA_RECEIVED,
+                            HEADERS_RECEIVED,
+                            DATA_SENT,
+                            HEADERS_SENT,
+                            WINDOW_UPDATE_RECEIVED,
+                            WINDOW_UPDATE_SENT -> new Accept(OPEN);
                     case CLOSE_RECEIVED -> new Accept(HALF_CLOSED_REMOTE);
                     case CLOSE_SENT -> new Accept(HALF_CLOSED_LOCAL);
                     case RST_RECEIVED, RST_SENT -> new Accept(CLOSED);
                 };
             case HALF_CLOSED_LOCAL ->
                 switch (event) {
-                    case DATA_RECEIVED, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT -> new Accept(HALF_CLOSED_LOCAL);
+                    case DATA_RECEIVED, HEADERS_RECEIVED, WINDOW_UPDATE_RECEIVED, WINDOW_UPDATE_SENT ->
+                        new Accept(HALF_CLOSED_LOCAL);
                     case CLOSE_RECEIVED, RST_RECEIVED, RST_SENT -> new Accept(CLOSED);
-                    case DATA_SENT, CLOSE_SENT -> null;
+                    case DATA_SENT, HEADERS_SENT, CLOSE_SENT -> null;
                 };
             case HALF_CLOSED_REMOTE ->
                 switch (event) {
-                    case DATA_RECEIVED, CLOSE_RECEIVED -> new ResetStream(ErrorCode.STREAM_CLOSED);
-                    case DATA_SENT, WINDOW_UPDATE_RECEIVED -> new Accept(HALF_CLOSED_REMOTE);
+                    case DATA_RECEIVED, HEADERS_RECEIVED, CLOSE_RECEIVED -> new ResetStream(ErrorCode.STREAM_CLOSED);
+                    case DATA_SENT, HEADERS_SENT, WINDOW_UPDATE_RECEIVED -> new Accept(HALF_CLOSED_REMOTE);
                     case RST_RECEIVED, CLOSE_SENT, RST_SENT -> new Accept(CLOSED);
                     case WINDOW_UPDATE_SENT -> null;
                 };

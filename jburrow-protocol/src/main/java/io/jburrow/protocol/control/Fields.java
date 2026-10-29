@@ -34,6 +34,22 @@ final class Fields {
     static final Pattern CAPABILITY = Pattern.compile("[a-z0-9.-]{1,64}");
     static final Pattern TUNNEL_REF = Pattern.compile("[a-z0-9][a-z0-9-]{0,31}");
 
+    /** A label under the server's HTTP domain: 3 to 63 characters, no leading, trailing or doubled hyphen. */
+    static final Pattern SUBDOMAIN = Pattern.compile("(?!.*--)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]");
+
+    /** An RFC 9110 token, the shape of a method; case is kept. */
+    static final Pattern METHOD = Pattern.compile("[A-Za-z0-9!#$%&'*+.^_`|~-]{1,32}");
+
+    /** An RFC 9110 token in lower case, the shape of a header field name on the wire. */
+    static final Pattern HEADER_NAME = Pattern.compile("[a-z0-9!#$%&'*+.^_`|~-]{1,256}");
+
+    /** Origin form: a path and optional query of visible ASCII, sent as received. */
+    static final Pattern ORIGIN_FORM = Pattern.compile("/[\\x21-\\x7E]{0,4095}");
+
+    static final int MAX_HEADER_VALUE_LENGTH = 4_096;
+    static final int MAX_CONTENT_LENGTH_DIGITS = 16;
+    static final long MAX_CONTENT_LENGTH = (1L << 53) - 1;
+
     private static final String OCTET = "(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
     private static final Pattern IPV4 = Pattern.compile(OCTET + "(?:\\." + OCTET + "){3}");
     private static final Pattern HEX_GROUP = Pattern.compile("[0-9A-Fa-f]{1,4}");
@@ -115,6 +131,41 @@ final class Fields {
                 throw invalid(field + "[" + i + "]" + keyField, "must be unique");
             }
         }
+    }
+
+    static String optionalSubdomain(String value, String field) {
+        if (value != null && !SUBDOMAIN.matcher(value).matches()) {
+            throw invalid(
+                    field,
+                    "must be 3 to 63 characters of [a-z0-9-], starting and ending with a letter or digit, without --");
+        }
+        return value;
+    }
+
+    /**
+     * A header field value: up to 4,096 characters, each a tab, visible ASCII, a space, or U+0080 to U+00FF standing
+     * for the byte of the same number, with no whitespace at either end. CR, LF and NUL can't occur, so a value can
+     * never end a header line early on either side's own connection.
+     */
+    static String headerValue(String value, String field) {
+        int length = required(value, field).length();
+        if (length > MAX_HEADER_VALUE_LENGTH) {
+            throw invalid(field, "must be at most " + MAX_HEADER_VALUE_LENGTH + " characters");
+        }
+        for (int i = 0; i < length; i++) {
+            char c = value.charAt(i);
+            if (!(c == '\t' || (c >= 0x20 && c <= 0x7E) || (c >= 0x80 && c <= 0xFF))) {
+                throw invalid(field, "must hold only HTAB, U+0020 to U+007E and U+0080 to U+00FF");
+            }
+        }
+        if (length > 0 && (isWhitespace(value.charAt(0)) || isWhitespace(value.charAt(length - 1)))) {
+            throw invalid(field, "must not start or end with whitespace");
+        }
+        return value;
+    }
+
+    private static boolean isWhitespace(char c) {
+        return c == ' ' || c == '\t';
     }
 
     /**

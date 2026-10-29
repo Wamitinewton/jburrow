@@ -7,9 +7,13 @@ import static org.junit.jupiter.params.provider.Arguments.argumentSet;
 
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.adapter.netty.FrameCodec.Role;
+import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.HttpRequestHead;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
@@ -66,7 +70,7 @@ class ProtocolDocumentExamplesTest {
     private static final Pattern FENCE = Pattern.compile("```(\\w*)\\n(.*?)```", Pattern.DOTALL);
     private static final int TYPE_OFFSET = 4;
     private static final Set<FrameType> CONTROL_PAYLOADS =
-            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.ERROR);
+            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.ERROR);
     private static final Pattern HEX_BYTE = Pattern.compile("[0-9a-f]{2}");
 
     private static final ByteBufAllocator ALLOC = ByteBufAllocator.DEFAULT;
@@ -75,6 +79,8 @@ class ProtocolDocumentExamplesTest {
 
     private static final UUID SESSION_ID = UUID.fromString("0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a");
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
+    private static final String TOKEN = "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00";
+    private static final String HTTP_HOST = "quiet-otter-4f2a.example.dev";
 
     /** What each example in the document must be, and the side that sends it. Data frames are built per use. */
     private static final Map<String, Expected> EXPECTED = expected();
@@ -115,15 +121,59 @@ class ProtocolDocumentExamplesTest {
                 "register-request",
                 new Expected(
                         CLIENT,
+                        () -> new Frame.Register(
+                                new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417))))));
+        examples.put(
+                "register-request-http",
+                new Expected(
+                        CLIENT,
                         () -> new Frame.Register(new Register(
-                                "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00",
-                                List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417))))));
+                                TOKEN, List.of(new TunnelRequest("default", TunnelKind.HTTP, "myapp", null))))));
         examples.put(
                 "register-reply",
                 new Expected(
                         SERVER,
                         () -> new Frame.Registered(new Registered(List.of(RegisteredTunnel.of(
                                 "default", TUNNEL_ID, TunnelKind.TCP, "tcp.example.dev", 20_417))))));
+        examples.put(
+                "register-reply-http",
+                new Expected(
+                        SERVER,
+                        () -> new Frame.Registered(new Registered(
+                                List.of(RegisteredTunnel.http("default", TUNNEL_ID, "https", HTTP_HOST, 443))))));
+        examples.put(
+                "open-http",
+                new Expected(
+                        SERVER,
+                        () -> new Frame.Open(
+                                1,
+                                new Open(
+                                        TUNNEL_ID,
+                                        TunnelKind.HTTP,
+                                        new RemoteAddress("203.0.113.9", 51_234),
+                                        new HttpRequestHead(
+                                                "POST",
+                                                "/api/items?page=2",
+                                                HeaderFields.of(
+                                                        "host", HTTP_HOST,
+                                                        "content-type", "application/json",
+                                                        "content-length", "27",
+                                                        "x-forwarded-for", "203.0.113.9",
+                                                        "x-forwarded-proto", "https",
+                                                        "x-forwarded-host", HTTP_HOST,
+                                                        "via", "1.1 jburrow"),
+                                                BodyFraming.LENGTH)))));
+        examples.put(
+                "headers",
+                new Expected(
+                        CLIENT,
+                        () -> new Frame.Headers(
+                                1,
+                                new HttpResponseHead(
+                                        200,
+                                        HeaderFields.of(
+                                                "content-type", "text/html; charset=utf-8", "content-length", "1043"),
+                                        BodyFraming.LENGTH))));
         examples.put(
                 "open",
                 new Expected(
@@ -253,8 +303,9 @@ class ProtocolDocumentExamplesTest {
         throw new IllegalStateException("No " + DOCUMENT + " in " + start + " or above it");
     }
 
+    /** Every example is in a session with {@code http}, which leaves the examples of draft 2 itself unchanged. */
     private static FrameCodec codec(Role role) {
-        return new FrameCodec(role, JSON);
+        return new FrameCodec(role, JSON, () -> true);
     }
 
     private static Role receiverOf(Role sender) {

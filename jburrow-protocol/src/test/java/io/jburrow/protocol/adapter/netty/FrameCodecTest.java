@@ -10,9 +10,13 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.adapter.netty.FrameCodec.Role;
+import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.HttpRequestHead;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
@@ -26,6 +30,8 @@ import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
+import io.jburrow.protocol.wire.FrameFlags;
+import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.protocol.wire.StreamIds;
@@ -37,6 +43,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -52,9 +59,16 @@ class FrameCodecTest {
     private static final ControlJson JSON = ControlJson.create();
     private static final FrameCodec SERVER_CODEC = new FrameCodec(SERVER, JSON);
     private static final FrameCodec CLIENT_CODEC = new FrameCodec(CLIENT, JSON);
+    private static final FrameCodec SERVER_WITH_HTTP = new FrameCodec(SERVER, JSON, () -> true);
+    private static final FrameCodec CLIENT_WITH_HTTP = new FrameCodec(CLIENT, JSON, () -> true);
 
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
     private static final String TOKEN = "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00";
+    private static final RemoteAddress REMOTE = new RemoteAddress("203.0.113.9", 51_234);
+    private static final HttpRequestHead GET =
+            new HttpRequestHead("GET", "/", HeaderFields.of("host", "quiet-otter-4f2a.example.dev"), BodyFraming.EMPTY);
+    private static final HttpResponseHead OK = new HttpResponseHead(
+            200, HeaderFields.of("content-type", "text/plain", "content-length", "5"), BodyFraming.LENGTH);
 
     /** One frame of every kind, with the role that sends it. Data frames are built fresh, since encoding takes them. */
     static Stream<Arguments> sentFrames() {
@@ -93,18 +107,33 @@ class FrameCodecTest {
                 sent(CLIENT, () -> new Frame.Ping(-1L)),
                 sent(SERVER, () -> new Frame.Pong(0x0102_0304_0506_0708L)),
                 sent(CLIENT, () -> new Frame.Error(new ErrorBody(ErrorCode.PROTOCOL_ERROR, "Bad frame.", null))),
-                sent(SERVER, () -> new Frame.Error(new ErrorBody(ErrorCode.PORT_UNAVAILABLE, "Taken.", "default"))));
+                sent(SERVER, () -> new Frame.Error(new ErrorBody(ErrorCode.PORT_UNAVAILABLE, "Taken.", "default"))),
+                sent(
+                        CLIENT,
+                        () -> new Frame.Register(new Register(
+                                TOKEN, List.of(new TunnelRequest("default", TunnelKind.HTTP, "myapp", null))))),
+                sent(
+                        SERVER,
+                        () -> new Frame.Registered(new Registered(List.of(RegisteredTunnel.http(
+                                "default", TUNNEL_ID, "https", "quiet-otter-4f2a.example.dev", 443))))),
+                sent(SERVER, () -> new Frame.Open(2, new Open(TUNNEL_ID, TunnelKind.HTTP, REMOTE, GET))),
+                sent(CLIENT, () -> new Frame.Headers(2, OK)),
+                sent(CLIENT, () -> Frame.Close.reset(2, ErrorCode.LOCAL_SERVICE_ERROR)),
+                sent(
+                        SERVER,
+                        () -> new Frame.Error(
+                                new ErrorBody(ErrorCode.SUBDOMAIN_FORBIDDEN, "Not allowed.", "default"))));
     }
 
     @Test
-    void samplesCoverEveryFrameTypeExceptTheUnsupportedOnes() {
+    void samplesCoverEveryFrameTypeExceptTheUnsupportedOne() {
         Set<FrameType> covered = sentFrames()
                 .map(arguments -> sample(arguments).get())
                 .peek(Frame::release)
                 .map(Frame::type)
                 .collect(Collectors.toCollection(() -> EnumSet.noneOf(FrameType.class)));
 
-        assertThat(covered).isEqualTo(EnumSet.complementOf(EnumSet.of(FrameType.HEADERS, FrameType.GOAWAY)));
+        assertThat(covered).isEqualTo(EnumSet.complementOf(EnumSet.of(FrameType.GOAWAY)));
     }
 
     @ParameterizedTest(name = "{0} {1}")
@@ -256,8 +285,152 @@ class FrameCodecTest {
     void refusesToEncodeUnsupportedFrames() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> SERVER_CODEC.encode(new Frame.Unsupported(0, FrameType.GOAWAY), ALLOC));
-        assertThatIllegalArgumentException()
-                .isThrownBy(() -> CLIENT_CODEC.encode(new Frame.Unsupported(1, FrameType.HEADERS), ALLOC));
+    }
+
+    @Test
+    void aServerWithoutHttpRefusesHeadersAtTheTypeCheck() {
+        ByteBuf message = message(1, FrameType.HEADERS, 0, new byte[FrameLimits.MAX_CONTROL_PAYLOAD + 1]);
+
+        ProtocolException error = catchThrowableOfType(ProtocolException.class, () -> SERVER_CODEC.decode(message));
+
+        assertThat(error.code()).isEqualTo(ErrorCode.PROTOCOL_ERROR);
+        assertThat(error.getMessage()).isEqualTo("HEADERS is not allowed in a session without the http capability");
+        message.release();
+    }
+
+    @Test
+    void aClientRefusesHeadersWithOrWithoutHttp() {
+        for (FrameCodec client : List.of(CLIENT_CODEC, CLIENT_WITH_HTTP)) {
+            ByteBuf message = message(1, FrameType.HEADERS, 0, JSON.write(OK));
+
+            ProtocolException error = catchThrowableOfType(ProtocolException.class, () -> client.decode(message));
+
+            assertThat(error.code()).isEqualTo(ErrorCode.PROTOCOL_ERROR);
+            assertThat(error.getMessage()).isEqualTo("HEADERS is never sent by a server");
+            message.release();
+        }
+    }
+
+    @Test
+    void aServerWithHttpDecodesHeadersAsAResponseHead() {
+        ByteBuf message = message(7, FrameType.HEADERS, 0, JSON.write(OK));
+
+        Frame frame = SERVER_WITH_HTTP.decode(message);
+
+        assertThat(frame).isEqualTo(new Frame.Headers(7, OK));
+        message.release();
+    }
+
+    @Test
+    void aServerWithHttpChecksTheHeadersPayload() {
+        ByteBuf message = message(1, FrameType.HEADERS, 0, "{\"status\":101,\"headers\":[]}".getBytes(US_ASCII));
+
+        ProtocolException error = catchThrowableOfType(ProtocolException.class, () -> SERVER_WITH_HTTP.decode(message));
+
+        assertThat(error.code()).isEqualTo(ErrorCode.VALIDATION_FAILED);
+        assertThat(error.getMessage()).isEqualTo("status must not be 101, which is reserved");
+        message.release();
+    }
+
+    @Test
+    void theCapabilityIsReadForEachFrame() {
+        AtomicBoolean http = new AtomicBoolean();
+        FrameCodec server = new FrameCodec(SERVER, JSON, http::get);
+        byte[] head = JSON.write(OK);
+
+        ByteBuf before = message(1, FrameType.HEADERS, 0, head);
+        assertThat(catchThrowableOfType(ProtocolException.class, () -> server.decode(before)))
+                .isNotNull();
+        before.release();
+
+        http.set(true);
+        ByteBuf after = message(1, FrameType.HEADERS, 0, head);
+        assertThat(server.decode(after)).isInstanceOf(Frame.Headers.class);
+        after.release();
+    }
+
+    static Stream<Arguments> httpPayloadsWithoutTheCapability() {
+        Register register = new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.HTTP, null, null)));
+        Registered registered =
+                new Registered(List.of(RegisteredTunnel.http("default", TUNNEL_ID, "https", "x.example.dev", 443)));
+        return Stream.of(
+                arguments(SERVER, 0, FrameType.REGISTER, JSON.write(register), "tunnels[0].kind must be one of [tcp]"),
+                arguments(
+                        CLIENT, 0, FrameType.REGISTER, JSON.write(registered), "tunnels[0].kind must be one of [tcp]"),
+                arguments(
+                        CLIENT,
+                        1,
+                        FrameType.OPEN,
+                        JSON.write(new Open(TUNNEL_ID, TunnelKind.HTTP, REMOTE, GET)),
+                        "kind must be one of [tcp]"),
+                arguments(
+                        CLIENT,
+                        0,
+                        FrameType.ERROR,
+                        JSON.write(new ErrorBody(ErrorCode.SUBDOMAIN_UNAVAILABLE, "In use.", "default")),
+                        "code must be a known error code"));
+    }
+
+    @ParameterizedTest(name = "{2} to the {0}")
+    @MethodSource("httpPayloadsWithoutTheCapability")
+    void whatHttpIntroducesIsUnknownWithoutIt(Role receiver, int streamId, FrameType type, byte[] json, String rule) {
+        ByteBuf without = message(streamId, type, 0, json);
+        ProtocolException error = catchThrowableOfType(
+                ProtocolException.class, () -> codec(receiver, false).decode(without));
+        assertThat(error.code()).isEqualTo(ErrorCode.VALIDATION_FAILED);
+        assertThat(error.getMessage()).isEqualTo(rule);
+        without.release();
+
+        ByteBuf with = message(streamId, type, 0, json);
+        codec(receiver, true).decode(with).release();
+        with.release();
+    }
+
+    @Test
+    void anHttpResetCodeIsUnknownWithoutTheCapability() {
+        byte[] code = ErrorCode.LOCAL_SERVICE_ERROR.code().getBytes(US_ASCII);
+        for (Role receiver : Role.values()) {
+            ByteBuf without = message(1, FrameType.CLOSE, FrameFlags.RST, code);
+            ProtocolException error = catchThrowableOfType(
+                    ProtocolException.class, () -> codec(receiver, false).decode(without));
+            assertThat(error.code()).isEqualTo(ErrorCode.PROTOCOL_ERROR);
+            without.release();
+
+            ByteBuf with = message(1, FrameType.CLOSE, FrameFlags.RST, code);
+            assertThat(codec(receiver, true).decode(with))
+                    .isEqualTo(Frame.Close.reset(1, ErrorCode.LOCAL_SERVICE_ERROR));
+            with.release();
+        }
+    }
+
+    @Test
+    void refusesToEncodeWhatTheSessionHasNotNegotiated() {
+        List<Frame> client = List.of(
+                new Frame.Headers(1, OK),
+                new Frame.Register(
+                        new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.HTTP, null, null)))),
+                Frame.Close.reset(1, ErrorCode.LOCAL_SERVICE_ERROR));
+        List<Frame> server = List.of(
+                new Frame.Open(1, new Open(TUNNEL_ID, TunnelKind.HTTP, REMOTE, GET)),
+                new Frame.Registered(new Registered(
+                        List.of(RegisteredTunnel.http("default", TUNNEL_ID, "http", "x.localhost", 7080)))),
+                new Frame.Error(new ErrorBody(ErrorCode.SUBDOMAIN_FORBIDDEN, "Not allowed.", "default")));
+
+        for (Frame frame : client) {
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> CLIENT_CODEC.encode(frame, ALLOC))
+                    .withMessageContaining("http capability");
+        }
+        for (Frame frame : server) {
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> SERVER_CODEC.encode(frame, ALLOC))
+                    .withMessageContaining("http capability");
+        }
+    }
+
+    @Test
+    void aServerNeverSendsHeaders() {
+        assertThatIllegalArgumentException().isThrownBy(() -> SERVER_WITH_HTTP.encode(new Frame.Headers(1, OK), ALLOC));
     }
 
     @Test
@@ -289,8 +462,9 @@ class FrameCodecTest {
         assertThatIllegalArgumentException().isThrownBy(() -> Frame.Close.half(0));
         assertThatIllegalArgumentException().isThrownBy(() -> Frame.Close.reset(1, ErrorCode.AUTHTOKEN_INVALID));
         assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Unsupported(1, FrameType.DATA));
-        assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Unsupported(0, FrameType.HEADERS));
+        assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Unsupported(1, FrameType.HEADERS));
         assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Unsupported(1, FrameType.GOAWAY));
+        assertThatIllegalArgumentException().isThrownBy(() -> new Frame.Headers(0, OK));
         payload.release();
     }
 
@@ -326,8 +500,25 @@ class FrameCodecTest {
         return (Supplier<Frame>) arguments.get()[2];
     }
 
+    /** The sample frames include HTTP ones, so they round-trip in a session with {@code http}. */
     private static FrameCodec codec(Role role) {
-        return role == SERVER ? SERVER_CODEC : CLIENT_CODEC;
+        return codec(role, true);
+    }
+
+    private static FrameCodec codec(Role role, boolean http) {
+        if (role == SERVER) {
+            return http ? SERVER_WITH_HTTP : SERVER_CODEC;
+        }
+        return http ? CLIENT_WITH_HTTP : CLIENT_CODEC;
+    }
+
+    private static ByteBuf message(int streamId, FrameType type, int flags, byte[] payload) {
+        return ALLOC.buffer()
+                .writeInt(streamId)
+                .writeByte(type.code())
+                .writeByte(flags)
+                .writeInt(payload.length)
+                .writeBytes(payload);
     }
 
     private static Role receiver(Role sender) {

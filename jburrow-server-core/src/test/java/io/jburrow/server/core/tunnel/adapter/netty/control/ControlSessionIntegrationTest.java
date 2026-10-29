@@ -223,9 +223,11 @@ class ControlSessionIntegrationTest {
         peer.expectError(ErrorCode.PROTOCOL_ERROR, TIMEOUT);
     }
 
+    /** The vectors for a server's session without capabilities: the raw message is the first thing it receives. */
     static Stream<JsonNode> serverVectors() {
         return ConformanceVectors.invalid().stream()
-                .filter(vector -> vector.get("role").asString().equals("server"));
+                .filter(vector -> vector.get("role").asString().equals("server"))
+                .filter(vector -> ConformanceVectors.capabilities(vector).isEmpty());
     }
 
     /**

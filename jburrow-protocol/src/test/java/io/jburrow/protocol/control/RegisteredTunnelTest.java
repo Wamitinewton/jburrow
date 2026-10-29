@@ -2,6 +2,7 @@ package io.jburrow.protocol.control;
 
 import static io.jburrow.protocol.control.ValidationAssertions.assertInvalid;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -25,7 +26,7 @@ class RegisteredTunnelTest {
     @Test
     void urlMustMatchKindHostAndPort() {
         new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_037, "tcp://localhost:21037");
-        String rule = "url must be <kind>://<publicHost>:<publicPort>";
+        String rule = "url must be tcp://<publicHost>:<publicPort>";
         assertInvalid(
                 () -> new RegisteredTunnel(
                         "d", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_037, "tcp://localhost:21038"),
@@ -36,6 +37,61 @@ class RegisteredTunnelTest {
                 rule);
         assertInvalid(
                 () -> new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.TCP, "localhost", 1, null), "url is required");
+    }
+
+    @Test
+    void anHttpTunnelsUrlLeavesOutTheSchemesDefaultPort() {
+        assertThat(RegisteredTunnel.http("d", TUNNEL_ID, "https", "quiet-otter-4f2a.example.dev", 443)
+                        .url())
+                .isEqualTo("https://quiet-otter-4f2a.example.dev");
+        assertThat(RegisteredTunnel.http("d", TUNNEL_ID, "http", "quiet-otter-4f2a.localhost", 80)
+                        .url())
+                .isEqualTo("http://quiet-otter-4f2a.localhost");
+    }
+
+    @Test
+    void anHttpTunnelsUrlNamesAnyOtherPort() {
+        assertThat(RegisteredTunnel.http("d", TUNNEL_ID, "http", "quiet-otter-4f2a.localhost", 7080)
+                        .url())
+                .isEqualTo("http://quiet-otter-4f2a.localhost:7080");
+        assertThat(RegisteredTunnel.http("d", TUNNEL_ID, "https", "x.example.dev", 80)
+                        .url())
+                .isEqualTo("https://x.example.dev:80");
+        assertThat(RegisteredTunnel.http("d", TUNNEL_ID, "http", "x.example.dev", 443)
+                        .url())
+                .isEqualTo("http://x.example.dev:443");
+    }
+
+    @Test
+    void anHttpTunnelsUrlMustMatchItsHostAndPort() {
+        new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.HTTP, "x.example.dev", 443, "https://x.example.dev");
+        new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.HTTP, "x.example.dev", 443, "http://x.example.dev:443");
+        String rule = "url must be http:// or https://<publicHost>, then :<publicPort> unless it is the default";
+        for (String url : new String[] {
+            "https://x.example.dev:443",
+            "http://x.example.dev",
+            "tcp://x.example.dev:443",
+            "https://y.example.dev",
+            "https://x.example.dev/",
+            "HTTPS://x.example.dev"
+        }) {
+            assertInvalid(() -> new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.HTTP, "x.example.dev", 443, url), rule);
+        }
+    }
+
+    @Test
+    void aTcpTunnelsUrlIsNeverAnHttpOne() {
+        assertInvalid(
+                () -> new RegisteredTunnel("d", TUNNEL_ID, TunnelKind.TCP, "h", 80, "http://h"),
+                "url must be tcp://<publicHost>:<publicPort>");
+    }
+
+    @Test
+    void eachFactoryBuildsItsOwnKind() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> RegisteredTunnel.of("d", TUNNEL_ID, TunnelKind.HTTP, "h", 443));
+        assertThatIllegalArgumentException().isThrownBy(() -> RegisteredTunnel.http("d", TUNNEL_ID, "tcp", "h", 443));
+        assertThatIllegalArgumentException().isThrownBy(() -> RegisteredTunnel.http("d", TUNNEL_ID, "HTTPS", "h", 443));
     }
 
     @Test

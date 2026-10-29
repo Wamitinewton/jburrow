@@ -1,7 +1,7 @@
 # Phase 2, Multiplexing and Flow Control: Architecture
 
-Status: designed, not yet built. Third phase of `PROJECT.md` §Build roadmap, built on phase 1's TCP
-tunnel and wire protocol.
+Status: implemented; phase 2 is complete and runs in production. Third phase of `PROJECT.md` §Build
+roadmap, built on phase 1's TCP tunnel and wire protocol.
 
 `PROJECT.md` gives phase 2 one line: many streams per session, per-stream credit windows and
 `WINDOW_UPDATE` on top of phase 1's session writability; done when 500 concurrent connections share
@@ -937,15 +937,15 @@ Phase 1's threats and mitigations stand. Phase 2 changes these:
 | A buggy client sends past a window | `ERROR FLOW_CONTROL_ERROR`, the session closes, the CLI exits with code 6. |
 | A buggy server sends past the client's window | The client sends `ERROR FLOW_CONTROL_ERROR` and closes the session; the CLI exits with code 6. |
 | A phase 1 CLI connects to the phase 2 server | `UNSUPPORTED_PROTOCOL_VERSION`, exit code 6: "This server speaks jburrow.v1-draft.2; upgrade jburrow." |
+| 1,001st visitor to a session | Closed at once, counted as `stream_limit`. |
+| 4,001st visitor to the server | Closed at once, counted as `server_stream_limit`. |
+| The session ends with many streams open | Each is reset with `CANCELLED`, as in phase 1; queued writes fail, their credit is released into a session that is gone, and nothing is sent. |
+| Many visitors become readable as session credit runs out | Each one read with no credit gives up at most one byte, is paused, and waits its turn; idle visitors aren't touched. |
+| A visitor sends the rest of an upload and `FIN` while held back | On epoll it is read to the end at once and what it sent past its credit is carried; on NIO it is read when resumed. Either way every byte goes out as credit returns, then `CLOSE`. |
 
 `FLOW_CONTROL_ERROR` joins exit code 6 (protocol mismatch or violation: upgrade the CLI, or report a bug)
 next to `PROTOCOL_ERROR`, extending phase 1's exit code table
 ([phase 1 §The CLI](../phase-1-tcp-tunnel/ARCHITECTURE.md#the-cli)), which is otherwise unchanged.
-| 1,001st visitor to a session | Closed at once, counted as `stream_limit`. |
-| 20,001st visitor to the server | Closed at once, counted as `server_stream_limit`. |
-| The session ends with many streams open | Each is reset with `CANCELLED`, as in phase 1; queued writes fail, their credit is released into a session that is gone, and nothing is sent. |
-| Many visitors become readable as session credit runs out | Each one read with no credit gives up at most one byte, is paused, and waits its turn; idle visitors aren't touched. |
-| A visitor sends the rest of an upload and `FIN` while held back | On epoll it is read to the end at once and what it sent past its credit is carried; on NIO it is read when resumed. Either way every byte goes out as credit returns, then `CLOSE`. |
 
 ## Testing
 
@@ -1033,7 +1033,8 @@ The load test settled auto-tuning (not for phase 3, [Choosing the windows](#choo
 `SO_SNDBUF` (not needed, [Memory budget](#memory-budget)) and the server session window (512 KiB
 stays). It raised two more, both settled by ADR-0010: visitor receive buffers against the pod's
 memory ([Memory budget](#memory-budget)), and small frames when many visitors share a session's
-credit ([The read gate](#visitor-to-client-the-read-gate)). One stays open:
+credit ([The read gate](#visitor-to-client-the-read-gate)). One stays open, and is answered by phase 3's design
+([phase 3 §Paused readers](../phase-3-http-tunnels/ARCHITECTURE.md#paused-readers)):
 
 - **Paused readers on HTTP tunnels (phase 3).** Two visitors that stop reading are enough to stop a
   session's client-to-visitor direction. With raw TCP that takes deliberate stalling. With HTTP it
@@ -1042,22 +1043,22 @@ credit ([The read gate](#visitor-to-client-the-read-gate)). One stays open:
 
 ## Exit criteria
 
-Phase 2 is done when all of these hold:
+Phase 2 is done when all of these hold. All held at the phase exit on 2026-10-29.
 
-- [ ] On production, from a network other than the laptop's, `StreamLoad` opens **500 concurrent
+- [x] On production, from a network other than the laptop's, `StreamLoad` opens **500 concurrent
       connections** to one native `jburrow tcp` session forwarding to a local echo service, sends
       1 MiB on each, and gets every byte back with matching checksums. The server logs one session
       with 500 streams served.
-- [ ] `SlowClientIntegrationTest` is green: with 500 streams and a throttled client, the direct memory
+- [x] `SlowClientIntegrationTest` is green: with 500 streams and a throttled client, the direct memory
       the server holds stays within the per-session budget, and heap after GC doesn't grow.
-- [ ] On production, with one visitor stalled on a large download through the tunnel, an SSH session
+- [x] On production, with one visitor stalled on a large download through the tunnel, an SSH session
       through the same tunnel stays interactive.
-- [ ] A 100 MiB transfer through the phase 2 tunnel, from the same laptop and network as phase 1's
+- [x] A 100 MiB transfer through the phase 2 tunnel, from the same laptop and network as phase 1's
       exit test, is no slower than phase 1's measured 0.55 MiB/s.
-- [ ] During the 500-stream test, `jburrow_netty_direct_memory_bytes` stays below the budget the
+- [x] During the 500-stream test, `jburrow_netty_direct_memory_bytes` stays below the budget the
       startup log printed.
-- [ ] The `verify`, `native` and `fuzz` jobs are green on `main`.
-- [ ] `docs/protocol.md` is `jburrow.v1-draft.2` with its vectors, and ADR-0009 is written and
+- [x] The `verify`, `native` and `fuzz` jobs are green on `main`.
+- [x] `docs/protocol.md` is `jburrow.v1-draft.2` with its vectors, and ADR-0009 is written and
       indexed.
-- [ ] `git grep` across the repository finds no hostname, IP address, organization or repository
+- [x] `git grep` across the repository finds no hostname, IP address, organization or repository
       name that belongs to the deployment.

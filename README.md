@@ -41,7 +41,8 @@ deletes their data.
 The hosted server at `connect.cloudnativehub.app` is open to testers. Accounts arrive in phase 5;
 until then, ask the maintainer for an authtoken. There are no release binaries yet, so build the
 CLI from this repository (JDK 21; `make native` builds a native binary instead, with GraalVM for
-JDK 21 as the JDK):
+JDK 21 as the JDK). Build it from phase 2 or later: the server refuses older CLIs with
+`upgrade jburrow` and exit code 6.
 
 ```bash
 ./mvnw -q -pl jburrow-cli -am package -DskipTests
