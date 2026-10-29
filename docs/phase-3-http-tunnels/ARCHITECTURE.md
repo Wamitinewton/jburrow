@@ -676,8 +676,11 @@ default).
   bytes stay where they are, queued to the edge channel. The stream's own credit doesn't come back
   until they are written, so a parked stream can never hold more than its stream window.
 - When a parked stream's writes complete, its stream credit returns as usual and no session credit
-  does, since that was returned already. Once it holds nothing parked, it is an ordinary stream
-  again.
+  does, since that was returned already. Parked bytes are released first, since they arrived first.
+  Once it holds nothing parked, it is an ordinary stream again.
+- A stream that ends while it holds parked bytes is marked as gone in the model
+  (`SessionFlow.onRemoved`), and its remaining releases still go through its `StreamFlow`, so a
+  parked byte never returns session credit twice and a gone stream returns no stream credit.
 - A stalled stream that doesn't fit the budget stays unparked and behaves as in phase 2. The budget is
   the memory bound; `jburrow_flow_park_refused_total` says when it binds.
 
@@ -695,9 +698,10 @@ bytes, which [Memory budget](#memory-budget) accounts for.
 | Resetting a stalled stream | Breaks a paused video, which a browser resumes by reading on. |
 | Parking TCP streams too | A TCP visitor that stalls is rare in honest use and deliberate otherwise, and the budget would go to whoever stalls first. Phase 6's per-source limits are the TCP answer. The model doesn't care about the kind, so opting TCP in later is a configuration change. |
 
-The fuzz target gains parking: the conservation invariant counts parked bytes apart, and a new
-invariant holds that no stream holds more than its stream window and the parked total never passes
-the budget.
+The fuzz target gains parking: the conservation invariant counts parked bytes as released in the
+session's column and as held in the stream's, and a new invariant holds that no stream holds more than
+its stream window and the parked total is never more than the stream windows of the streams that
+parked. The model knows nothing of time or budgets, so a caller that caps what it parks caps memory.
 
 ### Error pages
 

@@ -194,6 +194,94 @@ class ReceiveWindowTest {
         assertThat(window.unreturned()).isZero();
     }
 
+    @Test
+    void parkingParksEveryHeldByteAndChangesNoOtherCount() {
+        ReceiveWindow window = new ReceiveWindow("stream", 10);
+        window.receive(7);
+        window.release(2);
+
+        assertThat(window.park()).isEqualTo(5);
+
+        assertThat(window.parked()).isEqualTo(5);
+        assertThat(window.held()).isEqualTo(5);
+        assertThat(window.unreturned()).isEqualTo(2);
+        assertThat(window.remaining()).isEqualTo(3);
+        assertInvariant(window);
+    }
+
+    @Test
+    void parkingTwiceParksNothingNew() {
+        ReceiveWindow window = new ReceiveWindow("stream", 10);
+        window.receive(4);
+        window.park();
+
+        assertThat(window.park()).isZero();
+        assertThat(window.parked()).isEqualTo(4);
+    }
+
+    @Test
+    void parkingWithNothingHeldParksNothing() {
+        ReceiveWindow window = new ReceiveWindow("stream", 10);
+
+        assertThat(window.park()).isZero();
+        assertThat(window.parked()).isZero();
+    }
+
+    @Test
+    void bytesReceivedAfterParkingAreUnparkedUntilParkedAgain() {
+        ReceiveWindow window = new ReceiveWindow("stream", 10);
+        window.receive(4);
+        window.park();
+
+        window.receive(3);
+
+        assertThat(window.parked()).isEqualTo(4);
+        assertThat(window.held()).isEqualTo(7);
+        assertThat(window.park()).isEqualTo(3);
+        assertThat(window.parked()).isEqualTo(7);
+    }
+
+    /** Received, parked, then released in steps: parked bytes go first, and stream credit follows the usual rule. */
+    static Stream<Arguments> parkedReleases() {
+        return Stream.of(
+                arguments(10, 6, List.of(2, 2, 2), List.of(4, 2, 0), List.of(0, 0, 6)),
+                arguments(10, 6, List.of(8), List.of(0), List.of(8)),
+                arguments(10, 10, List.of(5, 5), List.of(5, 0), List.of(5, 5)),
+                arguments(10, 0, List.of(5, 5), List.of(0, 0), List.of(5, 5)));
+    }
+
+    @ParameterizedTest(name = "window {0}, {1} parked of 10, releases {2}")
+    @MethodSource("parkedReleases")
+    void releasesTakeParkedBytesFirst(
+            int size, int parked, List<Integer> releases, List<Integer> parkedAfter, List<Integer> increments) {
+        ReceiveWindow window = new ReceiveWindow("stream", size);
+        if (parked > 0) {
+            window.receive(parked);
+            window.park();
+        }
+        if (parked < 10) {
+            window.receive(10 - parked);
+        }
+
+        for (int i = 0; i < releases.size(); i++) {
+            assertThat(window.release(releases.get(i))).as("increment %d", i).isEqualTo(increments.get(i));
+            assertThat(window.parked()).as("parked after %d", i).isEqualTo(parkedAfter.get(i));
+            assertThat(window.parked()).isLessThanOrEqualTo(window.held());
+            assertInvariant(window);
+        }
+    }
+
+    @Test
+    void releasingMoreThanIsHeldLeavesTheParkedBytesAlone() {
+        ReceiveWindow window = new ReceiveWindow("stream", 10);
+        window.receive(4);
+        window.park();
+
+        assertThatIllegalStateException().isThrownBy(() -> window.release(5));
+        assertThat(window.parked()).isEqualTo(4);
+        assertThat(window.held()).isEqualTo(4);
+    }
+
     private static void assertInvariant(ReceiveWindow window) {
         assertThat((long) window.remaining() + window.held() + window.unreturned())
                 .as("remaining + held + unreturned of %s", window)

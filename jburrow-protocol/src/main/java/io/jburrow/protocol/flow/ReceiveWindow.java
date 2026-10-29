@@ -17,6 +17,9 @@ import java.util.Objects;
  * <p>Credit goes back once the unreturned bytes reach half the window (rounded down), never before a release. That
  * keeps updates rare and guarantees a sender with nothing held against it has more than half its window.
  *
+ * <p>A stream's window can also {@link #parked() park} what it holds: the bytes stay held here, while the session window
+ * counts them as released. Parked bytes are the oldest held, so a release takes them first.
+ *
  * <p>Read-only outside this package: only {@link SessionFlow} receives and releases.
  */
 public final class ReceiveWindow {
@@ -27,6 +30,7 @@ public final class ReceiveWindow {
     private int remaining;
     private int held;
     private int unreturned;
+    private int parked;
     private boolean returning = true;
 
     ReceiveWindow(String scope, int size) {
@@ -53,6 +57,11 @@ public final class ReceiveWindow {
 
     public int unreturned() {
         return unreturned;
+    }
+
+    /** Held bytes whose session credit was returned early: at most {@link #held()}. Always 0 on a session window. */
+    public int parked() {
+        return parked;
     }
 
     /** False once the peer has finished sending: released bytes are still counted, but no credit goes back. */
@@ -100,6 +109,7 @@ public final class ReceiveWindow {
     int release(int bytes) {
         checkRelease(bytes);
         held -= bytes;
+        parked -= Math.min(parked, bytes);
         unreturned += bytes;
         if (!returning || unreturned < threshold) {
             return 0;
@@ -110,6 +120,13 @@ public final class ReceiveWindow {
         return increment;
     }
 
+    /** Parks every held byte not parked yet, and returns how many that was. */
+    int park() {
+        int parking = held - parked;
+        parked = held;
+        return parking;
+    }
+
     void stopReturning() {
         returning = false;
     }
@@ -117,6 +134,7 @@ public final class ReceiveWindow {
     @Override
     public String toString() {
         return "ReceiveWindow[" + scope + ", size=" + size + ", remaining=" + remaining + ", held=" + held
-                + ", unreturned=" + unreturned + (returning ? "" : ", not returning") + "]";
+                + ", unreturned=" + unreturned + (parked == 0 ? "" : ", parked=" + parked)
+                + (returning ? "" : ", not returning") + "]";
     }
 }

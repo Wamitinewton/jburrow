@@ -95,6 +95,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged; neither the server nor the client offers it yet. `jburrow-protocol` gains the heads as
   validated records, `HttpExchangeRules` for the order and body length of an exchange, and a Jazzer
   target for them.
+- Reservations and parking in the flow model, for the HTTP edge to come
+  ([ADR-0012](docs/adr/0012-http-exchanges-across-event-loops.md)). A reservation takes send
+  credit before a read and refunds what the read didn't use. Parking returns a stalled stream's
+  session credit before its bytes are written, but not its stream credit. `SessionFlowFuzzTest`
+  covers both. Nothing calls them yet.
 - A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
   x64 and runs a real tunnel with it, 50 concurrent streams on one session and then one 4 MiB
   stream, publishing nothing

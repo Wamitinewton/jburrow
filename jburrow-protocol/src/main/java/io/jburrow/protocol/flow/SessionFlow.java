@@ -11,6 +11,13 @@ import io.jburrow.protocol.wire.ProtocolException;
  * <p>The session doesn't keep its streams: each side's stream table holds the {@link StreamFlow} next to the stream's
  * lifecycle and passes it in. A call that throws changes nothing.
  *
+ * <p>Two extensions serve a sender and a receiver that can't consult this model at the moment they act. A
+ * {@link #reserve reservation} takes send credit before a read whose size isn't known yet, and {@link #refund} gives
+ * back what the read didn't use. {@link #park Parking} returns a stalled stream's held bytes to the session window
+ * early, without returning its stream credit, so a stream that has stopped draining stops holding back the others.
+ * Neither changes the wire: the peer can't tell a reserved byte from one not yet read, and parking is credit returned
+ * before release, which the protocol allows.
+ *
  * <p>Not thread-safe. Confined to the thread that owns its session.
  */
 public final class SessionFlow {
@@ -22,6 +29,7 @@ public final class SessionFlow {
     private final int remoteStreamWindow;
     private final SendCredit sessionSend;
     private final ReceiveWindow sessionReceive;
+    private long parked;
 
     /**
      * @throws IllegalArgumentException if a window is below 1 byte, or a session window is smaller than its stream
@@ -58,7 +66,10 @@ public final class SessionFlow {
         return sessionReceive;
     }
 
-    /** The most {@code DATA} this side may send on {@code stream} right now: the smaller of its two credits. */
+    /**
+     * The most {@code DATA} this side may send on {@code stream} right now: the smaller of its two credits. Credit
+     * already reserved, by this stream or another, doesn't count.
+     */
     public int sendable(StreamFlow stream) {
         return (int) Math.min(stream.send().available(), sessionSend.available());
     }
@@ -80,6 +91,68 @@ public final class SessionFlow {
         }
         stream.send().spend(bytes);
         sessionSend.spend(bytes);
+    }
+
+    /**
+     * Reserves up to {@code max} bytes of the stream's credit and the session's, for a read that sends what it gets with
+     * {@link #onSentReserved} and gives the rest back with {@link #refund}. The caller folds any limit that isn't flow
+     * state, such as the session channel's headroom, into {@code max}.
+     *
+     * @return the bytes reserved: {@code min(max, sendable(stream))}, 0 if there is no credit or {@code max} is 0
+     * @throws IllegalStateException if the stream has been {@linkplain #onRemoved removed}
+     */
+    public int reserve(StreamFlow stream, int max) {
+        if (max < 0) {
+            throw new IllegalArgumentException("A reservation asks for at least 0 bytes, not " + max);
+        }
+        requireInTable(stream, "Reserving for");
+        int bytes = Math.min(max, sendable(stream));
+        if (bytes > 0) {
+            stream.send().reserve(bytes);
+            sessionSend.reserve(bytes);
+        }
+        return bytes;
+    }
+
+    /**
+     * Sends {@code DATA} of {@code bytes} out of the stream's reservation, so no credit is taken again.
+     *
+     * @throws IllegalStateException if {@code bytes} is more than the stream has reserved
+     */
+    public void onSentReserved(StreamFlow stream, int bytes) {
+        stream.send().checkReserved("Sending", bytes);
+        sessionSend.checkReserved("Sending", bytes);
+        stream.send().spendReserved(bytes);
+        sessionSend.spendReserved(bytes);
+    }
+
+    /**
+     * Gives {@code bytes} of the stream's reservation back to its credit and the session's. A refund of 0, a read that
+     * used its whole reservation, changes nothing.
+     *
+     * @throws IllegalStateException if {@code bytes} is more than the stream has reserved
+     */
+    public void refund(StreamFlow stream, int bytes) {
+        if (bytes == 0) {
+            return;
+        }
+        stream.send().checkReserved("Refunding", bytes);
+        sessionSend.checkReserved("Refunding", bytes);
+        stream.send().refund(bytes);
+        sessionSend.refund(bytes);
+    }
+
+    /**
+     * Refunds everything the stream still has reserved, for a stream that has ended. The session's part is what matters,
+     * since no other stream could send with it until it came back. A stream with nothing reserved changes nothing.
+     */
+    public void refundAll(StreamFlow stream) {
+        refund(stream, stream.reserved());
+    }
+
+    /** Send credit reserved on all streams together. */
+    public int reserved() {
+        return sessionSend.reserved();
     }
 
     /**
@@ -130,19 +203,71 @@ public final class SessionFlow {
      * Bytes this side no longer holds: written to their destination, successfully or not, or dropped. Each received
      * byte is released exactly once.
      *
-     * @param stream the stream the bytes arrived on, or {@code null} once its entry is gone; then only session credit
-     *     comes back
+     * <p>A stream's parked bytes are released first, since they arrived first. For those only the stream window
+     * releases: their session credit went back when they were parked. For the rest, both windows release.
+     *
+     * @param stream the stream the bytes arrived on, or {@code null} once its entry is gone and it has nothing parked;
+     *     then only session credit comes back. A stream that leaves its table with bytes parked is passed in, after
+     *     {@link #onRemoved}, until it holds nothing.
      * @return the {@code WINDOW_UPDATE}s to send now
      * @throws IllegalStateException if more is released than is held
      */
     public Credit onReleased(StreamFlow stream, int bytes) {
-        sessionReceive.checkRelease(bytes);
-        if (stream != null) {
-            stream.receive().checkRelease(bytes);
+        if (stream == null) {
+            sessionReceive.checkRelease(bytes);
+            return Credit.of(sessionReceive.release(bytes), 0);
         }
-        int session = sessionReceive.release(bytes);
-        int streamIncrement = stream == null ? 0 : stream.receive().release(bytes);
+        stream.receive().checkRelease(bytes);
+        int unparked = bytes - Math.min(bytes, stream.parked());
+        if (unparked > 0) {
+            sessionReceive.checkRelease(unparked);
+        }
+        parked -= bytes - unparked;
+        int session = unparked == 0 ? 0 : sessionReceive.release(unparked);
+        int streamIncrement = stream.receive().release(bytes);
         return Credit.of(session, streamIncrement);
+    }
+
+    /**
+     * Treats every byte the stream holds and hasn't parked as released for the session window only, so their session
+     * credit can go back now while they wait for their destination. The stream's own credit comes back only as they
+     * are actually released, so a parked stream never holds more than its stream window. Whether and when to park is
+     * the caller's policy.
+     *
+     * @return the session credit to send now; {@link Credit#NONE} if nothing new was parked
+     * @throws IllegalStateException if the stream has been {@linkplain #onRemoved removed}
+     */
+    public Credit park(StreamFlow stream) {
+        requireInTable(stream, "Parking");
+        int parking = stream.receive().held() - stream.parked();
+        if (parking == 0) {
+            return Credit.NONE;
+        }
+        sessionReceive.checkRelease(parking);
+        stream.receive().park();
+        parked += parking;
+        return Credit.of(sessionReceive.release(parking), 0);
+    }
+
+    /** Bytes parked on all streams together, still held. */
+    public long parked() {
+        return parked;
+    }
+
+    /**
+     * The stream has left its table, closed or reset: no more stream credit goes back on it, and it can't reserve or
+     * park. What it still holds is released later as usual, by passing it to {@link #onReleased}, or {@code null} if it
+     * has nothing parked. A reservation it still has is {@link #refundAll}'s.
+     */
+    public void onRemoved(StreamFlow stream) {
+        stream.receive().stopReturning();
+        stream.markRemoved();
+    }
+
+    private static void requireInTable(StreamFlow stream, String action) {
+        if (stream.isRemoved()) {
+            throw new IllegalStateException(action + " a stream that has left its table: " + stream);
+        }
     }
 
     /**
@@ -155,6 +280,6 @@ public final class SessionFlow {
 
     @Override
     public String toString() {
-        return "SessionFlow[" + sessionSend + ", " + sessionReceive + "]";
+        return "SessionFlow[" + sessionSend + ", " + sessionReceive + (parked == 0 ? "" : ", parked=" + parked) + "]";
     }
 }
