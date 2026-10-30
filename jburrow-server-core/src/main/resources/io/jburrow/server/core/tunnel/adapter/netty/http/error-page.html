@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{status}} {{reason}}</title>
+<style>
+body{margin:0;font:16px/1.5 system-ui,sans-serif;color:#1f2328;background:#f6f8fa}
+main{max-width:34rem;margin:12vh auto 0;padding:0 1rem}
+h1{font-size:1.25rem;margin:0 0 1rem}
+p{margin:0 0 .75rem}
+.host{font-weight:600;overflow-wrap:anywhere}
+code{font:.875rem ui-monospace,monospace;padding:.125rem .375rem;border-radius:.25rem;background:#e6eaef}
+@media (prefers-color-scheme:dark){body{color:#e6edf3;background:#0d1117}code{background:#262c36}}
+</style>
+</head>
+<body>
+<main>
+<h1>{{status}} {{reason}}</h1>
+<p class="host">{{host}}</p>
+<p>{{explanation}}</p>
+<p>{{suggestion}}</p>
+<p><code>{{code}}</code></p>
+</main>
+</body>
+</html>

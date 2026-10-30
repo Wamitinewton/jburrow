@@ -25,13 +25,13 @@ import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
-import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.flow.Credit;
 import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.flow.UpdateTarget;
 import io.jburrow.protocol.stream.StreamOutcome;
 import io.jburrow.protocol.stream.StreamState;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -59,7 +59,7 @@ class SessionTest {
     private static final Hello HELLO_FRAME =
             new Hello(new ClientInfo("jburrow-cli", "0.2.0", "linux", "x86_64"), List.of(), CLIENT_WINDOWS);
     private static final Principal ALICE = new Principal("alice");
-    private static final Tunnel TUNNEL = new Tunnel(TunnelId.random(), "default", TunnelKind.TCP, "localhost", 21_037);
+    private static final Tunnel TUNNEL = Tunnel.tcp(TunnelId.random(), "default", "localhost", 21_037);
 
     /** {@code docs/protocol.md} §8.2, the frames a client may send in each state. */
     private static final Map<SessionState, Set<FrameType>> ALLOWED = Map.of(
@@ -115,6 +115,38 @@ class SessionTest {
         assertThat(session.tunnel(TUNNEL.id())).contains(TUNNEL);
         assertThat(session.tunnel(TunnelId.random())).isEmpty();
         assertThat(session.isRegistering()).isFalse();
+    }
+
+    @Test
+    void theNegotiatedCapabilitiesAreThoseTheServerEnablesAndTheClientOffers() {
+        Session session = new Session(SessionId.random(), 1, SERVER_WINDOWS, Set.of(Capability.HTTP));
+        assertThat(session.capabilities()).isEmpty();
+        assertThat(session.httpEnabled()).isFalse();
+
+        session.onHello(hello(List.of("x-later", "http")));
+
+        assertThat(session.capabilities()).containsExactly(Capability.HTTP);
+        assertThat(session.httpEnabled()).isTrue();
+    }
+
+    @Test
+    void aClientOfferingNothingGetsNoCapability() {
+        Session session = new Session(SessionId.random(), 1, SERVER_WINDOWS, Set.of(Capability.HTTP));
+
+        session.onHello(HELLO_FRAME);
+
+        assertThat(session.capabilities()).isEmpty();
+        assertThat(session.httpEnabled()).isFalse();
+    }
+
+    @Test
+    void aServerEnablingNothingAgreesToNothing() {
+        Session session = new Session(SessionId.random(), 1, SERVER_WINDOWS);
+
+        session.onHello(hello(List.of("http")));
+
+        assertThat(session.capabilities()).isEmpty();
+        assertThat(session.httpEnabled()).isFalse();
     }
 
     @Test
@@ -705,5 +737,9 @@ class SessionTest {
         }
         session.onEstablished(ALICE, List.of(TUNNEL));
         return session;
+    }
+
+    private static Hello hello(List<String> capabilities) {
+        return new Hello(HELLO_FRAME.client(), capabilities, CLIENT_WINDOWS);
     }
 }

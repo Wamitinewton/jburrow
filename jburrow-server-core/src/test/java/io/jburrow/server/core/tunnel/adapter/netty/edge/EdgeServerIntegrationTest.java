@@ -13,12 +13,15 @@ import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
 import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
+import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.application.InMemoryAuthtokenVerifier;
 import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
-import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
+import io.jburrow.server.core.tunnel.application.RegistrationFixtures;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
+import io.jburrow.server.core.tunnel.domain.Principal;
+import io.jburrow.server.core.tunnel.domain.TunnelId;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -40,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
@@ -265,7 +269,9 @@ class EdgeServerIntegrationTest {
                 new Windows(256 * 1024, 512 * 1024),
                 1,
                 8,
-                "test");
+                "test",
+                HttpSettingsFixture.defaults(),
+                Set.of());
     }
 
     private EngineDependencies dependencies() {
@@ -275,13 +281,15 @@ class EdgeServerIntegrationTest {
                 Duration.ofMinutes(10),
                 new Random(1),
                 InstantSource.system()));
+        SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
         RegisterTunnels register = new RegisterTunnels(
-                new InMemoryAuthtokenVerifier(), admission, ports, new RegistrationPolicy(1, "localhost"));
+                new InMemoryAuthtokenVerifier(), admission, ports, routes, RegistrationFixtures.policy(1, "localhost"));
         return new EngineDependencies(
                 register,
                 admission,
                 new StreamQuota(8),
                 ports,
+                routes,
                 metrics,
                 blocking,
                 new TcpSettings("127.0.0.1", "localhost", 32 * 1024));

@@ -16,9 +16,9 @@ import java.util.List;
 public interface TunnelListeners {
 
     /**
-     * Binds a listener for every planned tunnel of {@code registration}. If a bind has to move a tunnel to another
-     * port, the implementation stores the updated registration with {@link SessionContext#registration(Registration)},
-     * so the session releases what it actually holds.
+     * Binds a listener for every planned TCP tunnel of {@code registration}; a planned HTTP tunnel has none. If a bind
+     * has to move a tunnel to another port, the implementation stores the updated registration with
+     * {@link SessionContext#registration(Registration)}, so the session releases what it actually holds.
      *
      * @return completes on the session's event loop with the tunnels in the registration's order, or fails with a
      *     {@link ProtocolException} for the client (such as {@code PORT_UNAVAILABLE}), or any other exception for an

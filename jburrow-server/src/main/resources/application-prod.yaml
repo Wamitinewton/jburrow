@@ -35,6 +35,9 @@ jburrow:
   tcp:
     port-range: ${JBURROW_TCP_PORT_RANGE}
     public-host: ${JBURROW_TCP_PUBLIC_HOST}
+  http:
+    domain: ${JBURROW_HTTP_DOMAIN}
+    reserved-names: ${JBURROW_HTTP_RESERVED_NAMES:}
 
 logging:
   structured:

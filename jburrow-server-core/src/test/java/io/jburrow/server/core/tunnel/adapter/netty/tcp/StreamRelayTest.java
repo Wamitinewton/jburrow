@@ -44,7 +44,7 @@ import org.junit.jupiter.api.Test;
  */
 class StreamRelayTest {
 
-    private static final Tunnel TUNNEL = new Tunnel(TunnelId.random(), "default", TunnelKind.TCP, "localhost", 21_037);
+    private static final Tunnel TUNNEL = Tunnel.tcp(TunnelId.random(), "default", "localhost", 21_037);
     private static final InetSocketAddress VISITOR = new InetSocketAddress("203.0.113.9", 51_234);
 
     private final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();

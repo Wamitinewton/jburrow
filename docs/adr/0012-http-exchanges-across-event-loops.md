@@ -34,9 +34,10 @@ can ask the flow model how much a visitor may read from inside the visitor's own
   `ExchangeHandler` (edge side) and `SessionExchange` (session side) are the two halves; only
   `SessionExchange` calls the domain. Each posts a task to the other's loop with what it learnt
   ("read once, up to `n` bytes"; "this content arrived", "this write completed", "this read
-  finished") and never reads the other's state. Response writes are the exception: the session's
-  loop writes to the edge channel directly, since Netty runs a write from another thread as a task
-  on the channel's loop in call order, and the write's listener posts the release back.
+  finished") and never reads the other's state. Response writes go the same way, as tasks posted in
+  the order the session makes them, so a response's head, body and end can't reorder even when the
+  session and the edge connection share a loop, where a direct write would overtake tasks already
+  posted; the write's listener posts the release back.
 - **Request bodies are read on demand, against reservations in the flow model.** On the session's
   loop, `SessionFlow.reserve(stream, max)` takes up to 16 KiB (the share floor of ADR-0010, capped
   by the session channel's headroom, which the caller folds into `max`) of stream and session credit

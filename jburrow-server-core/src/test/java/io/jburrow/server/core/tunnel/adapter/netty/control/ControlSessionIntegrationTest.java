@@ -10,12 +10,14 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.SessionLimits;
+import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.testsupport.ConformanceVectors;
 import io.jburrow.protocol.testsupport.Hex;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -23,20 +25,24 @@ import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
 import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
+import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettingsFixture;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.TcpSettings;
 import io.jburrow.server.core.tunnel.application.InMemoryAuthtokenVerifier;
 import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
+import io.jburrow.server.core.tunnel.application.RegistrationFixtures;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
 import io.jburrow.server.core.tunnel.domain.Principal;
+import io.jburrow.server.core.tunnel.domain.TunnelId;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import java.net.InetAddress;
@@ -49,6 +55,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -66,7 +73,11 @@ class ControlSessionIntegrationTest {
 
     private static final String TOKEN = "jb_" + "a".repeat(43);
     private static final String PRINCIPAL = "tester";
+    private static final String BOB_TOKEN = "jb_" + "d".repeat(43);
+    private static final String CAROL_TOKEN = "jb_" + "e".repeat(43);
+    private static final SubdomainName DEMO = new SubdomainName("demo");
     private static final String PUBLIC_HOST = "localhost";
+    private static final RegistrationPolicy POLICY = RegistrationFixtures.policy(1, PUBLIC_HOST);
     private static final int FIRST_PORT = 40_100;
     private static final int POOL_SIZE = 5;
 
@@ -82,7 +93,10 @@ class ControlSessionIntegrationTest {
     private static final int MAX_CONCURRENT_STREAMS = 7;
     private static final Duration STOP_TIMEOUT = Duration.ofSeconds(15);
 
-    private final InMemoryAuthtokenVerifier tokens = new InMemoryAuthtokenVerifier().with(TOKEN, PRINCIPAL);
+    private final InMemoryAuthtokenVerifier tokens = new InMemoryAuthtokenVerifier()
+            .with(TOKEN, PRINCIPAL)
+            .with(BOB_TOKEN, "bob")
+            .with(CAROL_TOKEN, "carol");
     private final SlowVerifier verifier = new SlowVerifier(tokens);
     private final SessionAdmission admission = new SessionAdmission(16, 8, 3);
     private final PortReservationService ports = new PortReservationService(new PortPool(
@@ -93,7 +107,8 @@ class ControlSessionIntegrationTest {
             InstantSource.system()));
     private final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
     private final ExecutorService blocking = Executors.newVirtualThreadPerTaskExecutor();
-    private final FakeTunnelListeners listeners = new FakeTunnelListeners(PUBLIC_HOST);
+    private final SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
+    private final FakeTunnelListeners listeners = new FakeTunnelListeners(POLICY);
     private final List<ScriptedPeer> peers = new ArrayList<>();
 
     private EdgeServer edge;
@@ -275,6 +290,113 @@ class ControlSessionIntegrationTest {
 
         peer.expectError(ErrorCode.TUNNEL_LIMIT_EXCEEDED, TIMEOUT);
         assertThat(verifier.calls()).isZero();
+    }
+
+    @Test
+    void aClientOfferingHttpGetsItOnlyFromAServerThatEnablesIt() {
+        start();
+        ScriptedPeer peer = connect();
+
+        peer.send(hello(List.of("http")));
+
+        assertThat(peer.expect(Frame.ServerHello.class, TIMEOUT).message().capabilities())
+                .isEmpty();
+        assertThat(peer.httpNegotiated()).isFalse();
+    }
+
+    @Test
+    void anHttpTunnelWithARequestedNameIsPublicUnderTheDomain() {
+        startWithHttp();
+        ScriptedPeer peer = connect();
+
+        peer.send(hello(List.of("http")));
+        assertThat(peer.expect(Frame.ServerHello.class, TIMEOUT).message().capabilities())
+                .containsExactly("http");
+        peer.send(register(TOKEN, http("web", "demo")));
+
+        RegisteredTunnel tunnel =
+                peer.expect(Frame.Registered.class, TIMEOUT).message().tunnels().getFirst();
+        assertThat(tunnel.ref()).isEqualTo("web");
+        assertThat(tunnel.kind()).isEqualTo(TunnelKind.HTTP);
+        assertThat(tunnel.publicHost()).isEqualTo("demo.localhost");
+        assertThat(tunnel.publicPort()).isEqualTo(RegistrationFixtures.HTTP_PORT);
+        assertThat(tunnel.url()).isEqualTo("http://demo.localhost:7080");
+        TunnelId id = new TunnelId(tunnel.tunnelId());
+        assertThat(routes.find(DEMO)).contains(id);
+        assertThat(sessions.registry().find(id)).isPresent();
+        assertThat(ports.snapshot().reserved()).isZero();
+    }
+
+    @Test
+    void anHttpTunnelWithoutANameGetsARandomOne() {
+        startWithHttp();
+        ScriptedPeer peer = httpHelloed(connect());
+
+        peer.send(register(TOKEN, http("web", null)));
+
+        RegisteredTunnel tunnel =
+                peer.expect(Frame.Registered.class, TIMEOUT).message().tunnels().getFirst();
+        assertThat(tunnel.publicHost()).matches("[a-z]+-[a-z]+-[0-9a-f]{4}\\.localhost");
+        assertThat(tunnel.url()).isEqualTo("http://" + tunnel.publicHost() + ":7080");
+        SubdomainName name =
+                SubdomainName.underDomain(tunnel.publicHost(), "localhost").orElseThrow();
+        assertThat(routes.find(name)).contains(new TunnelId(tunnel.tunnelId()));
+    }
+
+    @Test
+    void aNameAnotherSessionHasIsUnavailableAndNamesTheTunnel() {
+        startWithHttp();
+        httpEstablished(connect(), TOKEN);
+        ScriptedPeer second = httpHelloed(connect());
+
+        second.send(register(BOB_TOKEN, http("web", "demo")));
+
+        ErrorBody error = second.expect(Frame.Error.class, TIMEOUT).body();
+        assertThat(error.code()).isEqualTo(ErrorCode.SUBDOMAIN_UNAVAILABLE);
+        assertThat(error.ref()).isEqualTo("web");
+        assertThat(second.expectClosed(TIMEOUT)).isEqualTo(WebSocketCloseStatus.POLICY_VIOLATION);
+    }
+
+    @Test
+    void aReservedNameIsForbidden() {
+        startWithHttp();
+        ScriptedPeer peer = httpHelloed(connect());
+
+        peer.send(register(TOKEN, http("web", "api")));
+
+        assertThat(peer.expectError(ErrorCode.SUBDOMAIN_FORBIDDEN, TIMEOUT).ref())
+                .isEqualTo("web");
+    }
+
+    @Test
+    void anEndedSessionsNameIsHeldForItsPrincipalOnly() {
+        startWithHttp();
+        ScriptedPeer first = httpEstablished(connect(), TOKEN);
+
+        first.close();
+        awaitTrue(() -> routes.find(DEMO).isEmpty());
+
+        ScriptedPeer third = httpHelloed(connect());
+        third.send(register(CAROL_TOKEN, http("web", "demo")));
+        third.expectError(ErrorCode.SUBDOMAIN_UNAVAILABLE, TIMEOUT);
+        ScriptedPeer again = httpEstablished(connect(), TOKEN);
+        assertThat(routes.find(DEMO)).isPresent();
+    }
+
+    @Test
+    void aSessionsTunnelsAreFindableUntilItEnds() {
+        startWithHttp();
+        ScriptedPeer peer = httpHelloed(connect());
+        peer.send(register(TOKEN, http("web", "demo")));
+        TunnelId id = new TunnelId(peer.expect(Frame.Registered.class, TIMEOUT)
+                .message()
+                .tunnels()
+                .getFirst()
+                .tunnelId());
+
+        peer.close();
+
+        awaitTrue(() -> sessions.registry().find(id).isEmpty());
     }
 
     @Test
@@ -503,15 +625,24 @@ class ControlSessionIntegrationTest {
         start(listeners);
     }
 
+    /** A server that enables {@code http}, as one will once the edge serves HTTP exchanges. */
+    private void startWithHttp() {
+        start(listeners, Set.of(Capability.HTTP));
+    }
+
     private void start(TunnelListeners tunnelListeners) {
-        EdgeSettings settings = settings();
-        RegisterTunnels register =
-                new RegisterTunnels(verifier, admission, ports, new RegistrationPolicy(1, PUBLIC_HOST));
+        start(tunnelListeners, Set.of());
+    }
+
+    private void start(TunnelListeners tunnelListeners, Set<Capability> capabilities) {
+        EdgeSettings settings = settings(capabilities);
+        RegisterTunnels register = new RegisterTunnels(verifier, admission, ports, routes, POLICY);
         EngineDependencies deps = new EngineDependencies(
                 register,
                 admission,
                 new StreamQuota(16),
                 ports,
+                routes,
                 metrics,
                 blocking,
                 new TcpSettings("127.0.0.1", PUBLIC_HOST, 32 * 1024));
@@ -520,7 +651,7 @@ class ControlSessionIntegrationTest {
         edge.start();
     }
 
-    private static EdgeSettings settings() {
+    private static EdgeSettings settings(Set<Capability> capabilities) {
         return new EdgeSettings(
                 new InetSocketAddress(InetAddress.getLoopbackAddress(), 0),
                 "localhost",
@@ -538,7 +669,9 @@ class ControlSessionIntegrationTest {
                 SERVER_WINDOWS,
                 MAX_CONCURRENT_STREAMS,
                 16,
-                "test");
+                "test",
+                HttpSettingsFixture.defaults(),
+                capabilities);
     }
 
     private ScriptedPeer connect() {
@@ -564,9 +697,26 @@ class ControlSessionIntegrationTest {
         return peer;
     }
 
+    private static ScriptedPeer httpHelloed(ScriptedPeer peer) {
+        peer.send(hello(List.of("http")));
+        peer.expect(Frame.ServerHello.class, TIMEOUT);
+        return peer;
+    }
+
+    /** A session with an HTTP tunnel on {@link #DEMO}. */
+    private static ScriptedPeer httpEstablished(ScriptedPeer peer, String authtoken) {
+        httpHelloed(peer).send(register(authtoken, http("web", DEMO.value())));
+        peer.expect(Frame.Registered.class, TIMEOUT);
+        return peer;
+    }
+
     private static Frame hello() {
+        return hello(List.of());
+    }
+
+    private static Frame hello(List<String> capabilities) {
         return new Frame.Hello(new Hello(
-                new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), List.of(), ScriptedPeer.CLIENT_WINDOWS));
+                new ClientInfo("jburrow-test", "1.0", "linux", "amd64"), capabilities, ScriptedPeer.CLIENT_WINDOWS));
     }
 
     private static Frame register(String authtoken, TunnelRequest... tunnels) {
@@ -575,6 +725,10 @@ class ControlSessionIntegrationTest {
 
     private static TunnelRequest tcp(String ref, Integer remotePort) {
         return new TunnelRequest(ref, TunnelKind.TCP, remotePort);
+    }
+
+    private static TunnelRequest http(String ref, String subdomain) {
+        return new TunnelRequest(ref, TunnelKind.HTTP, subdomain, null);
     }
 
     private static Duration elapsedSince(long startedNanos) {

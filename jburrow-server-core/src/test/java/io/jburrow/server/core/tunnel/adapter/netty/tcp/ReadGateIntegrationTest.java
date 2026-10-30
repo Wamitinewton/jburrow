@@ -333,7 +333,7 @@ class ReadGateIntegrationTest {
 
     /** The bytes each open stream carries; on the session's event loop. */
     private static List<Integer> carried(SessionContext session) {
-        StreamRelay relay = (StreamRelay) session.streams().orElseThrow();
+        StreamRelay relay = TunnelHarness.relay(session);
         return relay.visitorChannels().stream()
                 .map(channel -> channel.pipeline().get(VisitorHandler.class).carried())
                 .toList();

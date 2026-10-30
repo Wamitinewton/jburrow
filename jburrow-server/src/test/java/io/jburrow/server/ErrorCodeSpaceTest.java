@@ -2,7 +2,9 @@ package io.jburrow.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.jburrow.server.core.tunnel.adapter.netty.http.EdgeError;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
@@ -48,6 +50,27 @@ class ErrorCodeSpaceTest {
                         .map(Enum::name))
                 .containsExactlyInAnyOrder("SUBDOMAIN_UNAVAILABLE", "SUBDOMAIN_FORBIDDEN", "LOCAL_SERVICE_ERROR")
                 .noneMatch(rest::contains);
+    }
+
+    /**
+     * The edge's page codes reach visitors, never a peer, so they don't need a protocol constant; a page may share a
+     * protocol code's name only to report that code, as {@link EdgeError#protocolCode()} declares.
+     */
+    @Test
+    void edgeErrorCodesShareANameOnlyWithTheProtocolCodeTheyRender() {
+        Set<String> rest = names(io.jburrow.server.api.shared.error.ErrorCode.values());
+
+        for (EdgeError error : EdgeError.values()) {
+            Optional<io.jburrow.protocol.wire.ErrorCode> sameName = Arrays.stream(
+                            io.jburrow.protocol.wire.ErrorCode.values())
+                    .filter(code -> code.name().equals(error.name()))
+                    .findFirst();
+
+            assertThat(rest).as("REST codes").doesNotContain(error.name());
+            assertThat(error.protocolCode())
+                    .as("%s shares a name with a protocol code only if it renders that code", error)
+                    .isEqualTo(sameName);
+        }
     }
 
     private static Set<String> names(Enum<?>[] constants) {

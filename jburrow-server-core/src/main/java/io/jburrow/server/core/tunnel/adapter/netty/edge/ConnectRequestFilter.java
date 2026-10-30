@@ -28,6 +28,10 @@ import org.slf4j.LoggerFactory;
  * Lets through only a valid connect request, checked in the order of {@code docs/protocol.md} §3.3, and refuses
  * anything else with the first check that fails.
  *
+ * <p>The {@link HostDispatcher} sends it only requests for the connect host, so in practice a {@code NOT_FOUND} here
+ * means a wrong method or path. The {@code Host} check stays in its place in the order all the same: the filter is
+ * the protocol's gate, and doesn't rely on what is in front of it.
+ *
  * <p>A request that passes holds a {@link HandshakeTicket}, stored on the channel. The ticket is released when the
  * channel closes and nowhere else, so it is released exactly once however the connection ends.
  */

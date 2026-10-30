@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettings;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -20,7 +22,8 @@ class EdgeConfigurationTest {
 
     @Test
     void buildsEdgeSettingsFromTheProperties() {
-        EdgeSettings settings = EdgeConfiguration.edgeSettings(edge("0.0.0.0", List.of("10.42.0.0/16")), "1.2.3");
+        EdgeSettings settings =
+                EdgeConfiguration.edgeSettings(edge("0.0.0.0", List.of("10.42.0.0/16")), http(List.of()), "1.2.3");
 
         assertThat(settings.bind().getAddress().getHostAddress()).isEqualTo("0.0.0.0");
         assertThat(settings.bind().getPort()).isEqualTo(7080);
@@ -34,6 +37,40 @@ class EdgeConfigurationTest {
         assertThat(settings.maxConcurrentStreams()).isEqualTo(1_000);
         assertThat(settings.maxStreams()).isEqualTo(4_000);
         assertThat(settings.serverVersion()).isEqualTo("1.2.3");
+        assertThat(settings.http())
+                .isEqualTo(new HttpSettings(
+                        "example.dev",
+                        100L * 1024 * 1024,
+                        Duration.ofSeconds(60),
+                        Duration.ofSeconds(75),
+                        16 * 1024,
+                        Duration.ofSeconds(1),
+                        16L * 1024 * 1024,
+                        2L * 1024 * 1024));
+        assertThat(settings.capabilities()).containsExactly(Capability.HTTP);
+    }
+
+    @Test
+    void reservesTheLabelsOfTheServiceHostsUnderTheDomain() {
+        assertThat(EdgeConfiguration.reservedNames(http(List.of("grafana")), "connect.example.dev", "TCP.example.dev"))
+                .containsExactly("connect", "grafana", "tcp");
+    }
+
+    @Test
+    void reservesNothingForServiceHostsOutsideTheDomain() {
+        assertThat(EdgeConfiguration.reservedNames(http(List.of()), "connect.other.dev", "example.dev"))
+                .isEmpty();
+    }
+
+    @Test
+    void aServiceHostTwoLabelsUnderTheDomainIsRefused() {
+        assertThatIllegalStateException()
+                .isThrownBy(() ->
+                        EdgeConfiguration.reservedNames(http(List.of()), "connect.example.dev", "tcp.eu.example.dev"))
+                .withMessageStartingWith("Invalid jburrow.tcp.public-host: tcp.eu.example.dev is more than one label");
+        assertThatIllegalStateException()
+                .isThrownBy(() -> EdgeConfiguration.reservedNames(http(List.of()), "a.b.example.dev", "localhost"))
+                .withMessageStartingWith("Invalid jburrow.edge.connect-host");
     }
 
     @Test
@@ -50,7 +87,7 @@ class EdgeConfigurationTest {
     @Test
     void aBindAddressMustBeAnIpLiteral() {
         assertThatIllegalStateException()
-                .isThrownBy(() -> EdgeConfiguration.edgeSettings(edge("localhost", List.of()), "1"))
+                .isThrownBy(() -> EdgeConfiguration.edgeSettings(edge("localhost", List.of()), http(List.of()), "1"))
                 .withMessage("Invalid jburrow.edge.bind-address: must be an IP address literal");
     }
 
@@ -69,6 +106,22 @@ class EdgeConfigurationTest {
     @Test
     void anUnsetPortIsClear() {
         EdgeConfiguration.requireClear(RANGE, new MockEnvironment(), "server.port");
+    }
+
+    private static JBurrowProperties.Http http(List<String> reservedNames) {
+        return new JBurrowProperties.Http(
+                "example.dev",
+                "https",
+                443,
+                reservedNames,
+                Duration.ofSeconds(60),
+                DataSize.ofMegabytes(100),
+                Duration.ofSeconds(60),
+                Duration.ofSeconds(75),
+                DataSize.ofKilobytes(16),
+                Duration.ofSeconds(1),
+                DataSize.ofMegabytes(16),
+                DataSize.ofMegabytes(2));
     }
 
     private static JBurrowProperties.Edge edge(String bindAddress, List<String> trustedProxies) {

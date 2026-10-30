@@ -6,5 +6,8 @@
  *
  * <p>Validation failures are {@code VALIDATION_FAILED} session errors whose message names the field relative to the
  * record that rejected it; the mapper prefixes the path from the payload root.
+ *
+ * <p>{@link io.jburrow.protocol.control.SubdomainName} is the exception: not a payload but a value both sides keep, so
+ * it throws {@link IllegalArgumentException} and offers {@code parse} for input that may be invalid.
  */
 package io.jburrow.protocol.control;

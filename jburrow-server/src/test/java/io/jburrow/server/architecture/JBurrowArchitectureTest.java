@@ -63,6 +63,14 @@ class JBurrowArchitectureTest {
                 arguments("MAIL_ONLY_IN_ADAPTERS", JBurrowArchitectureRules.MAIL_ONLY_IN_ADAPTERS, "mailleak.jakarta"),
                 arguments("MAIL_ONLY_IN_ADAPTERS", JBurrowArchitectureRules.MAIL_ONLY_IN_ADAPTERS, "mailleak.spring"),
                 arguments("FEATURES_TALK_VIA_PORTS", JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS, "crossfeature"),
+                arguments(
+                        "FEATURES_TALK_VIA_PORTS",
+                        JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS,
+                        "routing.intotunnel"),
+                arguments(
+                        "FEATURES_TALK_VIA_PORTS",
+                        JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS,
+                        "routing.intodomain"),
                 arguments("NO_FEATURE_CYCLES", JBurrowArchitectureRules.NO_FEATURE_CYCLES, "cycle"),
                 arguments(
                         "NO_SPRING_IN_CORE_LAYERS",
