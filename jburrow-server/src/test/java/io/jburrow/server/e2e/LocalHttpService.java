@@ -54,7 +54,12 @@ final class LocalHttpService implements AutoCloseable {
     private static final int PIECE = 64 * 1024;
 
     private final HttpServer server;
-    private final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
+    /**
+     * Platform threads: on JDK 21 a virtual thread blocked in the JDK server's synchronized stream writes pins its
+     * carrier, so a few stalled responses would take every carrier and stop the service answering anything else.
+     */
+    private final ExecutorService threads = Executors.newCachedThreadPool();
+
     private final String marker;
     private final List<Received> received = new CopyOnWriteArrayList<>();
     /** When each server-sent event was handed to the connection, as {@link System#nanoTime}. */
