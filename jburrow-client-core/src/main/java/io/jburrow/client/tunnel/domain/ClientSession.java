@@ -10,12 +10,16 @@ import static io.jburrow.protocol.wire.FrameType.PONG;
 import static io.jburrow.protocol.wire.FrameType.REGISTER;
 import static io.jburrow.protocol.wire.FrameType.WINDOW_UPDATE;
 
+import io.jburrow.protocol.control.ClientInfo;
+import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.SessionLimits;
+import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.flow.Credit;
@@ -23,15 +27,18 @@ import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.flow.SessionFlow;
 import io.jburrow.protocol.flow.StreamFlow;
 import io.jburrow.protocol.flow.UpdateTarget;
+import io.jburrow.protocol.stream.HttpExchangeRules;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamLifecycle;
 import io.jburrow.protocol.stream.StreamOutcome;
 import io.jburrow.protocol.stream.StreamState;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.protocol.wire.StreamIds;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
@@ -43,11 +50,15 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * One control session as the client sees it: its state ({@code docs/protocol.md} §8), the tunnels the server created,
- * the streams the server opened, and their flow control (§10). The server is untrusted input here, exactly as the
- * client is on the server: every frame is checked against the session's state and windows, and every decision is a
- * return value or a {@link ProtocolException} for the caller to act on. The stream relay learns everything about a
- * stream here, never from the flow model directly.
+ * One control session as the client sees it: its state ({@code docs/protocol.md} §8), the capabilities it negotiated
+ * (§4.2), the tunnels the server created, the streams the server opened, their flow control (§10), and the rules of
+ * each HTTP stream's exchange (§9.7). The server is untrusted input here, exactly as the client is on the server: every
+ * frame is checked against the session's state, windows and exchange rules, and every decision is a return value or a
+ * {@link ProtocolException} for the caller to act on. The stream relay learns everything about a stream here, never
+ * from the flow model directly.
+ *
+ * <p>A session asking for an HTTP tunnel sends its {@code REGISTER} only once the server's {@code HELLO} has listed
+ * {@code http} (§8.3); one asking only for TCP tunnels sends it with its {@code HELLO}.
  *
  * <p>The client doesn't check {@code limits.maxConcurrentStreams}: it binds the server, and the client's view of which
  * streams are open can lag behind the server's (§8.5).
@@ -73,29 +84,45 @@ public final class ClientSession {
 
     private final List<TunnelSpec> requested;
     private final Windows own;
+    private final Set<Capability> offered;
     /** Insertion order is opening order, so iteration is by increasing id. */
     private final Map<Integer, Entry> streams = new LinkedHashMap<>();
 
     private ClientSessionState state = ClientSessionState.CONNECTING;
     private UUID sessionId;
     private SessionLimits limits;
+    private Set<Capability> capabilities = Set.of();
     private Map<UUID, ActiveTunnel> tunnels = Map.of();
     private int highestStreamId = StreamIds.CONTROL;
     /** Created by the server's {@code HELLO}, which carries its windows. */
     private SessionFlow flow;
 
+    /** A session that offers no capability, so it asks for TCP tunnels only. */
+    public ClientSession(List<TunnelSpec> requested, Windows own) {
+        this(requested, own, Set.of());
+    }
+
     /**
      * @param requested the tunnels to ask for, in order; at least one, with distinct refs
      * @param own this client's receive windows, announced in its {@code HELLO}
+     * @param offered the capabilities this client offers in its {@code HELLO}; every capability a requested tunnel
+     *     needs
      */
-    public ClientSession(List<TunnelSpec> requested, Windows own) {
+    public ClientSession(List<TunnelSpec> requested, Windows own, Set<Capability> offered) {
         this.own = Objects.requireNonNull(own, "own");
         this.requested = List.copyOf(Objects.requireNonNull(requested, "requested"));
+        this.offered = Collections.unmodifiableSet(
+                Objects.requireNonNull(offered, "offered").isEmpty()
+                        ? EnumSet.noneOf(Capability.class)
+                        : EnumSet.copyOf(offered));
         if (this.requested.isEmpty()) {
             throw new IllegalArgumentException("A session asks for at least one tunnel");
         }
         if (this.requested.stream().map(TunnelSpec::ref).distinct().count() != this.requested.size()) {
             throw new IllegalArgumentException("Each tunnel of a session needs its own ref");
+        }
+        if (registersAfterHello() && !this.offered.contains(Capability.HTTP)) {
+            throw new IllegalArgumentException("An HTTP tunnel needs a session that offers the http capability");
         }
     }
 
@@ -111,13 +138,29 @@ public final class ClientSession {
         return state == ClientSessionState.CLOSING;
     }
 
+    /** The {@code HELLO} this session sends, from {@code client}: its offered capabilities and receive windows. */
+    public Hello hello(ClientInfo client) {
+        return new Hello(client, offered.stream().map(Capability::wireName).toList(), own);
+    }
+
     /** The {@code REGISTER} this session sends, with {@code authtoken}. */
     public Register register(String authtoken) {
         return new Register(
                 authtoken, requested.stream().map(TunnelSpec::toRequest).toList());
     }
 
-    /** The WebSocket upgrade completed and {@code HELLO} and {@code REGISTER} went out: {@code CONNECTING -> AWAITING_HELLO}. */
+    /**
+     * Whether {@code REGISTER} waits for the server's {@code HELLO}: it asks for an HTTP tunnel, which only a session
+     * the server has given {@code http} may (§4.2).
+     */
+    public boolean registersAfterHello() {
+        return requested.stream().anyMatch(spec -> spec.kind() == TunnelKind.HTTP);
+    }
+
+    /**
+     * The WebSocket upgrade completed and {@code HELLO} went out, with {@code REGISTER} unless it
+     * {@linkplain #registersAfterHello waits}: {@code CONNECTING -> AWAITING_HELLO}.
+     */
     public void onUpgraded() {
         if (state != ClientSessionState.CONNECTING) {
             throw new IllegalStateException("The session was upgraded twice, or after closing: " + state);
@@ -146,7 +189,8 @@ public final class ClientSession {
 
     /**
      * The server's {@code HELLO}: {@code AWAITING_HELLO -> AWAITING_REGISTERED}. Its windows, with this client's own,
-     * set the session's flow control. Capabilities the server lists are ignored, since this client offered none (§4.2).
+     * set the session's flow control, and the capabilities it lists that this client offered are the session's; the
+     * others are ignored (§4.2).
      *
      * @return the limits the client must stay within
      */
@@ -155,10 +199,38 @@ public final class ClientSession {
         require(ClientSessionState.AWAITING_HELLO, HELLO);
         Windows remote = hello.windows();
         flow = new SessionFlow(own.stream(), own.session(), remote.stream(), remote.session());
+        Set<Capability> agreed = EnumSet.noneOf(Capability.class);
+        for (String name : hello.capabilities()) {
+            Capability.fromWireName(name).filter(offered::contains).ifPresent(agreed::add);
+        }
+        capabilities = Collections.unmodifiableSet(agreed);
         sessionId = hello.sessionId();
         limits = hello.limits();
         state = ClientSessionState.AWAITING_REGISTERED;
         return limits;
+    }
+
+    /** The capabilities this client offers in its {@code HELLO}. */
+    public Set<Capability> offered() {
+        return offered;
+    }
+
+    /** The capabilities both sides support, as the server's {@code HELLO} listed them. Empty until it arrives. */
+    public Set<Capability> capabilities() {
+        return capabilities;
+    }
+
+    /** Whether the session has {@code http}: what the codec and every rule scoped to HTTP tunnels read. */
+    public boolean httpEnabled() {
+        return capabilities.contains(Capability.HTTP);
+    }
+
+    /**
+     * A capability the requested tunnels need that the server's {@code HELLO} didn't list. Such a session can't
+     * register, and ends without sending {@code REGISTER}.
+     */
+    public Optional<Capability> missingCapability() {
+        return registersAfterHello() && !httpEnabled() ? Optional.of(Capability.HTTP) : Optional.empty();
     }
 
     /**
@@ -187,10 +259,10 @@ public final class ClientSession {
             if (request.remotePort() != null && answer.publicPort() != request.remotePort()) {
                 throw protocolError("tunnels[" + i + "] of the REGISTER reply isn't on the requested port.");
             }
-            if (byId.put(
-                            answer.tunnelId(),
-                            new ActiveTunnel(answer, requested.get(i).target()))
-                    != null) {
+            if (request.subdomain() != null && !answer.publicHost().startsWith(request.subdomain() + ".")) {
+                throw protocolError("tunnels[" + i + "] of the REGISTER reply isn't on the requested subdomain.");
+            }
+            if (byId.put(answer.tunnelId(), new ActiveTunnel(answer, requested.get(i))) != null) {
                 throw protocolError("tunnels[" + i + "] of the REGISTER reply repeats a tunnelId.");
             }
         }
@@ -201,7 +273,8 @@ public final class ClientSession {
 
     /**
      * The server opened stream {@code streamId} for a visitor of one of this session's tunnels (§9.4). The stream is
-     * open from this moment.
+     * open from this moment. A stream of an HTTP tunnel carries the request head of {@code open}, and the rules of its
+     * exchange hold from here on (§9.7).
      *
      * @return the tunnel whose local target the stream is forwarded to
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} for an id not above every id seen, or an unknown
@@ -221,7 +294,8 @@ public final class ClientSession {
             throw protocolError("OPEN on stream " + streamId + " has a kind its tunnel doesn't.");
         }
         highestStreamId = streamId;
-        streams.put(streamId, new Entry(new StreamLifecycle(), requireFlow().openStream()));
+        HttpExchangeRules rules = open.kind() == TunnelKind.HTTP ? HttpExchangeRules.atClient(open.request()) : null;
+        streams.put(streamId, new Entry(new StreamLifecycle(), requireFlow().openStream(), rules));
         return tunnel;
     }
 
@@ -258,8 +332,8 @@ public final class ClientSession {
     /**
      * Records {@code DATA} of {@code bytes} sent on {@code streamId}, spending its stream and session credit.
      *
-     * @throws IllegalStateException if the stream isn't open for sending, or {@code bytes} is more than
-     *     {@link #sendable}: a bug in the caller
+     * @throws IllegalStateException if the stream isn't open for sending, {@code bytes} is more than
+     *     {@link #sendable}, or it breaks the response's framing: a bug in the caller
      */
     public void onDataSent(int streamId, int bytes) {
         Entry entry = requireOpen(streamId);
@@ -267,17 +341,38 @@ public final class ClientSession {
             throw new IllegalStateException("Stream " + streamId + " is "
                     + entry.lifecycle().state() + " and takes no more DATA from this client");
         }
+        if (entry.isHttp()) {
+            entry.rules().onResponseData(bytes);
+        }
         flow.onSent(entry.flow(), bytes);
         apply(streamId, entry, StreamEvent.DATA_SENT);
     }
 
     /**
-     * {@code DATA} of {@code bytes} from the server on {@code streamId}. The stream's lifecycle decides first, then the
-     * windows, so a frame that is a stream error is never also taken for an overrun of the stream window. Bytes it
-     * returns as {@link DataOutcome.Deliver} are held until {@link #onReleased}; the other outcomes have released them.
+     * Records {@code HEADERS} sent on {@code streamId}: a response head of its exchange. Not flow-controlled.
      *
-     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened;
-     *     {@link ErrorCode#FLOW_CONTROL_ERROR} if {@code bytes} overruns the session window, or an open stream's window
+     * @throws IllegalStateException if the stream isn't an open HTTP stream this client still sends on, or the head
+     *     breaks the exchange's rules: a bug in the caller
+     */
+    public void onHeadersSent(int streamId, HttpResponseHead head) {
+        Objects.requireNonNull(head, "head");
+        Entry entry = requireOpen(streamId);
+        if (!entry.isHttp()) {
+            throw new IllegalStateException("Stream " + streamId + " carries a TCP connection and takes no HEADERS");
+        }
+        apply(streamId, entry, StreamEvent.HEADERS_SENT);
+        entry.rules().onResponseHead(head);
+    }
+
+    /**
+     * {@code DATA} of {@code bytes} from the server on {@code streamId}. The stream's lifecycle decides first, then an
+     * HTTP stream's rules, then the windows, so a frame that is a stream error is never also taken for an overrun of
+     * the stream window. Bytes it returns as {@link DataOutcome.Deliver} are held until {@link #onReleased}; the other
+     * outcomes have released them.
+     *
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened, or the {@code DATA}
+     *     breaks its request body's framing; {@link ErrorCode#FLOW_CONTROL_ERROR} if {@code bytes} overruns the
+     *     session window, or an open stream's window
      */
     public DataOutcome onDataReceived(int streamId, int bytes) {
         SessionFlow flow = requireFlow();
@@ -288,6 +383,9 @@ public final class ClientSession {
         StreamOutcome outcome = apply(streamId, entry.get(), StreamEvent.DATA_RECEIVED);
         return switch (outcome) {
             case StreamOutcome.Accept accepted -> {
+                if (entry.get().isHttp()) {
+                    entry.get().rules().onRequestData(bytes);
+                }
                 flow.onReceived(entry.get().flow(), bytes);
                 yield DataOutcome.DELIVER;
             }
@@ -353,7 +451,8 @@ public final class ClientSession {
      * closed is {@link StreamOutcome.Discard} (§9.3). {@code DATA} and {@code WINDOW_UPDATE} have their own methods,
      * since they carry credit.
      *
-     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} if the stream was never opened, or a {@code CLOSE}
+     *     ends a request body short of its {@code content-length}
      */
     public StreamOutcome onStreamFrame(int streamId, StreamEvent received) {
         Objects.requireNonNull(received, "received");
@@ -365,24 +464,34 @@ public final class ClientSession {
             return DISCARD;
         }
         StreamOutcome outcome = apply(streamId, entry.get(), received);
-        if (outcome instanceof StreamOutcome.Accept accepted && accepted.next() == StreamState.HALF_CLOSED_REMOTE) {
-            flow.onPeerFinished(entry.get().flow());
+        if (outcome instanceof StreamOutcome.Accept accepted) {
+            if (received == StreamEvent.CLOSE_RECEIVED && entry.get().isHttp()) {
+                entry.get().rules().onRequestEnd();
+            }
+            if (accepted.next() == StreamState.HALF_CLOSED_REMOTE) {
+                flow.onPeerFinished(entry.get().flow());
+            }
         }
         return outcome;
     }
 
     /**
      * Records a {@code CLOSE} or {@code CLOSE RST} this client sent on {@code streamId}. {@code DATA} is recorded by
-     * {@link #onDataSent}, {@code WINDOW_UPDATE} by {@link #onReleased}.
+     * {@link #onDataSent}, {@code HEADERS} by {@link #onHeadersSent}, {@code WINDOW_UPDATE} by {@link #onReleased}.
      *
-     * @throws IllegalStateException if the stream isn't open or its state forbids the send: a bug in the caller
+     * @throws IllegalStateException if the stream isn't open, its state forbids the send, or a {@code CLOSE} ends a
+     *     response its rules say isn't complete: a bug in the caller
      */
     public void onStreamSent(int streamId, StreamEvent sent) {
         Objects.requireNonNull(sent, "sent");
         if (sent != StreamEvent.CLOSE_SENT && sent != StreamEvent.RST_SENT) {
             throw new IllegalArgumentException(sent + " is not a CLOSE from this client");
         }
-        apply(streamId, requireOpen(streamId), sent);
+        Entry entry = requireOpen(streamId);
+        if (sent == StreamEvent.CLOSE_SENT && entry.isHttp()) {
+            entry.rules().onResponseEnd();
+        }
+        apply(streamId, entry, sent);
     }
 
     /**
@@ -472,8 +581,13 @@ public final class ClientSession {
         return ProtocolException.session(ErrorCode.PROTOCOL_ERROR, message);
     }
 
-    /** One open stream: where it is, and its credit both ways. */
-    private record Entry(StreamLifecycle lifecycle, StreamFlow flow) {}
+    /** One open stream: where it is, its credit both ways, and for an HTTP stream the rules of its exchange. */
+    private record Entry(StreamLifecycle lifecycle, StreamFlow flow, HttpExchangeRules rules) {
+
+        boolean isHttp() {
+            return rules != null;
+        }
+    }
 
     private static String describe(ClientSessionState state) {
         return switch (state) {

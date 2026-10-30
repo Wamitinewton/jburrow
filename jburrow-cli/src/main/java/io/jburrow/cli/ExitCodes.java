@@ -32,6 +32,7 @@ final class ExitCodes {
         }
         return switch (failure.kind()) {
             case CONNECT_FAILED, TLS_FAILED, TIMEOUT, UPGRADE_REFUSED, SERVER_ERROR -> CONNECTION_FAILED;
+            case UNSUPPORTED_BY_SERVER -> PROTOCOL_MISMATCH;
             case LOCAL_ERROR -> INTERNAL_ERROR;
         };
     }

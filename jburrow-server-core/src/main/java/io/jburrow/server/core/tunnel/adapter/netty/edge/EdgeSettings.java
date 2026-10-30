@@ -1,10 +1,12 @@
 package io.jburrow.server.core.tunnel.adapter.netty.edge;
 
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * The edge's configuration, built by the composition root from {@code jburrow.edge.*}. Plain values only, so the
@@ -23,6 +25,8 @@ import java.util.Objects;
  * @param maxConcurrentStreams streams one session may have open, announced in the server {@code HELLO}
  * @param maxStreams streams open across every session; at least {@code maxConcurrentStreams}
  * @param serverVersion this build's version, announced in the server {@code HELLO}
+ * @param http how HTTP tunnels are served
+ * @param capabilities the capabilities the server enables; a session has those its client also offers
  */
 public record EdgeSettings(
         InetSocketAddress bind,
@@ -41,7 +45,9 @@ public record EdgeSettings(
         Windows windows,
         int maxConcurrentStreams,
         int maxStreams,
-        String serverVersion) {
+        String serverVersion,
+        HttpSettings http,
+        Set<Capability> capabilities) {
 
     public EdgeSettings {
         Objects.requireNonNull(bind, "bind");
@@ -50,6 +56,8 @@ public record EdgeSettings(
         trustedProxies = List.copyOf(trustedProxies);
         Objects.requireNonNull(windows, "windows");
         Objects.requireNonNull(serverVersion, "serverVersion");
+        Objects.requireNonNull(http, "http");
+        capabilities = Set.copyOf(capabilities);
         if (bind.isUnresolved()) {
             throw new IllegalArgumentException("The edge binds an IP address, not a name: " + bind);
         }

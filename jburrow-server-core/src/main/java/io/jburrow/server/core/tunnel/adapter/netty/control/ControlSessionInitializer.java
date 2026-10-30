@@ -22,7 +22,8 @@ import java.util.function.LongSupplier;
 
 /**
  * Turns an upgraded connection into a control session: adds the protocol codec, {@link LivenessHandler} and
- * {@link ControlSessionHandler} after the edge's message aggregator, with a new {@link Session} behind them.
+ * {@link ControlSessionHandler} after the edge's message aggregator, with a new {@link Session} behind them. Each
+ * session has its own codec, which decodes what {@code http} introduces once the session has negotiated it.
  */
 public final class ControlSessionInitializer implements SessionInitializer {
 
@@ -39,7 +40,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
     private final TunnelListeners tunnelListeners;
     private final SessionRegistry registry;
     private final SessionCloser closer;
-    private final FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create());
+    private final ControlJson json = ControlJson.create();
     private final FrameCounter frameCounter;
     private final ServerInfo serverInfo;
     private final SessionLimits limits;
@@ -72,7 +73,9 @@ public final class ControlSessionInitializer implements SessionInitializer {
         if (!channel.isActive()) {
             return;
         }
-        Session session = new Session(SessionId.random(), settings.maxConcurrentStreams(), settings.windows());
+        Session session = new Session(
+                SessionId.random(), settings.maxConcurrentStreams(), settings.windows(), settings.capabilities());
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, json, session::httpEnabled);
         SessionContext context =
                 new SessionContext(session, channel, ticket, clientAddress, nanoTime.getAsLong(), closer);
         LivenessHandler liveness =

@@ -92,14 +92,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `HEADERS`, both bodies as `DATA` without their HTTP/1.1 framing, and the codes
   `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR`
   ([ADR-0011](docs/adr/0011-http-tunnels.md)). A peer that doesn't offer `http` sees draft 2
-  unchanged; neither the server nor the client offers it yet. `jburrow-protocol` gains the heads as
+  unchanged. `jburrow-protocol` gains the heads as
   validated records, `HttpExchangeRules` for the order and body length of an exchange, and a Jazzer
   target for them.
-- Reservations and parking in the flow model, for the HTTP edge to come
+- Reservations and parking in the flow model
   ([ADR-0012](docs/adr/0012-http-exchanges-across-event-loops.md)). A reservation takes send
   credit before a read and refunds what the read didn't use. Parking returns a stalled stream's
   session credit before its bytes are written, but not its stream credit. `SessionFlowFuzzTest`
-  covers both. Nothing calls them yet.
+  covers both.
+- The `routing` feature for HTTP tunnel names, for registration to come: `SubdomainName` in the
+  protocol model, the built-in blocklist of reserved names and phishing terms, random
+  `<adjective>-<animal>-<hex>` names, and the in-memory route table, which keeps a released name
+  held for its owner for a while.
+- HTTP tunnel registration on the server: a session negotiates the `http`
+  capability from what its client offers and the server enables, `REGISTER` claims each HTTP
+  tunnel's requested or random name all or nothing with its ports and answers with
+  `http(s)://<name>.<domain>`, refusals carry `SUBDOMAIN_FORBIDDEN` or `SUBDOMAIN_UNAVAILABLE` and
+  the tunnel's `ref`, and a session's names go on hold when it ends.
+- The `jburrow.http.*` settings, validated at startup: the tunnel domain (required in `prod`, as
+  `JBURROW_HTTP_DOMAIN`), the public scheme and port, extra reserved names
+  (`JBURROW_HTTP_RESERVED_NAMES`), the name hold, and the request, timeout, socket buffer and
+  parking limits the edge will use. The labels of the connect and TCP hosts under the domain are
+  reserved, and a service host nested deeper under it stops startup.
+- The edge reads each request's `Host` before deciding what the request is for. The connect host
+  gets phase 1's upgrade handlers, installed per request and otherwise unchanged; a host one label
+  under `jburrow.http.domain` goes to the exchange handler; anything
+  else gets a `404` page. One exchange runs at a time per connection, an idle connection between
+  exchanges is closed after `jburrow.http.keep-alive-timeout`, and a connection that carries
+  tunnel requests gets `jburrow.http.socket-buffer` as its socket buffers.
+- Error pages for requests the edge answers itself: a short HTML page with no script or external
+  reference, naming the host (never the path) and a stable code that the `jburrow-error` header
+  repeats, with `Retry-After` where it applies.
+- HTTP exchanges on the server, which now lists `http` in its `HELLO`. Each request for a tunnel
+  host becomes a stream on the session serving its name, with the visitor's address in
+  `x-forwarded-for` (from trusted proxies only), `x-forwarded-proto`, `x-forwarded-host` and
+  `via: 1.1 jburrow` set by the edge, and hop-by-hop and visitor-sent forwarding fields removed.
+  The request body is read from the visitor only against credit already reserved for it, at most 16
+  KiB at a time, and the response comes back with its framing set by the edge and `Domain` removed
+  from every `set-cookie`. The edge answers `Expect: 100-continue` itself and passes `1xx` heads on.
+  A response whose visitor stops reading for `jburrow.http.park-after` is parked within
+  `jburrow.http.max-parked` and `max-parked-per-session`, so it stops holding back the tunnel's
+  other requests. Requests get `504` after `jburrow.http.response-timeout`, `502` when the local
+  service fails, `503` with `Retry-After` at a stream cap or while the server stops, and `413` for
+  a chunked body that passes `jburrow.http.max-request-body`. Clients that don't offer `http` see
+  draft 2 unchanged. The startup budget line adds the parked bytes, and the kernel line names
+  exchanges' socket buffers; the `local` profile leaves those to the kernel, since on loopback a
+  16 KB buffer is smaller than one segment.
+- HTTP tunnels in `JBurrowClient`: `JBurrowClient.Builder.http(localTarget)`, with optional
+  `subdomain(name)` and `hostHeader(HostHeader.REWRITE)`. The client offers `http` in every
+  `HELLO`, and sends an HTTP tunnel's `REGISTER` once the server's `HELLO` has listed it; against a
+  server that doesn't, `start()` fails with `TunnelStartException.Kind.UNSUPPORTED_BY_SERVER`
+  before anything is registered. Each request becomes one HTTP/1.1 exchange with the local service
+  on a connection of its own, both bodies under the same flow control as TCP streams. A response
+  that isn't valid HTTP/1.1, or a connection that ends before its response does, resets the stream
+  with `LOCAL_SERVICE_ERROR`; a response that is complete before the request body ends cancels the
+  rest of the body. `TunnelEvents.onExchangeCompleted` reports each exchange's method, target,
+  status, body bytes and duration, never a header value or a body.
 - A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
   x64 and runs a real tunnel with it, 50 concurrent streams on one session and then one 4 MiB
   stream, publishing nothing

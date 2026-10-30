@@ -3,9 +3,10 @@ package io.jburrow.server.core.tunnel.adapter.netty.control;
 import io.jburrow.protocol.adapter.netty.Frame;
 
 /**
- * The streams of one session, as its control handler sees them: where the client's {@code DATA}, {@code CLOSE} and
- * {@code WINDOW_UPDATE} frames go, and what happens to them when the session's connection changes. The tunnel listeners provide it when
- * they bind, and store it with {@link SessionContext#streams(SessionStreams)}.
+ * The streams of one session, as its control handler sees them: where the client's {@code HEADERS}, {@code DATA},
+ * {@code CLOSE} and {@code WINDOW_UPDATE} frames go, and what happens to them when the session's connection changes. A
+ * session's streams carry TCP visitors and HTTP exchanges side by side. The tunnel listeners provide it when they bind,
+ * and store it with {@link SessionContext#streams(SessionStreams)}.
  *
  * <p>Every method is called on the session's event loop.
  */
@@ -13,6 +14,14 @@ public interface SessionStreams {
 
     /** A {@code DATA} frame from the client. Takes over the frame's buffer, on every path. */
     void onData(Frame.Data data);
+
+    /**
+     * A response head from the client, in a session with {@code http}.
+     *
+     * @throws io.jburrow.protocol.wire.ProtocolException {@code PROTOCOL_ERROR} or {@code VALIDATION_FAILED}, which end
+     *     the session
+     */
+    void onHeaders(Frame.Headers headers);
 
     /** A {@code CLOSE} or {@code CLOSE RST} frame from the client. */
     void onClose(Frame.Close close);

@@ -9,8 +9,11 @@ import io.jburrow.server.core.tunnel.adapter.netty.control.TunnelListeners;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
+import io.jburrow.server.core.tunnel.adapter.netty.http.SessionExchanges;
+import io.jburrow.server.core.tunnel.application.ParkingBudget;
 import io.jburrow.server.core.tunnel.application.PlannedTunnel;
 import io.jburrow.server.core.tunnel.application.Registration;
+import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.domain.Tunnel;
@@ -34,8 +37,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Binds a session's TCP tunnel listeners on the session's own event loop, and gives the session a {@link StreamRelay}
- * for the visitors they accept ({@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §TCP tunnels).
+ * Binds a session's TCP tunnel listeners on the session's own event loop, and gives the session its streams: a
+ * {@link StreamRelay} for the visitors they accept ({@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §TCP tunnels) and
+ * {@link SessionExchanges} for the HTTP exchanges the edge hands it. An HTTP tunnel has no listener, since the edge
+ * routes its requests by name: it takes its place in the result without a bind.
  *
  * <p>A port the pool chose that turns out to be in use on the host is quarantined and replaced, up to
  * {@link #MAX_BIND_ATTEMPTS} attempts in all; a port the client asked for fails with {@code PORT_UNAVAILABLE}. Neither
@@ -57,10 +62,11 @@ public final class NettyTunnelListeners implements TunnelListeners {
 
     private final PortReservations ports;
     private final InetAddress bindAddress;
-    private final String publicHost;
+    private final RegistrationPolicy policy;
     private final int visitorReceiveBuffer;
     private final StreamQuota streamQuota;
     private final TunnelMetrics metrics;
+    private final SessionExchanges.Settings exchanges;
 
     public NettyTunnelListeners(EdgeSettings settings, EngineDependencies deps) {
         Objects.requireNonNull(settings, "settings");
@@ -69,10 +75,20 @@ public final class NettyTunnelListeners implements TunnelListeners {
         this.bindAddress = Cidr.parseAddress(deps.tcp().bindAddress())
                 .orElseThrow(() -> new IllegalArgumentException("The tunnel bind address must be an IP literal: "
                         + deps.tcp().bindAddress()));
-        this.publicHost = deps.tcp().publicHost();
+        this.policy = deps.registerTunnels().policy();
         this.visitorReceiveBuffer = deps.tcp().visitorReceiveBuffer();
         this.streamQuota = deps.streamQuota();
         this.metrics = deps.metrics();
+        ParkingBudget parking =
+                new ParkingBudget(settings.http().maxParked(), settings.http().maxParkedPerSession());
+        metrics.bindParkedBytes(parking::parked);
+        this.exchanges = new SessionExchanges.Settings(
+                settings.http().responseTimeout(),
+                settings.http().maxRequestBody(),
+                settings.http().parkAfter(),
+                parking,
+                streamQuota,
+                metrics);
     }
 
     @Override
@@ -81,7 +97,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
         Objects.requireNonNull(registration, "registration");
         Channel channel = session.channel();
         StreamRelay relay = new StreamRelay(session, metrics, streamQuota);
-        session.streams(relay);
+        session.streams(new TunnelStreams(relay, SessionExchanges.attach(session, exchanges)));
         channel.attr(LISTENERS).set(new ArrayList<>());
         Promise<List<Tunnel>> bound = channel.eventLoop().newPromise();
         new Binding(session, relay, registration, bound).bindNext();
@@ -130,12 +146,15 @@ public final class NettyTunnelListeners implements TunnelListeners {
         }
 
         void bindNext() {
+            while (tunnels.size() < planned.size() && planned.get(tunnels.size()) instanceof PlannedTunnel.Http http) {
+                tunnels.add(http.toTunnel(policy));
+            }
             if (tunnels.size() == planned.size()) {
                 bound.trySuccess(List.copyOf(tunnels));
                 return;
             }
-            PlannedTunnel next = planned.get(tunnels.size());
-            Tunnel tunnel = next.toTunnel(publicHost);
+            PlannedTunnel.Tcp next = (PlannedTunnel.Tcp) planned.get(tunnels.size());
+            Tunnel tunnel = next.toTunnel(policy);
             EventLoop loop = session.channel().eventLoop();
             TunnelListener listener = TunnelListener.bind(
                     loop,
@@ -155,7 +174,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
          * If the session closed while binding, its teardown has already closed this listener with the others, and
          * releases the registration as it stands.
          */
-        private void onBound(ChannelFuture done, PlannedTunnel tunnel, Tunnel bound, TunnelListener listener) {
+        private void onBound(ChannelFuture done, PlannedTunnel.Tcp tunnel, Tunnel bound, TunnelListener listener) {
             if (!session.session().isRegistering()) {
                 this.bound.tryFailure(new IllegalStateException("The session closed while its tunnels were binding"));
                 return;
@@ -181,7 +200,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
             }
         }
 
-        private void retryElsewhere(PlannedTunnel tunnel) {
+        private void retryElsewhere(PlannedTunnel.Tcp tunnel) {
             Reservation inUse = tunnel.reservation();
             ports.quarantine(inUse);
             log.warn("tunnel port {} is in use on the host; quarantined (attempt {})", inUse.port(), attempt);
@@ -199,7 +218,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
                 return;
             }
             attempt++;
-            planned.set(tunnels.size(), new PlannedTunnel(tunnel.request(), replacement, tunnel.id()));
+            planned.set(tunnels.size(), new PlannedTunnel.Tcp(tunnel.request(), replacement, tunnel.id()));
             session.registration(new Registration(registration.principal(), planned));
             bindNext();
         }

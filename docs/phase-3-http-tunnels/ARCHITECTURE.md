@@ -206,9 +206,13 @@ reads that set.
 | `tunnels[].subdomain` | string | Optional, `"http"` only. `[a-z0-9][a-z0-9-]{1,61}[a-z0-9]` with no `--`: 3 to 63 characters. Asks for this name. Without it, the server chooses. |
 | `tunnels[].remotePort` | integer | `"tcp"` only. On an `"http"` entry it is `VALIDATION_FAILED`. |
 
-`subdomain` on a `"tcp"` entry is `VALIDATION_FAILED`. Checking the name against the blocklist and
-the route table is the server's job (§8.4's order gains it after the port step), and refusals are
-tunnel-scoped session errors carrying the entry's `ref`, as `PORT_UNAVAILABLE` is:
+`subdomain` on a `"tcp"` entry is `VALIDATION_FAILED`. An `"http"` entry in a session without `http`
+is `VALIDATION_FAILED` too, before any check of §8.4: the session's codec refuses it, and
+`RegisterTunnels`, which is given the session's negotiated capabilities, refuses it again so the rule
+holds of the use case on its own. Checking the name against the blocklist and the route table is the
+server's job (§8.4's order gains it after the port step: every port is reserved before any name is
+claimed), and refusals are tunnel-scoped session errors carrying the entry's `ref`, as
+`PORT_UNAVAILABLE` is:
 
 | Code | Scope | Close code | Meaning |
 |---|---|---|---|
@@ -404,14 +408,19 @@ The `routing` feature in `jburrow-server-core` holds everything about names. It 
 Netty, and nothing the edge needs to hold a lock for.
 
 - **`SubdomainName`** is a validated label: the rule of `tunnels[].subdomain`. The edge parses `Host`
-  into one, so the route table never sees an unchecked string.
+  into one, so the route table never sees an unchecked string. It lives in the protocol model
+  (`io.jburrow.protocol.control`), beside the rule it applies, rather than in the `routing` feature:
+  `routing.domain` needs it and may only depend on domain packages and the protocol model, `tunnel`
+  needs it and may only reach `routing` through its ports, and the client can check `--subdomain`
+  with it before sending.
 - **Random names** are `<adjective>-<animal>-<4 hex digits>`, like `PROJECT.md`'s
   `quiet-otter-4f2a`: two lists of 256 short, plain words each, so 2^32 names. A random name that is
   taken or held is drawn again, up to 8 times, and then `INTERNAL_ERROR`, since at tester scale that
   means a bug, not a full space. A test checks that no word, and no join of two words, matches the
   blocklist.
 - **The blocklist** has two parts. **Reserved names** are refused exactly: the service's own hosts
-  (`api`, `app`, `connect`, `tcp`, `www`, `mail`, `admin`, `status`, `docs`), the label of
+  (`api`, `app`, `connect`, `tcp`, `www`, `mail`, `admin`, `status`, `docs`), the names people expect the
+  operator to answer on (`abuse`, `support`, `security`, `root`), the label of
   `jburrow.edge.connect-host` and of `jburrow.tcp.public-host` when they are under the HTTP domain,
   and `jburrow.http.reserved-names`. **Blocked terms** are refused anywhere in a name: `login`,
   `signin`, `verify`, `account`, `secure`, `wallet`, `bank`, and the brand names phishing uses most
@@ -426,6 +435,11 @@ Netty, and nothing the edge needs to hold a lock for.
   tester whose CLI restarts gets the URL back with `--subdomain`, and nobody can take over a URL in the
   seconds after its owner's session drops. Phase 5's leases replace the hold with a durable
   reservation; phase 4's resume builds on it.
+- **Generic in principal and tunnel.** `SubdomainRoutes<P, T>` and its ports take the claimant and the
+  tunnel as type parameters, and only compare them with `equals`. The composition root makes a
+  `SubdomainRoutes<Principal, TunnelId>`. Naming `tunnel.domain`'s types instead would have `routing`
+  reach into another feature's domain, and once registration uses routing's ports the two features
+  would form a cycle; both are build failures under the layer rules.
 - **Claims** are made by `RegisterTunnels`, all or nothing with any port it reserves, as in phase 1,
   and released when the session ends. The table is a `ConcurrentHashMap` with a per-name compare and
   set, touched at registration, session end and per request (a lookup). ADR-0008 allows global state
@@ -440,7 +454,8 @@ jburrow-protocol/                         io.jburrow.protocol
 ├── wire/         ErrorCode (+ SUBDOMAIN_UNAVAILABLE, SUBDOMAIN_FORBIDDEN, LOCAL_SERVICE_ERROR),
 │                 Capability (new: HTTP), ProtocolVersion (+ supported capabilities)
 ├── control/      TunnelKind (+ HTTP), TunnelRequest (+ subdomain), RegisteredTunnel (url per kind),
-│                 Open (+ request), HttpRequestHead, HttpResponseHead, HeaderFields, BodyFraming (new)
+│                 Open (+ request), HttpRequestHead, HttpResponseHead, HeaderFields, BodyFraming,
+│                 SubdomainName (new)
 ├── stream/       StreamEvent (+ HEADERS_RECEIVED, HEADERS_SENT), HttpExchangeRules (new: the
 │                 ordering and body-length rules of an HTTP stream)
 ├── flow/         SessionFlow (+ reserve, refund, park), ReceiveWindow (+ parked bytes)
@@ -451,17 +466,25 @@ jburrow-protocol/                         io.jburrow.protocol
 jburrow-server-core/                      io.jburrow.server.core
 ├── routing/      new feature
 │   ├── domain/       Blocklist, NameGenerator, Claim
-│   └── application/  SubdomainRoutes; port/ SubdomainClaims, RouteLookup, SubdomainName
+│   └── application/  SubdomainRoutes; port/ SubdomainClaims, RouteLookup, ClaimRefused
 ├── tunnel/domain/    Session (+ capabilities, HTTP stream rules), StreamTable (+ exchange entries)
-├── tunnel/application/ RegisterTunnels (+ names), PlannedTunnel (+ name), RegistrationPolicy (+ HTTP
-│                       public host, scheme, port), ParkingBudget (new)
+├── tunnel/application/ RegisterTunnels (+ names), PlannedTunnel (sealed: Tcp with a port, Http with a
+│                       name), RegistrationPolicy (+ HTTP public domain, scheme, port), ParkingBudget (new)
 └── tunnel/adapter/netty/
     ├── edge/     EdgeChannelInitializer (head phase only), HostDispatcher (new), ConnectPipeline
-    │             (new: phase 1's connect handlers, installed per request), EdgeSettings (+ http)
-    ├── control/  ControlSessionHandler (HEADERS dispatch), SessionStreams (exchanges)
-    └── http/     new: ExchangeHandler (edge connection's loop), SessionExchange (session's loop),
-                  ExchangeGate, DemandReadAllocator, RequestHeads, ResponseHeads, EdgeErrorPage,
-                  EdgeError
+    │             (new: phase 1's connect handlers, installed per request), RequestDeadline (new:
+    │             re-armed per exchange), EdgeSettings (+ http,
+    │             capabilities), HttpSettings (new), EngineDependencies (+ the RouteLookup port)
+    ├── control/  ControlSessionHandler (HEADERS dispatch), SessionStreams (+ HEADERS), SessionRegistry
+    │             (+ find by tunnel id), ControlSessionInitializer (a codec per session)
+    ├── tcp/      NettyTunnelListeners (gives each session its exchanges), TunnelStreams (new: a session's
+    │             streams of both kinds, routed by stream)
+    └── http/     new: ExchangeHandler (edge connection's loop), SessionExchange (session's loop, one per
+                  exchange), SessionExchanges (session's loop, one per session), ExchangeGate, Parking,
+                  DemandReadAllocator, RequestHeads, ResponseHeads, EdgeErrorPage, EdgeError,
+                  ErrorPageExchange (a page, with the body discarded), ExchangeRequest (a routed head),
+                  ExchangeEnded (the event that hands the connection back), ExchangeServices and
+                  ExchangeSessions (what the edge routes with)
 
 jburrow-server/                           io.jburrow.server
 ├── config/       JBurrowProperties (+ jburrow.http.*), EdgeConfiguration (+ parking in the budget)
@@ -493,17 +516,18 @@ share an exchange:
 
 | State | Owned by | Touched from the other loop by |
 |---|---|---|
-| The edge connection, its pipeline, its codec, its `autoRead` | the edge connection's loop | a task: "read once, up to `n` bytes"; Netty's own write and flush from another thread |
+| The edge connection, its pipeline, its codec, its `autoRead` | the edge connection's loop | a task: "read once, up to `n` bytes", "write this", "flush" |
 | The stream's lifecycle, its `StreamFlow`, the session's `SessionFlow`, the exchange gate, parking | the session's loop | a task: "this content arrived", "this write completed", "this read finished" |
 | The route table | neither (concurrent map) | lookups from edge loops, claims from registration |
 
 - **A task per crossing, nothing shared.** Each side posts a task to the other's loop with what it
   learnt, and never reads the other's state. `ExchangeHandler` (edge side) and `SessionExchange`
   (session side) are the two halves, and only `SessionExchange` calls the domain.
-- **Writes are Netty's.** The session's loop writes response content to the edge channel directly.
-  Netty runs a write from another thread as a task on the channel's loop, in the order it was called,
-  so a response's head, its body and its end can't reorder. The write's completion listener runs on
-  the edge loop and posts the release back.
+- **Writes keep their order.** The session's loop hands every write to the edge channel to the edge
+  loop as a task, response content included, in the order it makes them, so a response's head, its body
+  and its end can't reorder. Netty would run a write from another thread as a task too, but a session and
+  an edge connection can share a loop, and there a direct write would overtake tasks already posted. The
+  write's completion listener runs on the edge loop and posts the release back.
 - **Considered and rejected: moving the edge channel to the session's loop per exchange.** Netty can
   deregister and re-register a channel, but its pipeline would change loops between requests,
   half-finished work on the old loop would race the new one, and the next request on the same
@@ -530,9 +554,16 @@ Phase 1's pipeline ran the connect checks on every connection. Phase 3 splits it
   makes the edge safe if something else does.
 - **Mixed connections still work.** A connection may serve tunnel requests and then the connect
   upgrade. The dispatcher installs the connect pipeline only between exchanges, so phase 1's checks
-  run unchanged. In production it doesn't happen: the wildcard ingress uses its own Service, so the
-  ingress never pools a tunnel connection with a connect one ([Deployment
-  changes](#deployment-changes)).
+  run unchanged. A connect request is the last request on its connection either way: it upgrades,
+  or phase 1's filter refuses it and closes the connection, as protocol.md §3.5 requires. In
+  production it doesn't happen: the wildcard ingress uses its own Service, so the ingress never
+  pools a tunnel connection with a connect one ([Deployment changes](#deployment-changes)).
+- **Held, not read early.** The read that completes a head can also hold a pipelined request
+  behind it. The dispatcher keeps anything decoded after a request's end, at most one read's worth,
+  until the exchange ends, then dispatches it as if it had just been read. While an exchange waits for
+  its response with nothing held, the dispatcher keeps one read outstanding: NIO only notices a
+  visitor's `FIN` while a read is, and without it a visitor that gives up on a slow response would hold
+  its stream until the response is written. What that read brings is held like the rest.
 - **Socket settings per kind.** When a connection first carries an exchange, it gets
   `jburrow.http.socket-buffer` (16 KiB, so 32 KiB once Linux doubles it) as `SO_SNDBUF` and
   `SO_RCVBUF`. That bounds the kernel memory an exchange can park ([Memory budget](#memory-budget))
@@ -573,7 +604,10 @@ that fails answers with an [error page](#error-pages) and the exchange ends:
 longer than the ingress's own upstream keep-alive (60 s by default), so the ingress, which knows when
 it is about to reuse a connection, is the one that closes an idle one. Once a head has arrived there
 is no read timeout: the ingress has its own for visitors, and a slow upload that the tunnel itself
-holds back mustn't be cut by the edge.
+holds back mustn't be cut by the edge. A connect request is the exception: as in phase 1, the
+deadline keeps running until its upgrade completes, so a connect request whose small body trickles
+in is still closed in time. On a connection that served exchanges first, it restarts at
+`request-timeout` from the connect head.
 
 **If the stream ends early.** A reset from the client before the final head becomes a `502` page
 (`LOCAL_SERVICE_UNREACHABLE` or `LOCAL_SERVICE_ERROR`, from the reset's code). After the head has
@@ -634,7 +668,11 @@ read **on demand**, with the credit taken first:
    `WINDOW_UPDATE`, exactly as a TCP visitor does. Turns and resumes follow phase 2's rules; the 16 KiB
    demand is the share floor of ADR-0010, so each turn is one demand.
 
-**Before the stream exists.** The head is read with `autoRead` on and 4 KiB reads. The read that
+**Before the stream exists.** The head is read with `autoRead` on and 4 KiB reads. The
+`DemandReadAllocator` that sizes them, and later the demands, is installed when the connection is
+accepted: Netty makes a channel's read handle on its first read and keeps it, so an allocator set when
+the connection first carries an exchange would never be asked. A connection that becomes a control
+session switches it to Netty's own sizing at the upgrade. The read that
 completes a head can carry the first bytes of its body: at most one read, under 4 KiB. They are
 copied onto the heap, as phase 2's carry is, and sent first, under the first reservation.
 
@@ -743,28 +781,36 @@ read gate.
   exchange ends. Pooling is an open question for [Performance](#performance).
 - **The request.** `LocalExchangeHandler` writes the head from `OPEN`: the fields as given,
   `content-length` or `transfer-encoding: chunked` from `body`, and with `--host-header rewrite`,
-  `host` set to the local target's `host:port`. `DATA` becomes body content, `CLOSE` the end of the
-  body. Server `DATA` waits in the stream's queue while the connection is being made, bounded by the
+  `host` set to the local target's `host:port`. It never writes `expect`, even if a head carried one,
+  since the edge has answered it, and adds no connection-specific field. `DATA` becomes body content,
+  `CLOSE` the end of the body. Server `DATA` waits in the stream's queue while the connection is being made, bounded by the
   client's stream window, as in phase 2.
 - **The response.** A `1xx` from the local service becomes a `1xx` `HEADERS`, except `101`, which can't
   happen because the client never forwards `Upgrade`, and is treated as invalid. The final response
   becomes `HEADERS` (connection-specific fields removed, `body` from the response's framing and the
-  request's method), then body content as `DATA` and its end as `CLOSE`. A response head that encodes
-  over 16,384 bytes, invalid HTTP, or a connection that ends early becomes `CLOSE RST
-  LOCAL_SERVICE_ERROR`; a refused connection `LOCAL_SERVICE_UNREACHABLE`.
+  request's method), then body content as `DATA` and its end as `CLOSE`, after which the client closes
+  the local connection, and sends `CLOSE RST CANCELLED` if the request body hasn't ended. A response
+  head that encodes over 16,384 bytes or breaks a field rule, a transfer coding other than `chunked`
+  alone (the tunnel can't carry it without the coding's own framing), invalid HTTP, or a connection
+  that ends early becomes `CLOSE RST LOCAL_SERVICE_ERROR`; a refused connection
+  `LOCAL_SERVICE_UNREACHABLE`.
 - **Flow.** The local connection is read through phase 2's `ReadGate` and
   `CreditBoundedRecvByteBufAllocator`, which cap a read at what the stream may send. The codec's
   decoded content is never more than the bytes read, so a read still fits one frame and its credit.
   The client has no loop crossing: its local connections are on its control loop (phase 1).
-- **`HELLO`** offers `http`. A server that doesn't answer with it can't have HTTP tunnels, and
-  `jburrow http` reports that the server doesn't support them (exit code 6). A client that wants an
+- **`HELLO`** offers `http`. A server that doesn't answer with it can't have HTTP tunnels: the client
+  ends the session as a client that stops does, a close with status `1000` and no `ERROR`, without
+  sending `REGISTER`, and `start()` fails with `TunnelStartException.Kind.UNSUPPORTED_BY_SERVER`, which
+  `jburrow http` reports as the server not supporting them (exit code 6). A client that wants an
   HTTP tunnel sends its `REGISTER` only once the server's `HELLO` has arrived and listed `http`:
   `"http"` is something the capability introduces, which protocol.md §4.2 forbids before the
   session has it, and the reference codec refuses to encode it until then. That costs HTTP sessions
   one round trip at setup; TCP sessions still register at once.
 - **`JBurrowClient.Builder`** gains `http(localTarget)` with `subdomain` and `hostHeader`, and
-  `TunnelHandle` reports each completed exchange (method, path, status, bytes, duration) to
-  `TunnelEvents`, which is what the CLI prints. The path is reported on the developer's own machine
+  the client reports each finished exchange (method, target, status, bytes, duration) to
+  `TunnelEvents.onExchangeCompleted`, just before the stream's `onStreamClosed`, which is what the CLI
+  prints. An exchange whose response was complete counts as completed even if its stream was then
+  reset to cancel the rest of the request body. The path is reported on the developer's own machine
   only; the server never logs it ([Observability](#observability)).
 
 ## The CLI
@@ -794,9 +840,11 @@ Forwarding  https://quiet-otter-4f2a.cloudnativehub.app -> http://localhost:3000
 ## Layer rules
 
 One new feature, `routing`, under the existing rules: `routing.domain` is plain Java,
-`routing.application` uses only the JDK and its domain, and the `tunnel` feature reaches it through
-`routing.application.port` (`SubdomainClaims` for registration, `RouteLookup` for the edge, and the
-`SubdomainName` value they take, which lives beside them for that reason). The
+`routing.application` uses only the JDK, its domain and the protocol model, and the `tunnel` feature
+reaches it through `routing.application.port` (`SubdomainClaims` for registration, `RouteLookup` for
+the edge, and `ClaimRefused`). `SubdomainName`, which both features and both layers use, is in the
+protocol model, and the ports are generic in the principal and tunnel, so `routing` depends on nothing
+in `tunnel` ([Subdomains](#subdomains)). The
 ArchUnit suite gains fixtures for both directions: `routing` reaching into `tunnel`, and `tunnel`
 reaching `routing.domain` directly. The protocol model's new records are pure, as
 `PROTOCOL_MODEL_IS_PURE` requires.
@@ -813,7 +861,7 @@ reaching `routing.domain` directly. The protocol model's new records are pure, a
 | `jburrow.http.max-request-body` | | `100MB` | `100MB` | |
 | `jburrow.http.response-timeout` | | `60s` | `60s` | to the final response head; must be below the ingress's read timeout |
 | `jburrow.http.keep-alive-timeout` | | `75s` | `75s` | idle time between exchanges; must be above the ingress's upstream keep-alive |
-| `jburrow.http.socket-buffer` | | `16KB` | `16KB` | `SO_SNDBUF` and `SO_RCVBUF` of an edge connection that carries exchanges; `0` leaves it to the kernel |
+| `jburrow.http.socket-buffer` | | `0` | `16KB` | `SO_SNDBUF` and `SO_RCVBUF` of an edge connection that carries exchanges; `0` leaves it to the kernel. Loopback's segments are about 64 KiB, larger than a 16 KB buffer, which Linux then advertises as a zero window until its persist timer fires, so `local` leaves it to the kernel; on the ingress's hop segments are about 1.4 KiB |
 | `jburrow.http.park-after` | | `1s` | `1s` | |
 | `jburrow.http.max-parked` | | `16MB` | `16MB` | server-wide; `0` turns parking off |
 | `jburrow.http.max-parked-per-session` | | `2MB` | `2MB` | at most `max-parked` |
@@ -821,9 +869,12 @@ reaching `routing.domain` directly. The protocol model's new records are pure, a
 Validation, in `JBurrowProperties` as before: the domain is a lower-case DNS name of at least two
 labels (or `localhost`); `connect-host` and `tcp.public-host` are either outside the domain or one
 label under it, and that label is then reserved; the scheme is `http` or `https`; the port is 1 to
-65,535; the reserved names follow the name rule; the durations are positive except `name-hold`; the
-per-session parked limit is at most the server-wide one. The `prod` profile has no default for
-`domain`, so a deployment that forgets it fails at startup with the key in the message.
+65,535; the reserved names follow the name rule; the durations are positive except `name-hold`, which
+may be `0s`; `max-request-body` is positive; `socket-buffer` is `0` or 4 KB to 4 MB, the bounds of
+`jburrow.tcp.visitor-receive-buffer`, for the same reason; the parked limits are not negative, and the
+per-session one is at most the server-wide one. A service host two or more labels under the domain is
+refused rather than ignored: the wildcard tunnel ingress can't reach it. The `prod` profile has no
+default for `domain`, so a deployment that forgets it fails at startup with the key in the message.
 
 **The budget check** at startup adds the parked budget to its direct memory line, and the socket
 buffer term to its kernel line ([Memory budget](#memory-budget)).

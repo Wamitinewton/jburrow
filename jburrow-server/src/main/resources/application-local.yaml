@@ -21,3 +21,10 @@ jburrow:
   tcp:
     port-range: 21000-21099
     public-host: localhost
+  http:
+    domain: localhost
+    public-scheme: http
+    public-port: 7080
+    # Loopback's segments are about 64 KiB, larger than a 16 KB socket buffer, which would stall every upload on the
+    # kernel's zero-window probes. The kernel's own sizing is fine on a developer's machine.
+    socket-buffer: 0

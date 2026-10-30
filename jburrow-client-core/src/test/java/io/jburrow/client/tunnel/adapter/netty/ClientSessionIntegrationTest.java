@@ -123,7 +123,7 @@ class ClientSessionIntegrationTest {
         Frame.Hello hello = peer.expect(Frame.Hello.class, TIMEOUT);
         Frame.Register register = peer.expect(Frame.Register.class, TIMEOUT);
         assertThat(hello.message().client()).isEqualTo(CLIENT);
-        assertThat(hello.message().capabilities()).isEmpty();
+        assertThat(hello.message().capabilities()).containsExactly("http");
         assertThat(hello.message().windows()).isEqualTo(new Windows(262_144, 1_048_576));
         assertThat(register.message().authtoken()).isEqualTo(TOKEN);
         assertThat(register.message().tunnels()).containsExactly(new TunnelRequest("default", TunnelKind.TCP, null));

@@ -4,8 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
+import io.jburrow.client.tunnel.domain.HostHeader;
 import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
+import io.jburrow.protocol.control.SubdomainName;
+import io.jburrow.protocol.control.TunnelKind;
+import io.jburrow.protocol.wire.Capability;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -139,6 +143,58 @@ class JBurrowClientBuilderTest {
     }
 
     @Test
+    void anHttpTunnelCarriesItsSubdomainAndHostHeader() {
+        ClientSettings settings = settingsOf(http().subdomain("myapp").hostHeader(HostHeader.REWRITE));
+
+        assertThat(settings.tunnels())
+                .containsExactly(TunnelSpec.http("default", LocalTarget.of("localhost", 3000))
+                        .subdomain(new SubdomainName("myapp"))
+                        .hostHeader(HostHeader.REWRITE));
+        assertThat(settings.tunnels().getFirst().kind()).isEqualTo(TunnelKind.HTTP);
+    }
+
+    @Test
+    void anHttpTunnelWithoutOptionsLetsTheServerChooseAndKeepsTheHost() {
+        TunnelSpec tunnel = settingsOf(http()).tunnels().getFirst();
+
+        assertThat(tunnel.subdomain()).isEmpty();
+        assertThat(tunnel.hostHeader()).isEqualTo(HostHeader.KEEP);
+    }
+
+    @ParameterizedTest(name = "subdomain {0} is refused")
+    @ValueSource(strings = {"ab", "MyApp", "-app", "app-", "my--app", "my.app", "my_app"})
+    void aSubdomainFollowsTheNameRule(String name) {
+        assertThatThrownBy(() -> settingsOf(http().subdomain(name)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("subdomain must be")
+                .hasMessageNotContaining(name);
+    }
+
+    @Test
+    void httpOptionsNeedAnHttpTunnel() {
+        assertThatThrownBy(() -> settingsOf(JBurrowClient.builder()
+                        .server(URI.create("wss://connect.example.dev/v1/connect"))
+                        .authtoken(TOKEN)
+                        .tunnel(TUNNEL)
+                        .subdomain("myapp")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("needs an HTTP tunnel");
+    }
+
+    @Test
+    void httpAndAnotherTunnelAreMutuallyExclusive() {
+        assertThatThrownBy(() -> settingsOf(http().tunnel(TUNNEL)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Exactly one tunnel");
+    }
+
+    @Test
+    void theClientOffersHttpWhateverItsTunnel() {
+        assertThat(settings("wss://connect.example.dev/v1/connect").capabilities())
+                .containsExactly(Capability.HTTP);
+    }
+
+    @Test
     void theClientIdentityFollowsTheProtocolsRules() {
         assertThatThrownBy(() -> JBurrowClient.builder()
                         .server(URI.create("wss://connect.example.dev/v1/connect"))
@@ -192,6 +248,18 @@ class JBurrowClientBuilderTest {
         assertThat(ClientSettings.defaultClientVersion())
                 .matches("[A-Za-z0-9.+_-]{1,64}")
                 .isNotEqualTo("unknown");
+    }
+
+    private static JBurrowClient.Builder http() {
+        return JBurrowClient.builder()
+                .server(URI.create("wss://connect.example.dev/v1/connect"))
+                .authtoken(TOKEN)
+                .http(LocalTarget.of("localhost", 3000));
+    }
+
+    /** What {@code build()} would validate, without starting a client's I/O thread. */
+    private static ClientSettings settingsOf(JBurrowClient.Builder builder) {
+        return ((DefaultBuilder) builder).settings();
     }
 
     private static ClientSettings settings(String url) {

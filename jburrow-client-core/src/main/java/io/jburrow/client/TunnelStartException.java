@@ -24,6 +24,11 @@ public final class TunnelStartException extends Exception {
         UPGRADE_REFUSED,
         /** The server sent {@code ERROR}, such as {@code AUTHTOKEN_INVALID} or {@code PORT_UNAVAILABLE}. */
         SERVER_ERROR,
+        /**
+         * The server doesn't support what the tunnels need, such as HTTP tunnels: its {@code HELLO} didn't list the
+         * capability. This client ended the session without registering.
+         */
+        UNSUPPORTED_BY_SERVER,
         /** The upgrade or the handshake didn't complete in time. */
         TIMEOUT,
         /** The server broke the protocol, or this client failed, and this client ended the session with the code. */

@@ -35,7 +35,8 @@ class JBurrowPropertiesTest {
             "jburrow.mail.from-name", "JBurrow",
             "jburrow.edge.connect-host", "localhost",
             "jburrow.tcp.port-range", "21000-21099",
-            "jburrow.tcp.public-host", "localhost");
+            "jburrow.tcp.public-host", "localhost",
+            "jburrow.http.domain", "localhost");
 
     private static final String LOCAL_ENTRY = "local:4e17d8906601750429e1cb705e2457eb786a348254390c98f634325c899d825f";
 
@@ -81,6 +82,74 @@ class JBurrowPropertiesTest {
     }
 
     @Test
+    void httpDefaultsMatchTheArchitecture() {
+        JBurrowProperties.Http http = bind(DEFAULTS).http();
+
+        assertThat(http.domain()).isEqualTo("localhost");
+        assertThat(http.publicScheme()).isEqualTo("https");
+        assertThat(http.publicPort()).isEqualTo(443);
+        assertThat(http.reservedNames()).isEmpty();
+        assertThat(http.nameHold()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(http.maxRequestBody()).isEqualTo(DataSize.ofMegabytes(100));
+        assertThat(http.responseTimeout()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(http.keepAliveTimeout()).isEqualTo(Duration.ofSeconds(75));
+        assertThat(http.socketBuffer()).isEqualTo(DataSize.ofKilobytes(16));
+        assertThat(http.parkAfter()).isEqualTo(Duration.ofSeconds(1));
+        assertThat(http.maxParked()).isEqualTo(DataSize.ofMegabytes(16));
+        assertThat(http.maxParkedPerSession()).isEqualTo(DataSize.ofMegabytes(2));
+    }
+
+    @Test
+    void httpSettingsBindAsALocalServerUsesThem() {
+        JBurrowProperties.Http http = bind(with(Map.of(
+                        "jburrow.http.domain", "example.dev",
+                        "jburrow.http.public-scheme", "http",
+                        "jburrow.http.public-port", "7080",
+                        "jburrow.http.reserved-names", "status-page,grafana",
+                        "jburrow.http.name-hold", "0s",
+                        "jburrow.http.socket-buffer", "0",
+                        "jburrow.http.max-parked", "0",
+                        "jburrow.http.max-parked-per-session", "0")))
+                .http();
+
+        assertThat(http.domain()).isEqualTo("example.dev");
+        assertThat(http.publicScheme()).isEqualTo("http");
+        assertThat(http.publicPort()).isEqualTo(7080);
+        assertThat(http.reservedNames()).containsExactly("status-page", "grafana");
+        assertThat(http.nameHold()).isZero();
+        assertThat(http.socketBuffer()).isEqualTo(DataSize.ofBytes(0));
+        assertThat(http.maxParked()).isEqualTo(DataSize.ofBytes(0));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "localhost, localhost, localhost",
+        "example.dev, connect.example.dev, tcp.example.dev",
+        "example.dev, CONNECT.example.dev, tcp.elsewhere.dev",
+        "tunnels.example.dev, connect.example.dev, example.dev"
+    })
+    void serviceHostsOutsideTheDomainOrOneLabelUnderItBind(String domain, String connectHost, String tcpHost) {
+        JBurrowProperties properties = bind(with(Map.of(
+                "jburrow.http.domain", domain,
+                "jburrow.edge.connect-host", connectHost,
+                "jburrow.tcp.public-host", tcpHost)));
+
+        assertThat(properties.http().domain()).isEqualTo(domain);
+    }
+
+    @Test
+    void labelsUnderTheDomainAreFoundWithoutCase() {
+        JBurrowProperties.Http http =
+                bind(with(Map.of("jburrow.http.domain", "example.dev"))).http();
+
+        assertThat(http.labelsUnderDomain("Connect.Example.dev")).contains("connect");
+        assertThat(http.labelsUnderDomain("a.b.example.dev")).contains("a.b");
+        assertThat(http.labelsUnderDomain("example.dev")).isEmpty();
+        assertThat(http.labelsUnderDomain("notexample.dev")).isEmpty();
+        assertThat(http.labelsUnderDomain("tcp.elsewhere.dev")).isEmpty();
+    }
+
+    @Test
     void transportBindsWithoutCaseAndIoThreadsCanBeSet() {
         JBurrowProperties properties =
                 bind(with(Map.of("jburrow.edge.transport", "nio", "jburrow.edge.io-threads", "3")));
@@ -101,7 +170,8 @@ class JBurrowPropertiesTest {
     @CsvSource({
         "jburrow.edge.connect-host, edge.connectHost",
         "jburrow.tcp.port-range, tcp.portRange",
-        "jburrow.tcp.public-host, tcp.publicHost"
+        "jburrow.tcp.public-host, tcp.publicHost",
+        "jburrow.http.domain, http.domain"
     })
     void aMissingRequiredSettingFailsNamingItsField(String key, String field) {
         Map<String, String> values = new HashMap<>(DEFAULTS);
@@ -146,7 +216,29 @@ class JBurrowPropertiesTest {
                 arguments(Map.of("jburrow.edge.port", "21050"), "jburrow.tcp.port-range"),
                 arguments(Map.of("jburrow.tcp.reuse-delay", "-1s"), "jburrow.tcp.reuse-delay"),
                 arguments(Map.of("jburrow.tcp.visitor-receive-buffer", "1KB"), "jburrow.tcp.visitor-receive-buffer"),
-                arguments(Map.of("jburrow.tcp.visitor-receive-buffer", "8MB"), "jburrow.tcp.visitor-receive-buffer"));
+                arguments(Map.of("jburrow.tcp.visitor-receive-buffer", "8MB"), "jburrow.tcp.visitor-receive-buffer"),
+                arguments(Map.of("jburrow.http.domain", "Example.dev"), "http.domain"),
+                arguments(Map.of("jburrow.http.domain", "dev"), "http.domain"),
+                arguments(Map.of("jburrow.http.domain", "-bad.example.dev"), "http.domain"),
+                arguments(Map.of("jburrow.http.domain", "example.dev."), "http.domain"),
+                arguments(Map.of("jburrow.http.public-scheme", "ftp"), "http.publicScheme"),
+                arguments(Map.of("jburrow.http.public-port", "0"), "http.publicPort"),
+                arguments(Map.of("jburrow.http.public-port", "65536"), "http.publicPort"),
+                arguments(Map.of("jburrow.http.reserved-names", "status,Grafana"), "jburrow.http.reserved-names"),
+                arguments(Map.of("jburrow.http.reserved-names", "ab"), "jburrow.http.reserved-names"),
+                arguments(Map.of("jburrow.http.reserved-names", "two--hyphens"), "jburrow.http.reserved-names"),
+                arguments(Map.of("jburrow.http.name-hold", "-1s"), "jburrow.http.name-hold"),
+                arguments(Map.of("jburrow.http.max-request-body", "0B"), "jburrow.http.max-request-body"),
+                arguments(Map.of("jburrow.http.response-timeout", "0s"), "jburrow.http.response-timeout"),
+                arguments(Map.of("jburrow.http.keep-alive-timeout", "-1s"), "jburrow.http.keep-alive-timeout"),
+                arguments(Map.of("jburrow.http.socket-buffer", "1KB"), "jburrow.http.socket-buffer"),
+                arguments(Map.of("jburrow.http.socket-buffer", "8MB"), "jburrow.http.socket-buffer"),
+                arguments(Map.of("jburrow.http.park-after", "0s"), "jburrow.http.park-after"),
+                arguments(
+                        Map.of("jburrow.http.max-parked", "1MB", "jburrow.http.max-parked-per-session", "2MB"),
+                        "jburrow.http.max-parked-per-session"),
+                arguments(Map.of("jburrow.edge.connect-host", "connect.edge.localhost"), "jburrow.edge.connect-host"),
+                arguments(Map.of("jburrow.tcp.public-host", "a.tcp.localhost"), "jburrow.tcp.public-host"));
     }
 
     @ParameterizedTest

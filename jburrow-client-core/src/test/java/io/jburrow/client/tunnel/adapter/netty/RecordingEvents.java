@@ -1,6 +1,7 @@
 package io.jburrow.client.tunnel.adapter.netty;
 
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -33,6 +34,14 @@ final class RecordingEvents implements TunnelEvents {
         }
         record("stream-closed " + streamId + " in=" + bytesIn + " out=" + bytesOut + " reset="
                 + reset.map(ErrorCode::code).orElse("-"));
+    }
+
+    @Override
+    public void onExchangeCompleted(ExchangeSummary exchange) {
+        record("exchange " + exchange.streamId() + " " + exchange.method() + " " + exchange.target() + " status="
+                + (exchange.status().isPresent() ? exchange.status().getAsInt() : "-") + " in="
+                + exchange.requestBytes() + " out=" + exchange.responseBytes() + " reset="
+                + exchange.reset().map(ErrorCode::code).orElse("-"));
     }
 
     @Override

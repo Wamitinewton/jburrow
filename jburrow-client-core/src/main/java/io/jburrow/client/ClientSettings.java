@@ -5,7 +5,9 @@ import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ProtocolException;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -20,6 +22,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.net.ssl.TrustManagerFactory;
@@ -92,6 +95,14 @@ public record ClientSettings(
                     + MAX_HANDSHAKE_TIMEOUT.toMinutes() + " minutes");
         }
         Objects.requireNonNull(windows, "windows");
+    }
+
+    /**
+     * The capabilities offered in {@code HELLO}: every one this client implements, whatever its tunnels need, so the
+     * server's answer says what it supports (§4.2).
+     */
+    public Set<Capability> capabilities() {
+        return ProtocolVersion.capabilities();
     }
 
     /** Whether the connection uses TLS: a {@code wss} URL. */

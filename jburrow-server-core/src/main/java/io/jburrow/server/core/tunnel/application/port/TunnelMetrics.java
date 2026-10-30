@@ -10,7 +10,8 @@ import java.util.function.Supplier;
 
 /**
  * What the engine reports, one method per metric of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Observability.
- * Arguments are enums and numbers only, so no label can carry a session id, tunnel id, port, address or principal.
+ * Arguments are enums, numbers and codes from a fixed set only, so no label can carry a session id, tunnel id, port,
+ * address or principal.
  * Called on event loops, so an implementation never blocks.
  */
 public interface TunnelMetrics {
@@ -47,6 +48,14 @@ public interface TunnelMetrics {
     enum SessionEnd {
         CLIENT_CLOSED,
         CONNECTION_LOST
+    }
+
+    /** Who answered an HTTP request. */
+    enum ResponseOrigin {
+        /** The local service, through the tunnel. */
+        TUNNEL,
+        /** The edge itself, with an error page. */
+        EDGE
     }
 
     /** A connection upgraded and its session began: {@code jburrow_sessions_active} up. */
@@ -91,6 +100,27 @@ public interface TunnelMetrics {
 
     /** {@code jburrow_flow_blocked_total}: a visitor stopped being read because {@code scope}'s credit ran out. */
     void flowBlocked(FlowScope scope);
+
+    /** {@code jburrow_http_requests_total}: a response head with {@code status} went to a visitor. */
+    default void httpResponse(int status, ResponseOrigin origin) {}
+
+    /**
+     * {@code jburrow_http_edge_errors_total}: the edge answered with the error page of {@code code}, one of the edge's
+     * fixed set of page codes.
+     */
+    default void edgeErrorPage(String code) {}
+
+    /** {@code jburrow_http_response_head_seconds}: from {@code OPEN} to the final response head. */
+    default void responseHead(long durationNanos) {}
+
+    /** {@code jburrow_flow_parked_total}: a stalled response's bytes were parked. */
+    default void streamParked() {}
+
+    /** {@code jburrow_flow_park_refused_total}: a stalled response didn't fit the parking budget. */
+    default void parkRefused() {}
+
+    /** Binds {@code jburrow_flow_parked_bytes} to the bytes parked across the server. */
+    default void bindParkedBytes(LongSupplier parkedBytes) {}
 
     /** Binds {@code jburrow_tcp_ports} to the pool. */
     void bindPortPool(Supplier<PortPoolSnapshot> snapshot);

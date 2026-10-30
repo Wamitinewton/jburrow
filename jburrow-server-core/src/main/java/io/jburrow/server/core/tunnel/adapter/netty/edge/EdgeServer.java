@@ -1,6 +1,10 @@
 package io.jburrow.server.core.tunnel.adapter.netty.edge;
 
 import io.jburrow.protocol.adapter.jackson.ControlJson;
+import io.jburrow.server.core.tunnel.adapter.netty.http.EdgeErrorPage;
+import io.jburrow.server.core.tunnel.adapter.netty.http.ExchangeHandler;
+import io.jburrow.server.core.tunnel.adapter.netty.http.ExchangeServices;
+import io.jburrow.server.core.tunnel.adapter.netty.http.ExchangeSessions;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufAllocatorMetricProvider;
@@ -35,9 +39,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The edge listener: accepts connections on {@code jburrow.edge.port}, filters and upgrades them, and hands each
- * upgraded channel to the {@link SessionInitializer}. Its worker event loops run every session, tunnel listener and
- * visitor connection (ADR-0008).
+ * The edge listener: accepts connections on {@code jburrow.edge.port}, dispatches each request on them by its
+ * {@code Host}, hands each upgraded channel to the {@link SessionInitializer}, and each request for a tunnel to the
+ * session that {@link ExchangeSessions} finds for it. Its worker event loops run every session, tunnel listener,
+ * visitor connection and HTTP exchange (ADR-0008, ADR-0012).
  *
  * <p>Started once and stopped once; the composition root ties both to the application's lifecycle.
  */
@@ -54,6 +59,7 @@ public final class EdgeServer {
     private final EdgeSettings settings;
     private final EngineDependencies deps;
     private final SessionInitializer sessions;
+    private final ExchangeSessions exchangeSessions;
     private final Transport transport;
     private final ChannelGroup connections = new DefaultChannelGroup("jburrow-edge", GlobalEventExecutor.INSTANCE);
 
@@ -66,11 +72,28 @@ public final class EdgeServer {
     /** The event loop and server channel types of one transport. */
     private record Transport(String name, IoHandlerFactory ioHandlers, Class<? extends ServerChannel> serverChannel) {}
 
-    /** @throws IllegalStateException if epoll is forced and unavailable on this host */
+    /**
+     * An edge that serves no HTTP exchange: every tunnel request gets the {@code TUNNEL_NOT_FOUND} page.
+     *
+     * @throws IllegalStateException if epoll is forced and unavailable on this host
+     */
     public EdgeServer(EdgeSettings settings, EngineDependencies deps, SessionInitializer sessions) {
+        this(settings, deps, sessions, ExchangeSessions.none());
+    }
+
+    /**
+     * @param exchangeSessions finds the session serving a tunnel, for each request routed to one
+     * @throws IllegalStateException if epoll is forced and unavailable on this host
+     */
+    public EdgeServer(
+            EdgeSettings settings,
+            EngineDependencies deps,
+            SessionInitializer sessions,
+            ExchangeSessions exchangeSessions) {
         this.settings = Objects.requireNonNull(settings, "settings");
         this.deps = Objects.requireNonNull(deps, "deps");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
+        this.exchangeSessions = Objects.requireNonNull(exchangeSessions, "exchangeSessions");
         this.transport = transport(settings.transport());
     }
 
@@ -139,11 +162,23 @@ public final class EdgeServer {
     }
 
     private EdgeChannelInitializer channelInitializer() {
-        UpgradeErrorResponses responses = new UpgradeErrorResponses(ControlJson.create(), InstantSource.system());
+        ControlJson json = ControlJson.create();
+        UpgradeErrorResponses responses = new UpgradeErrorResponses(json, InstantSource.system());
         ConnectRequestFilter filter = new ConnectRequestFilter(
                 settings.connectHost(), deps.admission(), () -> shuttingDown, deps.metrics(), responses);
+        ClientAddressResolver clientAddresses = new ClientAddressResolver(settings.trustedProxies());
+        ConnectPipeline connect = new ConnectPipeline(settings, clientAddresses, filter, sessions);
+        EdgeErrorPage pages = new EdgeErrorPage();
+        ExchangeServices exchanges = new ExchangeServices(
+                deps.routes(),
+                exchangeSessions,
+                pages,
+                json,
+                settings.http().maxRequestBody(),
+                () -> shuttingDown,
+                deps.metrics());
         return new EdgeChannelInitializer(
-                settings, connections, new ClientAddressResolver(settings.trustedProxies()), filter, sessions);
+                settings, connections, connect, clientAddresses, () -> new ExchangeHandler(exchanges), pages);
     }
 
     /** The port the listener is bound to, which differs from the configured one when that is 0. */
@@ -258,6 +293,11 @@ public final class EdgeServer {
     /** Connections accepted and not yet closed. A connection still in the kernel's accept queue isn't counted. */
     int openConnections() {
         return connections.size();
+    }
+
+    /** The accepted connections not yet closed, for tests that inspect their options. */
+    ChannelGroup connections() {
+        return connections;
     }
 
     private static CompletableFuture<Void> shutDown(EventLoopGroup group) {

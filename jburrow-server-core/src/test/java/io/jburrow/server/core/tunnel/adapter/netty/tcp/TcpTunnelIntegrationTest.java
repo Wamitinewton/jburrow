@@ -82,7 +82,7 @@ class TcpTunnelIntegrationTest {
 
             SessionContext session = harness.onlySession();
             List<Channel> visitors = TunnelHarness.onLoop(
-                    session, () -> ((StreamRelay) session.streams().orElseThrow()).visitorChannels());
+                    session, () -> TunnelHarness.relay(session).visitorChannels());
             assertThat(visitors)
                     .singleElement()
                     .satisfies(channel -> assertThat(channel.eventLoop())
@@ -346,8 +346,7 @@ class TcpTunnelIntegrationTest {
 
     private List<Channel> openVisitors() throws Exception {
         SessionContext session = harness.onlySession();
-        return TunnelHarness.onLoop(
-                session, () -> ((StreamRelay) session.streams().orElseThrow()).visitorChannels());
+        return TunnelHarness.onLoop(session, () -> TunnelHarness.relay(session).visitorChannels());
     }
 
     private static Socket visitor(RegisteredTunnel tunnel) throws IOException {

@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
-import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.testsupport.DuplexEmbeddedChannel;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -46,7 +45,7 @@ import org.junit.jupiter.api.Test;
 class ReadGateTest {
 
     private static final int WINDOW = 65_536;
-    private static final Tunnel TUNNEL = new Tunnel(TunnelId.random(), "default", TunnelKind.TCP, "localhost", 21_037);
+    private static final Tunnel TUNNEL = Tunnel.tcp(TunnelId.random(), "default", "localhost", 21_037);
     private static final InetSocketAddress VISITOR = new InetSocketAddress("203.0.113.9", 51_234);
     private static final WriteBufferWaterMark ROOMY = new WriteBufferWaterMark(1024 * 1024, 2 * 1024 * 1024);
 

@@ -10,8 +10,8 @@ import io.jburrow.client.tunnel.domain.ClientSession;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ErrorBody;
-import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.RegisteredTunnel;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -44,7 +44,8 @@ import org.slf4j.LoggerFactory;
  *   <li>this client finds a session error: streams reset with {@code CANCELLED}, {@code ERROR}, then a close frame with
  *       the code's close status;
  *   <li>the server sends {@code ERROR}: nothing more is sent, and the server's close frame is answered;
- *   <li>the user closes: streams reset with {@code CANCELLED}, then a close frame with status {@code 1000};
+ *   <li>the user closes, or the server lacks a capability the tunnels need: streams reset with {@code CANCELLED}, then
+ *       a close frame with status {@code 1000};
  *   <li>the connection fails: it is closed.
  * </ul>
  *
@@ -85,7 +86,7 @@ final class ControlConnection implements TunnelHandle {
 
     ControlConnection(ClientSettings settings) {
         this.settings = Objects.requireNonNull(settings, "settings");
-        this.session = new ClientSession(settings.tunnels(), settings.windows());
+        this.session = new ClientSession(settings.tunnels(), settings.windows(), settings.capabilities());
     }
 
     ClientSession session() {
@@ -184,7 +185,10 @@ final class ControlConnection implements TunnelHandle {
         return upgraded;
     }
 
-    /** The WebSocket upgrade completed: send {@code HELLO} and {@code REGISTER} back to back, in one flush (§8.3). */
+    /**
+     * The WebSocket upgrade completed: send {@code HELLO}, and {@code REGISTER} behind it in the same flush unless it
+     * waits for the server's {@code HELLO} (§8.3).
+     */
     void onUpgraded(String subprotocol) {
         if (session.isClosing()) {
             return;
@@ -196,9 +200,24 @@ final class ControlConnection implements TunnelHandle {
             return;
         }
         session.onUpgraded();
-        channel.write(new Frame.Hello(new Hello(settings.clientInfo(), List.of(), session.windows())));
-        channel.write(new Frame.Register(session.register(settings.authtoken())));
+        channel.write(new Frame.Hello(session.hello(settings.clientInfo())));
+        if (!session.registersAfterHello()) {
+            channel.write(new Frame.Register(session.register(settings.authtoken())));
+        }
         channel.flush();
+    }
+
+    /**
+     * The server's {@code HELLO} arrived and set the session's capabilities: send a {@code REGISTER} that waited for
+     * them, or, if a tunnel needs one the server didn't list, end the session without registering.
+     */
+    void onServerHello() {
+        Optional<Capability> missing = session.missingCapability();
+        if (missing.isPresent()) {
+            endUnsupported(missing.get());
+        } else if (session.registersAfterHello()) {
+            channel.writeAndFlush(new Frame.Register(session.register(settings.authtoken())));
+        }
     }
 
     /** The server's {@code REGISTER} reply arrived. */
@@ -322,6 +341,20 @@ final class ControlConnection implements TunnelHandle {
             return;
         }
         streams.cancelAll(true);
+        sendCloseFrame(WebSocketCloseStatus.NORMAL_CLOSURE.code(), "");
+    }
+
+    /** The server can't give the tunnels what they need. Nothing went wrong on the wire, so no {@code ERROR} (§8.6). */
+    private void endUnsupported(Capability missing) {
+        String message =
+                switch (missing) {
+                    case HTTP -> "This server doesn't support HTTP tunnels.";
+                };
+        if (!beginClosing(TunnelClosed.userClosed(), new TunnelStartException(Kind.UNSUPPORTED_BY_SERVER, message))) {
+            return;
+        }
+        log.debug(
+                "session ended: session={} the server lacks the {} capability", describeSession(), missing.wireName());
         sendCloseFrame(WebSocketCloseStatus.NORMAL_CLOSURE.code(), "");
     }
 

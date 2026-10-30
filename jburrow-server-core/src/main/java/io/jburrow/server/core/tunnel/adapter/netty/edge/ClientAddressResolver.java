@@ -1,5 +1,6 @@
 package io.jburrow.server.core.tunnel.adapter.netty.edge;
 
+import io.jburrow.protocol.control.RemoteAddress;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler.Sharable;
 import io.netty.channel.ChannelHandlerContext;
@@ -20,6 +21,10 @@ import java.util.Optional;
  * proxies that wrote it are trusted: walking from the right, the first entry that isn't a trusted proxy is the address
  * the last trusted proxy saw. Anything else would let a client choose the address it is logged and, from phase 6,
  * rate-limited under. Entries are IP literals; a name is never resolved.
+ *
+ * <p>A connect request resolves its client once, as a handler that stores it on the channel. A tunnel request is
+ * resolved on its own with {@link #visitor}, since the ingress may send a different visitor's address on each request of
+ * one connection.
  */
 @Sharable
 final class ClientAddressResolver extends ChannelInboundHandlerAdapter {
@@ -42,6 +47,29 @@ final class ClientAddressResolver extends ChannelInboundHandlerAdapter {
             ctx.channel().attr(CLIENT_ADDRESS).set(client);
         }
         ctx.fireChannelRead(msg);
+    }
+
+    /**
+     * The visitor behind {@code request} on {@code channel}: its address by the rules above, and its port when that
+     * address is the connection's own peer. A visitor named by {@code X-Forwarded-For} has port 0, which the proxies
+     * don't report.
+     */
+    RemoteAddress visitor(Channel channel, HttpRequest request) {
+        InetSocketAddress peer = peerSocket(channel);
+        InetAddress client = resolve(peer.getAddress(), request.headers().getAll(FORWARDED_FOR));
+        return new RemoteAddress(ipLiteral(client), client.equals(peer.getAddress()) ? peer.getPort() : 0);
+    }
+
+    /** Whether {@code channel}'s peer is a trusted proxy, whose forwarding fields the edge believes. */
+    boolean trustsPeer(Channel channel) {
+        return isTrusted(peer(channel));
+    }
+
+    /** An address as an IP literal, without an IPv6 scope, which the protocol doesn't carry. */
+    static String ipLiteral(InetAddress address) {
+        String literal = address.getHostAddress();
+        int scope = literal.indexOf('%');
+        return scope < 0 ? literal : literal.substring(0, scope);
     }
 
     /** The resolved client address, or the TCP peer if no request has been resolved on this channel yet. */
@@ -88,8 +116,12 @@ final class ClientAddressResolver extends ChannelInboundHandlerAdapter {
     }
 
     private static InetAddress peer(Channel channel) {
+        return peerSocket(channel).getAddress();
+    }
+
+    private static InetSocketAddress peerSocket(Channel channel) {
         if (channel.remoteAddress() instanceof InetSocketAddress socket && socket.getAddress() != null) {
-            return socket.getAddress();
+            return socket;
         }
         throw new IllegalStateException("The edge only accepts IP connections: " + channel.remoteAddress());
     }

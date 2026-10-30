@@ -3,6 +3,7 @@ package io.jburrow.client.tunnel.domain;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -66,5 +67,29 @@ class TunnelValuesTest {
                         TunnelClosed.Reason.SERVER_ERROR, Optional.of(ErrorCode.SERVER_SHUTTING_DOWN), "bye"));
         assertThat(TunnelClosed.localError(ErrorCode.PROTOCOL_ERROR, "bad").reason())
                 .isEqualTo(TunnelClosed.Reason.LOCAL_ERROR);
+    }
+
+    @Test
+    void anHttpSpecAsksForItsSubdomain() {
+        TunnelSpec spec =
+                TunnelSpec.http("default", LocalTarget.of("localhost", 3000)).subdomain(new SubdomainName("myapp"));
+
+        assertThat(spec.toRequest()).isEqualTo(new TunnelRequest("default", TunnelKind.HTTP, "myapp", null));
+    }
+
+    @Test
+    void httpOptionsAreRefusedOnATcpSpec() {
+        TunnelSpec tcp = TunnelSpec.tcp("default", LocalTarget.of("localhost", 22));
+
+        assertThatThrownBy(() -> tcp.subdomain(new SubdomainName("myapp")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("subdomain");
+        assertThatThrownBy(() -> tcp.hostHeader(HostHeader.REWRITE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("HTTP tunnel");
+        assertThatThrownBy(() -> TunnelSpec.http("default", LocalTarget.of("localhost", 3000))
+                        .remotePort(20_417))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("remotePort");
     }
 }

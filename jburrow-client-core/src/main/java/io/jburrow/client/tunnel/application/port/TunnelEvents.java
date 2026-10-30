@@ -1,5 +1,6 @@
 package io.jburrow.client.tunnel.application.port;
 
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -17,7 +18,8 @@ import java.util.Optional;
  * <p>A session that never establishes reports nothing here; {@code JBurrowClient.start()} throws instead. An
  * established session reports {@link #onEstablished} first and {@link #onClosed} last, exactly once each, and every
  * {@link #onStreamOpened} is followed by exactly one {@link #onStreamClosed} for the same stream before
- * {@link #onClosed}.
+ * {@link #onClosed}. A stream of an HTTP tunnel reports {@link #onExchangeCompleted} once, just before its
+ * {@link #onStreamClosed}.
  */
 public interface TunnelEvents {
 
@@ -41,6 +43,12 @@ public interface TunnelEvents {
      */
     default void onStreamClosed(
             int streamId, long bytesIn, long bytesOut, long durationMillis, Optional<ErrorCode> reset) {}
+
+    /**
+     * An exchange of an HTTP tunnel ended: its response was complete, or its stream was reset. Never carries a header
+     * value or a body.
+     */
+    default void onExchangeCompleted(ExchangeSummary exchange) {}
 
     /** The session ended. Nothing follows. */
     default void onClosed(TunnelClosed closed) {}

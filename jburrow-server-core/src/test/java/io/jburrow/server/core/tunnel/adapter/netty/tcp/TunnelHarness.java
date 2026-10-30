@@ -9,10 +9,12 @@ import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
 import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
+import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionContext;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
@@ -20,13 +22,16 @@ import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettingsFixture;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.TcpSettings;
 import io.jburrow.server.core.tunnel.application.InMemoryAuthtokenVerifier;
 import io.jburrow.server.core.tunnel.application.RecordingTunnelMetrics;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
-import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
+import io.jburrow.server.core.tunnel.application.RegistrationFixtures;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
+import io.jburrow.server.core.tunnel.domain.Principal;
+import io.jburrow.server.core.tunnel.domain.TunnelId;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -36,6 +41,7 @@ import java.time.Duration;
 import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -66,7 +72,8 @@ final class TunnelHarness implements AutoCloseable {
             int maxConcurrentStreams,
             int maxStreams,
             int sessionWriteLow,
-            int sessionWriteHigh) {
+            int sessionWriteHigh,
+            Set<Capability> capabilities) {
 
         static Settings defaults() {
             return new Settings(
@@ -76,7 +83,8 @@ final class TunnelHarness implements AutoCloseable {
                     1_000,
                     2_000,
                     SESSION_WRITE_LOW,
-                    SESSION_WRITE_HIGH);
+                    SESSION_WRITE_HIGH,
+                    Set.of());
         }
 
         Settings transport(EdgeTransport transport) {
@@ -87,7 +95,8 @@ final class TunnelHarness implements AutoCloseable {
                     maxConcurrentStreams,
                     maxStreams,
                     sessionWriteLow,
-                    sessionWriteHigh);
+                    sessionWriteHigh,
+                    capabilities);
         }
 
         Settings liveness(Duration pingInterval, Duration idleTimeout) {
@@ -98,7 +107,20 @@ final class TunnelHarness implements AutoCloseable {
                     maxConcurrentStreams,
                     maxStreams,
                     sessionWriteLow,
-                    sessionWriteHigh);
+                    sessionWriteHigh,
+                    capabilities);
+        }
+
+        Settings capabilities(Set<Capability> capabilities) {
+            return new Settings(
+                    transport,
+                    pingInterval,
+                    idleTimeout,
+                    maxConcurrentStreams,
+                    maxStreams,
+                    sessionWriteLow,
+                    sessionWriteHigh,
+                    capabilities);
         }
 
         Settings streams(int maxConcurrentStreams, int maxStreams) {
@@ -109,7 +131,8 @@ final class TunnelHarness implements AutoCloseable {
                     maxConcurrentStreams,
                     maxStreams,
                     sessionWriteLow,
-                    sessionWriteHigh);
+                    sessionWriteHigh,
+                    capabilities);
         }
     }
 
@@ -150,17 +173,22 @@ final class TunnelHarness implements AutoCloseable {
                 SERVER_WINDOWS,
                 flow.maxConcurrentStreams(),
                 flow.maxStreams(),
-                "test");
+                "test",
+                HttpSettingsFixture.defaults(),
+                flow.capabilities());
+        SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
         RegisterTunnels register = new RegisterTunnels(
                 new InMemoryAuthtokenVerifier().with(TOKEN, "tester"),
                 admission,
                 ports,
-                new RegistrationPolicy(1, PUBLIC_HOST));
+                routes,
+                RegistrationFixtures.policy(1, PUBLIC_HOST));
         EngineDependencies deps = new EngineDependencies(
                 register,
                 admission,
                 streamQuota,
                 ports,
+                routes,
                 metrics,
                 blocking,
                 new TcpSettings("127.0.0.1", PUBLIC_HOST, 32 * 1024));
@@ -203,6 +231,11 @@ final class TunnelHarness implements AutoCloseable {
     SessionContext onlySession() {
         awaitTrue(() -> sessions.registry().active() == 1);
         return sessions.registry().all().getFirst();
+    }
+
+    /** The relay of the session's TCP visitors. Read it on the session's event loop. */
+    static StreamRelay relay(SessionContext session) {
+        return ((TunnelStreams) session.streams().orElseThrow()).relay();
     }
 
     /** Runs {@code task} on the session's event loop, where its state may be read. */

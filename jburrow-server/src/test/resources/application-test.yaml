@@ -20,3 +20,6 @@ jburrow:
     connect-host: localhost
   tcp:
     public-host: localhost
+  http:
+    domain: localhost
+    public-scheme: http

@@ -8,10 +8,12 @@ import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
+import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.stream.StreamEvent;
 import io.jburrow.protocol.stream.StreamOutcome;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -38,6 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -141,6 +144,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                     handedOn = true;
                     onData(data);
                 }
+                case Frame.Headers headers -> onHeaders(headers);
                 case Frame.WindowUpdate update -> onWindowUpdate(update);
                 case Frame.Close close -> onClose(close);
                 case Frame.Error error -> closer.peerFailed(context, error.body());
@@ -167,6 +171,16 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             }
         } finally {
             data.release();
+        }
+    }
+
+    /** Without streams no exchange was opened, so a head can only be for a stream that was never opened. */
+    private void onHeaders(Frame.Headers headers) {
+        Optional<SessionStreams> streams = context.streams();
+        if (streams.isPresent()) {
+            streams.get().onHeaders(headers);
+        } else if (!(session.onHeadersReceived(headers.streamId(), headers.head()) instanceof StreamOutcome.Discard)) {
+            throw new IllegalStateException("Stream " + headers.streamId() + " is open but has no exchange");
         }
     }
 
@@ -210,20 +224,27 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     private void onHello(Hello hello) {
         session.onHello(hello);
         context.channel()
-                .writeAndFlush(new Frame.ServerHello(
-                        new ServerHello(session.id().value(), serverInfo, List.of(), limits, windows)));
+                .writeAndFlush(new Frame.ServerHello(new ServerHello(
+                        session.id().value(),
+                        serverInfo,
+                        session.capabilities().stream()
+                                .map(Capability::wireName)
+                                .toList(),
+                        limits,
+                        windows)));
         context.liveness().start();
     }
 
     private void onRegister(Register register) {
         session.onRegisterReceived();
         EventLoop loop = context.channel().eventLoop();
+        Set<Capability> capabilities = session.capabilities();
         long started = System.nanoTime();
         try {
             blockingExecutor.execute(() -> {
                 Object outcome;
                 try {
-                    outcome = registerTunnels.execute(context.ticket(), register);
+                    outcome = registerTunnels.execute(context.ticket(), register, capabilities);
                 } catch (ProtocolException refused) {
                     outcome = refused;
                 } catch (Throwable unexpected) {
@@ -309,6 +330,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             }
             List<Tunnel> tunnels = bound.getNow();
             session.onEstablished(principal, tunnels);
+            registry.addTunnels(context, tunnels);
             context.channel()
                     .writeAndFlush(new Frame.Registered(new Registered(
                             tunnels.stream().map(Tunnel::toRegistered).toList())));
@@ -419,7 +441,10 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
-    /** Ports go back to the pool only once every listener on them is closed. */
+    /**
+     * Ports go back to the pool only once every listener on them is closed; names go on hold on the same path, so
+     * registration is released in one place however the session ended.
+     */
     private void unbindThenRelease() {
         Future<?> unbound;
         try {
@@ -450,7 +475,8 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                 client.version(),
                 context.clientAddress().getHostAddress(),
                 tunnels.stream()
-                        .map(tunnel -> tunnel.kind().wireName() + ":" + tunnel.publicPort())
+                        .map(tunnel -> tunnel.kind().wireName() + ":"
+                                + (tunnel.kind() == TunnelKind.HTTP ? tunnel.publicHost() : tunnel.publicPort()))
                         .collect(Collectors.joining(",", "[", "]")));
     }
 }

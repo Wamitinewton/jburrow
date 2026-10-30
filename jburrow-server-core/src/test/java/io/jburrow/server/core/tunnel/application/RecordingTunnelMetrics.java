@@ -18,6 +18,7 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
 
     private volatile Supplier<PortPoolSnapshot> portPool;
     private volatile LongSupplier directMemory;
+    private volatile LongSupplier parkedBytes;
 
     /** Every call so far, oldest first. */
     public List<String> events() {
@@ -110,6 +111,40 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
     @Override
     public void flowBlocked(FlowScope scope) {
         record("flowBlocked", scope);
+    }
+
+    @Override
+    public void httpResponse(int status, ResponseOrigin origin) {
+        record("httpResponse", status, origin);
+    }
+
+    @Override
+    public void edgeErrorPage(String code) {
+        record("edgeErrorPage", code);
+    }
+
+    @Override
+    public void responseHead(long durationNanos) {
+        record("responseHead");
+    }
+
+    @Override
+    public void streamParked() {
+        record("streamParked");
+    }
+
+    @Override
+    public void parkRefused() {
+        record("parkRefused");
+    }
+
+    @Override
+    public void bindParkedBytes(LongSupplier parkedBytes) {
+        this.parkedBytes = parkedBytes;
+    }
+
+    public LongSupplier parkedBytes() {
+        return parkedBytes;
     }
 
     @Override

@@ -329,6 +329,18 @@ final class StreamRelay implements SessionStreams {
         }
     }
 
+    /**
+     * A relay has no exchanges, so the session can only find the head's stream closed, or a TCP visitor's, which is a
+     * protocol error.
+     */
+    @Override
+    public void onHeaders(Frame.Headers headers) {
+        if (!(session.onHeadersReceived(headers.streamId(), headers.head()) instanceof StreamOutcome.Discard)) {
+            throw new IllegalStateException(
+                    "Stream " + headers.streamId() + " of session " + session.id() + " is open but has no exchange");
+        }
+    }
+
     @Override
     public void onClose(Frame.Close close) {
         boolean reset = close.reset().isPresent();

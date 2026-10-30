@@ -1,5 +1,6 @@
 package io.jburrow.server.config;
 
+import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.flow.FlowLimits;
 import io.jburrow.server.core.portpool.domain.PortRange;
@@ -15,7 +16,10 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Stream;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.unit.DataSize;
@@ -35,7 +39,8 @@ public record JBurrowProperties(
         @Valid @NotNull Mail mail,
         @Valid @NotNull @DefaultValue Auth auth,
         @Valid @NotNull @DefaultValue Edge edge,
-        @Valid @NotNull @DefaultValue Tcp tcp) {
+        @Valid @NotNull @DefaultValue Tcp tcp,
+        @Valid @NotNull @DefaultValue Http http) {
 
     @AssertTrue(message = "jburrow.tcp.port-range must not contain jburrow.edge.port")
     public boolean isTcpPortRangeClearOfTheEdge() {
@@ -43,6 +48,20 @@ public record JBurrowProperties(
             return true;
         }
         return tcp.parsedPortRange().map(range -> !range.contains(edge.port())).orElse(true);
+    }
+
+    @AssertTrue(
+            message = "jburrow.edge.connect-host and jburrow.tcp.public-host must each be outside jburrow.http.domain"
+                    + " or one label under it")
+    public boolean isServiceHostsPlacementValid() {
+        if (http == null || http.domain() == null || edge == null || tcp == null) {
+            return true;
+        }
+        return Stream.of(edge.connectHost(), tcp.publicHost())
+                .filter(Objects::nonNull)
+                .allMatch(host -> http.labelsUnderDomain(host)
+                        .map(labels -> !labels.contains("."))
+                        .orElse(true));
     }
 
     /** @param prefix path every JBurrow controller is mapped under, with a leading and no trailing slash */
@@ -249,6 +268,129 @@ public record JBurrowProperties(
             } catch (IllegalArgumentException e) {
                 return Optional.empty();
             }
+        }
+    }
+
+    /**
+     * HTTP tunnels.
+     *
+     * @param domain tunnels are {@code <name>.<domain>}: a lower-case DNS name of at least two labels, or
+     *     {@code localhost}
+     * @param publicScheme the scheme in a tunnel's {@code url}, {@code http} or {@code https}
+     * @param publicPort the port in a tunnel's {@code url}, left out when it is the scheme's default: the port the public
+     *     reaches, the ingress's in production
+     * @param reservedNames names no tunnel may claim, added to the built-in ones; each follows the subdomain rule
+     * @param nameHold how long a name stays held for its principal after its tunnel ends; {@code 0s} turns holds off
+     * @param maxRequestBody the largest request body the edge forwards
+     * @param responseTimeout how long the edge waits for the final response head; below the ingress's read timeout
+     * @param keepAliveTimeout idle time between exchanges on an edge connection; above the ingress's upstream
+     *     keep-alive
+     * @param socketBuffer {@code SO_SNDBUF} and {@code SO_RCVBUF} of an edge connection that carries exchanges;
+     *     {@code 0} leaves them to the kernel
+     * @param parkAfter how long a stalled response waits before its buffered bytes are parked
+     * @param maxParked bytes parked across the server; {@code 0} turns parking off
+     * @param maxParkedPerSession bytes one session may have parked; at most {@code maxParked}
+     */
+    public record Http(
+            @NotBlank
+            @Pattern(
+                    regexp = Http.DOMAIN,
+                    message = "must be a lower-case DNS name of at least two labels, or localhost")
+            String domain,
+
+            @NotNull @DefaultValue("https") @Pattern(regexp = "https?", message = "must be http or https")
+            String publicScheme,
+
+            @Min(1) @Max(65_535) @DefaultValue("443") int publicPort,
+            @NotNull @DefaultValue List<String> reservedNames,
+            @NotNull @DefaultValue("60s") Duration nameHold,
+            @NotNull @DefaultValue("100MB") DataSize maxRequestBody,
+            @NotNull @DefaultValue("60s") Duration responseTimeout,
+            @NotNull @DefaultValue("75s") Duration keepAliveTimeout,
+            @NotNull @DefaultValue("16KB") DataSize socketBuffer,
+            @NotNull @DefaultValue("1s") Duration parkAfter,
+            @NotNull @DefaultValue("16MB") DataSize maxParked,
+            @NotNull @DefaultValue("2MB") DataSize maxParkedPerSession) {
+
+        private static final String LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
+        static final String DOMAIN = "^(localhost|(" + LABEL + "\\.)+" + LABEL + ")$";
+
+        /** As for {@code jburrow.tcp.visitor-receive-buffer}: the kernel caps both at its own maximum. */
+        static final long MIN_SOCKET_BUFFER = 4 * 1024;
+
+        static final long MAX_SOCKET_BUFFER = 4 * 1024 * 1024;
+
+        @AssertTrue(message = "jburrow.http.reserved-names must each be 3 to 63 lower-case letters, digits and hyphens")
+        public boolean isReservedNamesValid() {
+            return reservedNames == null
+                    || reservedNames.stream()
+                            .allMatch(name ->
+                                    name != null && SubdomainName.parse(name).isPresent());
+        }
+
+        @AssertTrue(message = "jburrow.http.name-hold must not be negative")
+        public boolean isNameHoldValid() {
+            return nameHold == null || !nameHold.isNegative();
+        }
+
+        @AssertTrue(message = "jburrow.http.max-request-body must be positive")
+        public boolean isMaxRequestBodyValid() {
+            return maxRequestBody == null || maxRequestBody.toBytes() > 0;
+        }
+
+        @AssertTrue(message = "jburrow.http.response-timeout must be positive")
+        public boolean isResponseTimeoutValid() {
+            return responseTimeout == null || isPositive(responseTimeout);
+        }
+
+        @AssertTrue(message = "jburrow.http.keep-alive-timeout must be positive")
+        public boolean isKeepAliveTimeoutValid() {
+            return keepAliveTimeout == null || isPositive(keepAliveTimeout);
+        }
+
+        @AssertTrue(message = "jburrow.http.socket-buffer must be 0, for the kernel's sizing, or from 4KB to 4MB")
+        public boolean isSocketBufferValid() {
+            if (socketBuffer == null) {
+                return true;
+            }
+            long bytes = socketBuffer.toBytes();
+            return bytes == 0 || (bytes >= MIN_SOCKET_BUFFER && bytes <= MAX_SOCKET_BUFFER);
+        }
+
+        @AssertTrue(message = "jburrow.http.park-after must be positive")
+        public boolean isParkAfterValid() {
+            return parkAfter == null || isPositive(parkAfter);
+        }
+
+        @AssertTrue(message = "jburrow.http.max-parked must not be negative")
+        public boolean isMaxParkedValid() {
+            return maxParked == null || maxParked.toBytes() >= 0;
+        }
+
+        @AssertTrue(message = "jburrow.http.max-parked-per-session must be from 0 to jburrow.http.max-parked")
+        public boolean isMaxParkedPerSessionValid() {
+            if (maxParkedPerSession == null) {
+                return true;
+            }
+            long bytes = maxParkedPerSession.toBytes();
+            return bytes >= 0 && (maxParked == null || bytes <= maxParked.toBytes());
+        }
+
+        /**
+         * The labels {@code host} has under the domain, such as {@code connect} for {@code connect.example.dev} under
+         * {@code example.dev}, compared without case; empty if it is the domain itself or outside it.
+         */
+        public Optional<String> labelsUnderDomain(String host) {
+            String lower = host.strip().toLowerCase(Locale.ROOT);
+            String suffix = "." + domain;
+            if (lower.length() <= suffix.length() || !lower.endsWith(suffix)) {
+                return Optional.empty();
+            }
+            return Optional.of(lower.substring(0, lower.length() - suffix.length()));
+        }
+
+        private static boolean isPositive(Duration duration) {
+            return !duration.isNegative() && !duration.isZero();
         }
     }
 
