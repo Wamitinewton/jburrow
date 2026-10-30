@@ -1,8 +1,11 @@
 package io.jburrow.server.e2e;
 
+import static io.jburrow.server.e2e.TunnelTestSupport.KERNEL_SOCKET_BUFFERS;
+import static io.jburrow.server.e2e.TunnelTestSupport.LOOPBACK_IS_THE_INGRESS;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.jburrow.server.e2e.support.HttpVisitor;
 import java.io.InterruptedIOException;
 import java.net.Socket;
 import java.security.MessageDigest;
@@ -14,12 +17,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.test.context.NestedTestConfiguration;
 import org.springframework.test.context.TestPropertySource;
+import tools.jackson.databind.JsonNode;
 
 /**
  * The log of the {@link ObservedScenario}: every line {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Observability
@@ -156,6 +162,88 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
                 .toList();
 
         assertThat(mentions).singleElement().asString().contains("session established:");
+    }
+
+    /**
+     * The HTTP exchange's line ({@code docs/phase-3-http-tunnels/ARCHITECTURE.md} §Observability), read from the ECS
+     * JSON the {@code prod} profile logs ({@link EcsLogCapture}): one per exchange with its fields, and a secret placed in
+     * the path, the query, {@code authorization}, {@code cookie}, {@code set-cookie} and both bodies in no line at all.
+     */
+    @Nested
+    @NestedTestConfiguration(NestedTestConfiguration.EnclosingConfiguration.OVERRIDE)
+    @TestPropertySource(
+            properties = {"jburrow.tcp.port-range=30990-30999", LOOPBACK_IS_THE_INGRESS, KERNEL_SOCKET_BUFFERS})
+    class Http extends TunnelTestSupport {
+
+        private static final String SECRET = "s3cr3t-9b1f4e-never-logged";
+
+        @Test
+        void eachExchangeIsLoggedWithoutItsTargetHeadersOrBodies() throws Exception {
+            EcsLogCapture log = closeAfterTest(EcsLogCapture.start());
+            LocalHttpService service = closeAfterTest(LocalHttpService.start(SECRET));
+            Tunnel tunnel = openHttpTunnel(ALICE_TOKEN, service.port());
+            String tunnelId = tunnel.registered().tunnelId().toString();
+            HttpVisitor visitor = ingressConnection();
+
+            visitor.request(
+                    "GET",
+                    tunnel.host(),
+                    "/inspect/" + SECRET + "?token=" + SECRET,
+                    "Authorization",
+                    "Bearer " + SECRET,
+                    "Cookie",
+                    "session=" + SECRET);
+            assertThat(visitor.response().text()).contains(SECRET);
+            byte[] body = ("{\"password\":\"" + SECRET + "\"}").getBytes(US_ASCII);
+            visitor.request("POST", tunnel.host(), "/echo", body);
+            assertThat(visitor.response().body()).isEqualTo(body);
+            visitor.request("GET", tunnel.host(), "/cookie");
+            assertThat(visitor.response().head().all("set-cookie")).anyMatch(cookie -> cookie.contains(SECRET));
+            visitor.request("GET", "nobody-serves-this.localhost", "/" + SECRET);
+            assertThat(visitor.response().status()).isEqualTo(404);
+            awaitNoExchanges();
+            await(
+                    "every exchange's line is logged",
+                    () -> log.messages().stream()
+                                    .filter(message -> message.startsWith("http exchange:"))
+                                    .count()
+                            >= 4);
+
+            List<String> exchanges = log.messages().stream()
+                    .filter(message -> message.startsWith("http exchange:"))
+                    .toList();
+            assertThat(exchanges).hasSize(4);
+            assertThat(exchanges.get(0))
+                    .startsWith("http exchange: tunnel=" + tunnelId + " host=" + tunnel.host()
+                            + " method=GET status=200 origin=tunnel requestBytes=0 responseBytes=")
+                    .containsPattern(" headMs=\\d+ totalMs=\\d+$");
+            assertThat(exchanges.get(1))
+                    .contains(
+                            "tunnel=" + tunnelId,
+                            "method=POST",
+                            "status=200",
+                            "origin=tunnel",
+                            "requestBytes=" + body.length,
+                            "responseBytes=" + body.length)
+                    .containsPattern(" headMs=\\d+ totalMs=\\d+$");
+            assertThat(exchanges.get(3))
+                    .isEqualTo("http exchange: tunnel=- host=nobody-serves-this.localhost method=GET status=404"
+                            + " origin=edge code=TUNNEL_NOT_FOUND requestBytes=0 responseBytes=0 headMs=- totalMs=0");
+            assertThat(log.lines())
+                    .filteredOn(line -> line.path("message").asString().startsWith("http exchange:"))
+                    .allSatisfy(
+                            line -> assertThat(line.path("log").path("level").asString())
+                                    .isEqualTo("INFO"));
+            assertThat(log.messages())
+                    .filteredOn(message -> message.startsWith("session established:"))
+                    .singleElement()
+                    .asString()
+                    .contains("tunnels=[http:" + tunnel.host() + "]");
+
+            for (JsonNode line : log.lines()) {
+                assertThat(line.toString()).as("a log line").doesNotContain(SECRET);
+            }
+        }
     }
 
     /** The one line at {@code level} containing {@code text}. */

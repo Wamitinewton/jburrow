@@ -24,7 +24,8 @@ import java.util.concurrent.Executors;
 
 /**
  * A local web service on the JDK's own HTTP server, so the client is tested against an implementation it shares no code
- * with. Each exchange runs on a virtual thread of its own, so one that blocks holds back no other.
+ * with. Each exchange runs on a platform thread of its own, so one that blocks holds back no other. Not a virtual
+ * thread: on JDK 21 one blocked in the JDK server's synchronized stream reads and writes pins its carrier.
  *
  * <pre>
  * GET  /hello                 200, "hello", by length
@@ -45,7 +46,7 @@ final class LocalHttpService implements AutoCloseable {
     /** A multiple of 4, so each piece of {@link #randomBody} takes whole ints from its {@link Random}. */
     static final int CHUNK = 64 * 1024;
 
-    private final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService threads = Executors.newCachedThreadPool();
     private final CountDownLatch stall = new CountDownLatch(1);
     private final CountDownLatch stalled = new CountDownLatch(1);
     private final List<String> requestHosts = new CopyOnWriteArrayList<>();

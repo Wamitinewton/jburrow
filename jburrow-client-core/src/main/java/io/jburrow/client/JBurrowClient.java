@@ -5,8 +5,10 @@ import io.jburrow.client.tunnel.domain.HostHeader;
 import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import java.net.URI;
 import java.time.Duration;
+import java.util.Set;
 import javax.net.ssl.TrustManagerFactory;
 
 /**
@@ -113,6 +115,12 @@ public interface JBurrowClient extends AutoCloseable {
          * service. 256 KiB per stream and 1 MiB for the session by default; {@link Windows} checks the bounds.
          */
         Builder windows(Windows windows);
+
+        /**
+         * The capabilities offered in {@code HELLO}. Every one this client implements by default; fewer only to stand
+         * in for an older client, as a compatibility test does. A tunnel whose kind needs one left out fails the build.
+         */
+        Builder capabilities(Set<Capability> offered);
 
         /**
          * Validates the settings and builds the client. Nothing connects until {@link JBurrowClient#start()}.

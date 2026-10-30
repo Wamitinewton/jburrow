@@ -139,6 +139,11 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
     }
 
     @Override
+    public void subdomainClaimed(ClaimOutcome outcome) {
+        record("subdomainClaimed", outcome);
+    }
+
+    @Override
     public void bindParkedBytes(LongSupplier parkedBytes) {
         this.parkedBytes = parkedBytes;
     }

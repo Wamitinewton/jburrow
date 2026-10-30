@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.TunnelStartException.Kind;
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
+import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -15,8 +17,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
@@ -29,8 +31,8 @@ class JsonLinesOutputTest {
     // Not UTC, and finer than milliseconds: neither may show in the output.
     private final Clock clock =
             Clock.fixed(Instant.parse("2026-10-25T12:01:07.123456Z"), ZoneId.of("America/New_York"));
-    private final JsonLinesOutput output =
-            new JsonLinesOutput(new PrintWriter(out), clock, Map.of("default", LocalTarget.of("localhost", 22)));
+    private final JsonLinesOutput output = new JsonLinesOutput(
+            new PrintWriter(out), clock, List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))));
 
     @Test
     void registered() {
@@ -70,6 +72,25 @@ class JsonLinesOutputTest {
         output.onStreamClosed(3, 0, 0, 12, Optional.of(ErrorCode.LOCAL_SERVICE_UNREACHABLE));
 
         assertThat(onlyLine()).endsWith(",\"reset\":\"LOCAL_SERVICE_UNREACHABLE\"}");
+    }
+
+    @Test
+    void request() {
+        output.onExchangeCompleted(new ExchangeSummary(
+                3, "POST", "/api/items?draft=1", OptionalInt.of(201), Optional.empty(), 120, 52, 8));
+
+        assertThat(onlyLine())
+                .isEqualTo("{\"type\":\"request\",\"time\":\"" + TIME + "\",\"streamId\":3,"
+                        + "\"method\":\"POST\",\"target\":\"/api/items?draft=1\",\"status\":201,\"reset\":null,"
+                        + "\"requestBytes\":120,\"responseBytes\":52,\"durationMs\":8}");
+    }
+
+    @Test
+    void requestReset() {
+        output.onExchangeCompleted(new ExchangeSummary(
+                5, "GET", "/missing", OptionalInt.empty(), Optional.of(ErrorCode.LOCAL_SERVICE_UNREACHABLE), 0, 0, 3));
+
+        assertThat(onlyLine()).contains("\"status\":null,\"reset\":\"LOCAL_SERVICE_UNREACHABLE\"");
     }
 
     @Test

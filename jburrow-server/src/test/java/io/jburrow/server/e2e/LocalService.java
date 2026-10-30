@@ -82,6 +82,27 @@ final class LocalService implements AutoCloseable {
         }
     }
 
+    /**
+     * Reads a request head on each connection, then writes {@code response} as given and closes: for responses the
+     * JDK's HTTP server can't send, such as an informational one or invalid HTTP.
+     */
+    static LocalService rawHttp(String response) {
+        byte[] bytes = response.getBytes(US_ASCII);
+        return start(connection -> {
+            InputStream in = connection.getInputStream();
+            int matched = 0;
+            while (matched < 4) {
+                int b = in.read();
+                if (b < 0) {
+                    return;
+                }
+                matched = b == (matched % 2 == 0 ? '\r' : '\n') ? matched + 1 : (b == '\r' ? 1 : 0);
+            }
+            connection.getOutputStream().write(bytes);
+            connection.getOutputStream().flush();
+        });
+    }
+
     /** Writes back everything it reads, and half-closes when the other side does. */
     static LocalService echo() {
         return start(connection -> {

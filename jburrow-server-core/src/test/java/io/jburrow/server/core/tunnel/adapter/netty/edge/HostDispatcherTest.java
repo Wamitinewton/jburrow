@@ -85,6 +85,7 @@ class HostDispatcherTest {
         assertThat(response).startsWith("HTTP/1.1 404 Not Found").contains("jburrow-error: TUNNEL_NOT_FOUND");
         assertThat(edge.exchanges.requests).isEmpty();
         assertThat(edge.channel.isOpen()).isTrue();
+        assertThat(edge.metrics.events()).containsExactly("edgeErrorPage TUNNEL_NOT_FOUND", "httpResponse 404 EDGE");
     }
 
     @Test

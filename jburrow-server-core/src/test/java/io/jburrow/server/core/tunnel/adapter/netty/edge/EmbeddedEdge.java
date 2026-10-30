@@ -38,6 +38,7 @@ final class EmbeddedEdge {
     final SessionAdmission admission = new SessionAdmission(8, 4, 3);
     final List<String> upgrades = new ArrayList<>();
     final RecordingExchanges exchanges = new RecordingExchanges();
+    final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
     final PeerChannel channel;
 
     EmbeddedEdge() {
@@ -46,7 +47,7 @@ final class EmbeddedEdge {
                 CONNECT_HOST,
                 admission,
                 () -> false,
-                new RecordingTunnelMetrics(),
+                metrics,
                 new UpgradeErrorResponses(ControlJson.create(), InstantSource.system()));
         ClientAddressResolver clientAddresses = new ClientAddressResolver(List.of());
         ConnectPipeline connect = new ConnectPipeline(
@@ -62,7 +63,8 @@ final class EmbeddedEdge {
                         connect,
                         clientAddresses,
                         () -> exchanges,
-                        new EdgeErrorPage()));
+                        new EdgeErrorPage(),
+                        metrics));
     }
 
     static EdgeSettings settings() {

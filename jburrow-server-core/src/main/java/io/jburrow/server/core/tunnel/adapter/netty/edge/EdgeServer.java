@@ -178,7 +178,13 @@ public final class EdgeServer {
                 () -> shuttingDown,
                 deps.metrics());
         return new EdgeChannelInitializer(
-                settings, connections, connect, clientAddresses, () -> new ExchangeHandler(exchanges), pages);
+                settings,
+                connections,
+                connect,
+                clientAddresses,
+                () -> new ExchangeHandler(exchanges),
+                pages,
+                deps.metrics());
     }
 
     /** The port the listener is bound to, which differs from the configured one when that is 0. */

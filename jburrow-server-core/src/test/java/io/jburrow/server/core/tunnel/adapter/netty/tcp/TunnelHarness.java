@@ -182,7 +182,8 @@ final class TunnelHarness implements AutoCloseable {
                 admission,
                 ports,
                 routes,
-                RegistrationFixtures.policy(1, PUBLIC_HOST));
+                RegistrationFixtures.policy(1, PUBLIC_HOST),
+                metrics);
         EngineDependencies deps = new EngineDependencies(
                 register,
                 admission,

@@ -79,6 +79,7 @@ class ExitCodesTest {
         "TIMEOUT, 4",
         "UPGRADE_REFUSED, 4",
         "SERVER_ERROR, 4",
+        "UNSUPPORTED_BY_SERVER, 6",
         "LOCAL_ERROR, 1"
     })
     void aStartFailureWithoutACodeExitsByItsKind(Kind kind, int exitCode) {

@@ -483,7 +483,8 @@ jburrow-server-core/                      io.jburrow.server.core
                   exchange), SessionExchanges (session's loop, one per session), ExchangeGate, Parking,
                   DemandReadAllocator, RequestHeads, ResponseHeads, EdgeErrorPage, EdgeError,
                   ErrorPageExchange (a page, with the body discarded), ExchangeRequest (a routed head),
-                  ExchangeEnded (the event that hands the connection back), ExchangeServices and
+                  ExchangeEnded (the event that hands the connection back), ExchangeLog (the
+                  per-exchange line), ExchangeServices and
                   ExchangeSessions (what the edge routes with)
 
 jburrow-server/                           io.jburrow.server
@@ -806,7 +807,9 @@ read gate.
   `"http"` is something the capability introduces, which protocol.md §4.2 forbids before the
   session has it, and the reference codec refuses to encode it until then. That costs HTTP sessions
   one round trip at setup; TCP sessions still register at once.
-- **`JBurrowClient.Builder`** gains `http(localTarget)` with `subdomain` and `hostHeader`, and
+- **`JBurrowClient.Builder`** gains `http(localTarget)` with `subdomain` and `hostHeader`,
+  `capabilities(set)` to offer fewer capabilities than the client implements, so a test can stand in
+  for a phase 2 client (a tunnel whose kind needs one left out fails the build), and
   the client reports each finished exchange (method, target, status, bytes, duration) to
   `TunnelEvents.onExchangeCompleted`, just before the stream's `onStreamClosed`, which is what the CLI
   prints. An exchange whose response was complete counts as completed even if its stream was then
@@ -817,7 +820,7 @@ read gate.
 
 ```
 jburrow http [host:]port [--subdomain <name>] [--host-header rewrite] [--authtoken ...]
-             [--server ...] [--output text|json]
+             [--server ...] [--output human|json]
 ```
 
 ```
@@ -826,16 +829,33 @@ Forwarding  https://quiet-otter-4f2a.cloudnativehub.app -> http://localhost:3000
 
 14:02:11  GET  /                      200   3.4 KiB    12 ms
 14:02:11  GET  /assets/app.js         200  88.0 KiB    31 ms
-14:02:14  POST /api/items             201     52 B      8 ms
+14:02:14  POST /api/items             201      52 B     8 ms
+14:02:15  GET  /missing                 -         -     3 ms  local service unreachable
 ```
 
+- **`jburrow tcp` and `jburrow http`** share the local target argument, `--server`, `--authtoken`,
+  `--output` and the run loop (`TunnelCommand`); each only says which tunnel it asks for.
 - **`--subdomain`** is lower-cased before it is sent; anything else that breaks the name rule is a
-  usage error (exit code 2) before connecting.
+  usage error (exit code 2) before connecting, with the rule in the message.
+- **`--host-header`** takes only `rewrite` in this phase; any other value is a usage error. A host of
+  the user's choosing is v1.
 - **Exit codes** are phase 1's. `SUBDOMAIN_UNAVAILABLE` and `SUBDOMAIN_FORBIDDEN` are refused
-  registrations (5), with the reason; a server without `http` is a protocol mismatch (6).
-- **`--output json`** adds a `request` event per exchange, with the fields of the line above.
-- A request line is printed when its response ends. A request whose stream is reset prints `—` as
-  its status and the reset's reason.
+  registrations (5), printed with the requested name ("The subdomain myapp is in use. Try another,
+  or leave out --subdomain."); a server without `http` is a protocol mismatch (6), "This server
+  doesn't support HTTP tunnels. Upgrade the server, or use jburrow tcp."
+- **A request line** is printed when its exchange ends: the time, the method, the target cut to 60
+  characters with `...`, the final status, the response body's size in binary units, and the
+  duration (`ms` under ten seconds, then as `jburrow tcp` prints durations). A request whose stream
+  is reset before its final response head prints `-` for the status and the size; a reset
+  appends the reason, the code in lower-case words. The columns are fixed: the end-to-end tests and
+  testers' scripts read them. Like every line the console output prints, it is ASCII only, so a
+  target with anything else in it shows `?` there and can't reach the terminal as a control
+  sequence. An HTTP stream prints no `opened` or `closed` line of its own.
+- **`--output json`** adds a `request` event per exchange, just before its `stream_closed`:
+  `streamId`, `method`, `target`, `status` (null without a final head), `reset` (null unless the
+  stream was reset before the response was complete), `requestBytes`, `responseBytes` and
+  `durationMs`. `registered` carries the tunnel's `url` as for `tcp`.
+- Nothing the CLI prints carries a header value, a cookie or a body, at any output setting.
 
 ## Layer rules
 
@@ -863,7 +883,7 @@ reaching `routing.domain` directly. The protocol model's new records are pure, a
 | `jburrow.http.keep-alive-timeout` | | `75s` | `75s` | idle time between exchanges; must be above the ingress's upstream keep-alive |
 | `jburrow.http.socket-buffer` | | `0` | `16KB` | `SO_SNDBUF` and `SO_RCVBUF` of an edge connection that carries exchanges; `0` leaves it to the kernel. Loopback's segments are about 64 KiB, larger than a 16 KB buffer, which Linux then advertises as a zero window until its persist timer fires, so `local` leaves it to the kernel; on the ingress's hop segments are about 1.4 KiB |
 | `jburrow.http.park-after` | | `1s` | `1s` | |
-| `jburrow.http.max-parked` | | `16MB` | `16MB` | server-wide; `0` turns parking off |
+| `jburrow.http.max-parked` | | `16MB` | `16MB` | server-wide; `0` turns parking off, with `max-parked-per-session` at `0` too, since it may not be larger |
 | `jburrow.http.max-parked-per-session` | | `2MB` | `2MB` | at most `max-parked` |
 
 Validation, in `JBurrowProperties` as before: the domain is a lower-case DNS name of at least two
@@ -883,9 +903,9 @@ buffer term to its kernel line ([Memory budget](#memory-budget)).
 
 | Metric | Change |
 |---|---|
-| `jburrow_http_requests_total` | **new** counter, labels `status` (`1xx` … `5xx`) and `origin` (`tunnel` for a response from the local service, `edge` for an error page) |
+| `jburrow_http_requests_total` | **new** counter, labels `status` (`1xx` … `5xx`) and `origin` (`tunnel` for a response from the local service, `edge` for an error page, the dispatcher's for a host that isn't a tunnel's included) |
 | `jburrow_http_edge_errors_total` | **new** counter, label `code` (the error page's code) |
-| `jburrow_http_response_head_seconds` | **new** histogram: `OPEN` to the final `HEADERS` |
+| `jburrow_http_response_head_seconds` | **new** histogram: `OPEN` to the final `HEADERS`, with buckets at 10 ms, 50 ms, 100 ms, 500 ms, 1 s, 5 s and 30 s rather than a percentile histogram, so it stays small |
 | `jburrow_flow_parked_bytes` | **new** gauge: bytes parked server-wide |
 | `jburrow_flow_parked_total`, `jburrow_flow_park_refused_total` | **new** counters: streams parked, and stalled streams the budget had no room for |
 | `jburrow_subdomain_claims_total` | **new** counter, label `outcome` (`random`, `requested`, `unavailable`, `forbidden`) |
@@ -901,6 +921,18 @@ a token, so the edge never logs one. Never a header value, a cookie or a body. `
 sends requests carrying a secret in the path, the query, an `authorization` header, a cookie and the
 body, in both directions, and fails if the secret appears in any log line. The "tunnel registered"
 line gains the public host. Phase 6 revisits the volume of per-request lines if Loki needs it.
+
+```
+http exchange: tunnel=5d0f... host=quiet-otter-4f2a.example.dev method=GET status=200 origin=tunnel
+  requestBytes=0 responseBytes=3481 headMs=11 totalMs=12
+```
+
+`ExchangeLog` writes it when the exchange ends, from `SessionExchange` for an exchange a session took
+and from `ExchangeHandler` for one the edge refused before routing it (`tunnel=-`). An error page
+logs its status with `origin=edge code=<EdgeError>`; a response cut short after its head logs its
+status with `reset=<code>`; an exchange whose visitor left before any head logs `status=- origin=-
+reset=CANCELLED`, and `headMs=-` whenever no final head arrived. A request for a host that isn't a
+tunnel's is counted in the metrics but not logged, since its host is whatever the visitor sent.
 
 ## Memory budget
 
@@ -923,9 +955,25 @@ visitor or an exchange, and `max-streams` counts both. Without the setting, the 
 grow to `tcp_wmem`'s maximum (4 MiB) for every stalled response, against the node's `tcp_mem`, which
 other workloads share.
 
+**Measured**, with 1,000 exchanges held open by visitors that read their response heads and stopped
+(parking off, `socket-buffer` 16 KB, `lo` at a 1,500-byte MTU), after 60 s (`ss -tm` on the edge
+port): every exchange socket had its receive and send limits at about 34 KB and 33 KB (the setting
+doubled, plus overhead), and their queues held **0.6 KB per exchange** in all. With parking off the
+session window stops the responses after the first two, so almost nothing reaches the rest, as for
+phase 2's held-back TCP visitors. The limits are the bound: at most about 64 KiB per exchange, the
+250 MiB at 4,000 streams above.
+
+**Parking**, measured with a real browser ([Performance](#performance)): a paused video is one
+stream, and it parks at most its stream window (192 to 256 KiB were parked); the edge socket's send
+queue held 64 KiB more. So `max-parked-per-session` at 2 MiB covers 8 stalled responses per session,
+and `max-parked` at 16 MiB 64 across the server. **Both stay**, and so does the direct memory total.
+
 **Heap.** An exchange keeps its channel's pipeline (already counted per edge connection), a lifecycle,
-a `StreamFlow` and a few small objects for its two halves: measured in checkpoint 10 against phase 2's
-2.8 KiB per stream.
+a `StreamFlow` and a few small objects for its two halves. **Measured**: 4.4 KiB of heap per open
+exchange after a full collection (35.5 MiB idle, 39.8 MiB with 1,000 exchanges open; a second run
+with only 316 open by the time of the collection gave 6.7 KiB each), against phase 2's 2.8 KiB per
+TCP stream. 4,000 exchanges need about 17 MiB above an idle server, well inside the 307 MiB heap.
+The server's RSS with 1,000 exchanges open was 433 MiB.
 
 At the code's defaults, a 1 GiB pod still covers it: heap, direct memory and kernel buffers as phase 2
 sized them, with the parked budget inside the direct memory cap. Production runs a 4 GiB pod sized
@@ -947,9 +995,57 @@ for 1,000 sessions, 8,000 streams and 64 MB of parked responses
   stream under the same caps as phase 2, so the browser's own parallelism limits it long before the
   stream caps do.
 
-Checkpoint 10 measures, with `StreamLoad --http` against `scripts/http-echo-server.py`: requests per
-second for small requests, upload and download throughput against phase 2's TCP numbers, the probe
-beside stalled responses with parking on and off, and heap per open exchange.
+**Measured** with [`StreamLoad --http`](../../scripts/load/README.md#http-tunnels) against
+`scripts/http-echo-server.py`, on the laptop phase 2 measured on (Intel i5-8365U, 4 cores, Linux
+6.19, JDK 21.0.11, CPU governor `powersave` and the desktop's usual background load, as in phase 2's
+runs). The server ran on epoll under the deployment's JVM settings (`-Xmx307m`, 256 MiB direct
+memory), with the local profile otherwise. The server, the JVM CLI, the local service and the driver
+ran on loopback in one unprivileged network namespace, so `tc` shaped only their traffic. There is no
+ingress in front: the driver and the browser are the edge's visitors. Every row was run twice; both
+results are given.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | 20,000 `GET /hello`, 200 in flight, each on its own connection | 1,196 and 1,100 requests/s; completion p50 154 and 159 ms, p99 324 and 321 ms; every body matched. Server 93% and 103% of a core (0.8 and 1.0 ms of CPU per request), CLI 75% and 72% (0.65 and 0.69 ms), the local service 114% and 113%. The same load straight to the local service: 935 requests/s at 115% of a core |
+| 2 | One 100 MiB upload (`POST /echo`) and one 100 MiB download, MiB/s each way, beside a TCP tunnel's 100 MiB echo per direction, at a round trip of 0 / 20 / 50 / 100 ms | Upload 101 and 166 / 4.75 and 4.70 / 2.17, then `504` / `504` twice. With `response-timeout` at 600 s: 1.22 and 1.22 / 0.76 and 1.05. Download 204 and 196 / 7.12 and 7.06 / 2.98 and 2.98 / 1.52 and 1.52. TCP 65 and 119 / 1.53 and 1.52 / 0.62 and 0.62 / 0.31 and 0.31 |
+| 2 | The same at round trip 0 with `lo` at a 1,500-byte MTU, `socket-buffer` 16 KB, then `0` | 16 KB: upload 48 and 129, download 159 and 120. `0`: upload 76 and 166, download 163 and 247. TCP 76 to 117 |
+| 3 | `GET /hello` every 100 ms on a new connection, beside 0 / 2 / 10 / 50 responses whose readers stopped after the head, 30 s; p99 and the requests that completed (300 when none waits) | Parking on: 8.1 ms, 300 / 7.8 and 7.9 ms, 300 / 1.4 s, 208 and 221 (7 and 6 over 1 s) / 1.4 s, 22 and 16. Parking off: 7.7 and 7.9 ms, 300 / 8.1 ms with 300, then 1 / 2 and 3 / 1 and 10 |
+| 4 | Chrome 154 (headless) plays a 200 MiB WebM at 4 Mbit/s from a static server with ranges, paused after 10 s, sampled each second | One `206` stream. Chrome stops reading once it has about 15 s buffered, while playing as well as paused, and the stream parks: 192 to 256 KiB parked, 64 KiB in the edge socket's send queue, 5 to 10 MB in the browser's own receive queue. About 13 s after the pause Chrome cancels the request, and the stream ends: at 30 s after the pause nothing is held, parked or open |
+| 5 | 1,000 exchanges held open, parking off | 4.4 KiB of heap per exchange; at most 64 KiB of kernel memory each ([Memory budget](#memory-budget)) |
+
+What the rows decide:
+
+- **Small requests.** The tunnel isn't the limit at 1,100 requests/s: the local service is, at a
+  full core, and served directly it managed fewer. The server spends about 0.9 ms of CPU per request,
+  so its 1 CPU in production would serve about 1,000 small requests a second across all tunnels. The
+  CLI spends about 0.7 ms, a connection to the local service included. That cost isn't a reason for
+  a pool; the open question about one stays about Windows' ephemeral ports.
+- **Downloads** match phase 2's measured TCP figures before ADR-0010 exactly (7.0, 3.0, 1.51 MiB/s):
+  the stream window over the round trip, as [phase 2 §Choosing the
+  windows](../phase-2-multiplexing/ARCHITECTURE.md#choosing-the-windows) predicts. Today's TCP tunnel
+  is slower than both, by the visitor receive buffer ADR-0010 set and as it predicted (about
+  0.6 MiB/s at 50 ms), so HTTP is no slower than TCP in either direction, which is the exit
+  criterion.
+- **Uploads** are slower than downloads at a round trip: 67% at 20 ms, 41% at 50 ms, 50 to 69% at
+  100 ms. That is more than the loop crossings cost (microseconds per 16 KiB demand). The cause isn't
+  separated: on loopback `netem` delays the visitor's hop to the edge as well, which the ingress's
+  hop inside the node doesn't have, and the edge's receive buffer is sized by how fast the tunnel
+  takes the bytes. Checkpoint 13 measures an upload through the real ingress.
+- **`socket-buffer` stays at 16 KB.** With the hop's real segment size, the warm upload with no delay
+  is 129 MiB/s, over the 50 MiB/s the checkpoint set as the bar. The first run after each restart
+  was lower with either setting (48 and 76), a cold JIT, as the downloads beside them show. On
+  loopback's 64 KiB segments a 16 KB buffer stalls on zero-window probes, which is why `local` leaves
+  it to the kernel.
+- **Parking contains what it was built for.** Two stalled responses cost the probe nothing with
+  parking and froze it in one run of two without (the other run's kernel buffers absorbed the two
+  responses before the window ran out). Ten froze it without parking; with it, the session's 2 MiB
+  parked eight, and the probe paused about once every five seconds for 1.4 s. Fifty are past any
+  budget and freeze the session as in phase 2. A browser pauses one stream per video, and Chrome
+  cancels it within seconds, so the measured pause holds one stream window for about 15 s.
+- **A long upload meets `response-timeout`.** The timeout runs from `OPEN` to the final head, and a
+  local service that answers only once it has the whole body (as the echo service does, and as most
+  upload handlers do) can't answer a 100 MiB upload at 1.2 MiB/s within 60 s. The visitor gets a
+  `504` with the upload still flowing ([Open questions](#open-questions)).
 
 ## Security and threat model
 
@@ -958,7 +1054,7 @@ Phases 1 and 2's threats and mitigations stand. HTTP tunnels add:
 | Threat | Mitigation | Proven by |
 |---|---|---|
 | Request smuggling between the ingress and a local service | Neither side forwards HTTP framing; the edge refuses ambiguous framing (both length and chunked, repeated lengths, other codings); bodies are re-framed by length or chunks on the far side | `EdgeRequestValidationTest`, `SmugglingIntegrationTest` |
-| Header injection (CR or LF in a value) to split a request or response | Header field rules, checked in the records' constructors on both sides; Netty validates on decode | `HeaderFieldsTest`, vectors |
+| Header injection (CR or LF in a value) to split a request or response | Header field rules, checked in the records' constructors on both sides; Netty validates on decode and refuses a bare LF. An obs-fold is replaced with a space, as RFC 9112 §5.2 allows a server to, rather than refused; the head crosses the tunnel as JSON and is written again on the far side, so a fold can't carry a field of its own | `HeaderFieldsTest`, vectors, `SmugglingIntegrationTest` |
 | A visitor sets `X-Forwarded-For` to choose the address the local service sees | Every forwarding field the visitor sent is removed; the edge sets them from trusted proxies only | `ForwardedHeadersIntegrationTest` |
 | A tunnel sets a cookie for the whole domain (cookie tossing against the dashboard or other tunnels) | `Domain` removed from every `set-cookie` | `ResponseHeadsTest`, `HttpTunnelIntegrationTest` |
 | Phishing on a convincing name | Reserved names and blocked terms; random names by default; phase 6 and v1 add rate limits, the interstitial and takedown | `BlocklistTest`, `NameGeneratorTest` |
@@ -1008,7 +1104,8 @@ Phases 1 and 2's threats and mitigations stand. HTTP tunnels add:
 | `SmugglingIntegrationTest`, `ForwardedHeadersIntegrationTest` | full server + real client | the threats above |
 | `ResponseTimeoutIntegrationTest`, `ErrorPagesIntegrationTest` | full server + real client | every page and its status |
 | `MixedConnectionIntegrationTest` | real edge | tunnel requests then a connect upgrade on one connection; a request for each of two tunnels on one connection |
-| `Phase2ClientIntegrationTest` | real edge, `ScriptedPeer` client without `http` | a client that doesn't offer `http` gets TCP tunnels exactly as before |
+| `Phase2ClientIntegrationTest` | real edge, `ScriptedPeer` client without `http`; and full server + real client built without `http` | a client that doesn't offer `http` gets TCP tunnels exactly as before |
+| `SharedConnectionRoutingIntegrationTest` | full server + real clients | 1,000 requests for two tunnels alternating on four keep-alive connections, each reaching its own local service |
 | `TunnelMetricsIntegrationTest`, `LogHygieneIntegrationTest` | existing, extended | the new metrics; no path, query, header value, cookie or body in any log line |
 | `ErrorCodeSpaceTest` | existing, extended | the new protocol codes and the edge's codes don't collide with REST codes or each other |
 | ArchUnit fixtures | architecture | the `routing` feature's boundaries |
@@ -1022,7 +1119,9 @@ Every byte-path integration test runs on epoll and NIO, as in phase 2.
 - `reflect-config.json` gains the new control records; `NativeImageMetadataTest` already requires
   every one.
 - `scripts/native-smoke.sh` adds an HTTP tunnel: `scripts/http-echo-server.py` as the local service,
-  50 concurrent requests with bodies through the native binary, every checksum compared.
+  50 concurrent requests through the native binary (25 uploads of 256 KiB echoed back, half of them
+  chunked, and 25 downloads of 1 MiB), every checksum compared, then five server-sent events. The
+  `native` job already runs the script, so it needs no change.
 - The fuzz job gains `HttpExchangeFuzzTest`.
 
 ## Deployment changes
@@ -1069,8 +1168,20 @@ working.
 - **WebSocket passthrough sooner.** Development servers with hot reload (Vite, Next.js) open a
   WebSocket from the page. Without it the page still loads, but hot reload doesn't work through the
   tunnel. If testers miss it, the `101` hook above is small enough to pull forward from phase 8.
-- **The parking budget.** 16 MiB server-wide and 2 MiB per session are estimates. Checkpoint 10
-  measures how much a paused video actually holds, with the ingress in front.
+- **The response timeout and long uploads.** `response-timeout` counts from `OPEN`, so it includes
+  the time the request body takes to arrive. Checkpoint 10 measured a 100 MiB upload getting `504`
+  at round trips of 50 ms and more, because the local service answers only after the body. Counting
+  the timeout from the end of the request body instead (or pausing it while the body is still
+  arriving) would keep its purpose, a local service that never answers, without cutting slow
+  uploads. It changes a decision this document records, so it needs a decision before production;
+  until then a tester's large upload over a slow link fails after 60 s.
+- **Uploads against downloads.** Uploads ran at 41 to 69% of the download rate at round trips of 20
+  to 100 ms on loopback, cause not separated ([Performance](#performance)). Checkpoint 13 measures
+  an upload through the real ingress; if the gap holds there, the demand size or the edge's receive
+  buffer is where to look.
+
+The parking budget is settled: a paused video holds one stream window, so 2 MiB per session and
+16 MiB server-wide stay ([Memory budget](#memory-budget)).
 - **A connection per request to the local service.** Cheap on Linux and macOS. On Windows, thousands
   of short connections can run out of ephemeral ports in `TIME_WAIT`. A pool is the fix if a tester
   hits it.

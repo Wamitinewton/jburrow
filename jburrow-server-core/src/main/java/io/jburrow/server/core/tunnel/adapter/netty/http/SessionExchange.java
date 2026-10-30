@@ -64,6 +64,13 @@ final class SessionExchange implements ExchangeGate.Reader {
     private long bodyBytes;
     private long bytesIn;
     private long bytesOut;
+    /** The final status the visitor got, a page's included, or 0 before one; for the exchange's log line. */
+    private int status;
+    /** From {@code OPEN} to the final head, or -1 before it. */
+    private long headNanos = -1;
+
+    private EdgeError page;
+    private ErrorCode resetCode;
     private ScheduledFuture<?> responseTimer;
 
     /** Made on the edge's loop; touches nothing until its first task runs on the session's loop. */
@@ -174,7 +181,10 @@ final class SessionExchange implements ExchangeGate.Reader {
             leftover.release();
         }
         finished = true;
+        page = error;
+        status = error.status();
         toEdge(() -> edge.page(this, error));
+        ExchangeLog.ended(outcome(0));
     }
 
     Open open() {
@@ -361,7 +371,9 @@ final class SessionExchange implements ExchangeGate.Reader {
         }
         cancelResponseTimer();
         finalHeadSent = true;
-        owner.metrics().responseHead(owner.nanoTime() - openedNanos);
+        status = head.status();
+        headNanos = owner.nanoTime() - openedNanos;
+        owner.metrics().responseHead(headNanos);
         owner.metrics().httpResponse(head.status(), ResponseOrigin.TUNNEL);
         boolean close = !keepAliveRequested || ResponseHeads.closeDelimited(head, chunkedAllowed);
         HttpResponse response = ResponseHeads.build(head, headRequest, chunkedAllowed, close);
@@ -400,7 +412,8 @@ final class SessionExchange implements ExchangeGate.Reader {
         endEdge(
                 code == ErrorCode.LOCAL_SERVICE_UNREACHABLE
                         ? EdgeError.LOCAL_SERVICE_UNREACHABLE
-                        : EdgeError.LOCAL_SERVICE_ERROR);
+                        : EdgeError.LOCAL_SERVICE_ERROR,
+                code);
         finish("reset by client " + code.code());
     }
 
@@ -408,7 +421,7 @@ final class SessionExchange implements ExchangeGate.Reader {
     void onStreamError(ErrorCode code) {
         requireLoop();
         owner.sendReset(streamId, code);
-        endEdge(EdgeError.LOCAL_SERVICE_ERROR);
+        endEdge(EdgeError.LOCAL_SERVICE_ERROR, code);
         finish("reset " + code.code());
     }
 
@@ -431,6 +444,9 @@ final class SessionExchange implements ExchangeGate.Reader {
         requireLoop();
         if (!finished) {
             reset();
+            if (!responseEnded) {
+                resetCode = ErrorCode.CANCELLED;
+            }
             finish("visitor gone");
         }
     }
@@ -438,7 +454,7 @@ final class SessionExchange implements ExchangeGate.Reader {
     private void onResponseTimeout() {
         if (!finished && !finalHeadSent) {
             reset();
-            endEdge(EdgeError.RESPONSE_TIMEOUT);
+            endEdge(EdgeError.RESPONSE_TIMEOUT, ErrorCode.CANCELLED);
             finish("response timeout");
         }
     }
@@ -448,7 +464,7 @@ final class SessionExchange implements ExchangeGate.Reader {
         requireLoop();
         if (!finished) {
             reset();
-            endEdge(error);
+            endEdge(error, ErrorCode.CANCELLED);
             finish("failed " + error);
         }
     }
@@ -458,7 +474,7 @@ final class SessionExchange implements ExchangeGate.Reader {
         requireLoop();
         if (!finished) {
             reset();
-            endEdge(error);
+            endEdge(error, ErrorCode.CANCELLED);
             finish("cancelled");
         }
     }
@@ -473,11 +489,16 @@ final class SessionExchange implements ExchangeGate.Reader {
     /**
      * Ends the edge's half after a failure: the page if no final head has gone out, the connection cut if the response
      * started and hasn't ended, and nothing if it ended, since the edge finishes a complete response itself.
+     *
+     * @param code what the stream was reset with, which the log line reports for a response cut short
      */
-    private void endEdge(EdgeError error) {
+    private void endEdge(EdgeError error, ErrorCode code) {
         if (!finalHeadSent) {
+            page = error;
+            status = error.status();
             toEdge(() -> edge.page(this, error));
         } else if (!responseEnded) {
+            resetCode = code;
             toEdge(() -> edge.abort(this));
         }
     }
@@ -488,6 +509,21 @@ final class SessionExchange implements ExchangeGate.Reader {
         cancelResponseTimer();
         releaseHeld();
         owner.finished(this, bytesIn, bytesOut, ending);
+        ExchangeLog.ended(outcome(owner.nanoTime() - openedNanos));
+    }
+
+    private ExchangeLog.Ending outcome(long totalNanos) {
+        return new ExchangeLog.Ending(
+                tunnel,
+                host,
+                open.request().method(),
+                status,
+                page,
+                resetCode,
+                bytesIn,
+                bytesOut,
+                headNanos,
+                totalNanos);
     }
 
     private void cancelResponseTimer() {

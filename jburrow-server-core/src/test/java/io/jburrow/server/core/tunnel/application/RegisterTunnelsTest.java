@@ -47,8 +47,9 @@ class RegisterTunnelsTest {
             new PortRange(21_000, 21_002), Duration.ofSeconds(60), Duration.ofMinutes(10), new Random(3), clock));
     private final SubdomainRoutes<Principal, TunnelId> routes =
             RegistrationFixtures.routes(RegistrationFixtures.NAME_HOLD, clock);
-    private final RegisterTunnels registerTunnels =
-            new RegisterTunnels(verifier, admission, ports, routes, RegistrationFixtures.policy(2, "localhost"));
+    private final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
+    private final RegisterTunnels registerTunnels = new RegisterTunnels(
+            verifier, admission, ports, routes, RegistrationFixtures.policy(2, "localhost"), metrics);
 
     @Test
     void registersTheTunnelsInRequestOrder() {
@@ -92,6 +93,7 @@ class RegisterTunnelsTest {
         assertThat(planned.toTunnel(registerTunnels.policy()).toRegistered().url())
                 .isEqualTo("http://demo.localhost:7080");
         assertThat(ports.snapshot().reserved()).isZero();
+        assertThat(metrics.events()).containsExactly("subdomainClaimed REQUESTED");
     }
 
     @Test
@@ -101,6 +103,7 @@ class RegisterTunnelsTest {
         PlannedTunnel.Http planned = (PlannedTunnel.Http) registration.tunnels().getFirst();
         assertThat(planned.name().value()).matches("[a-z]+-[a-z]+-[0-9a-f]{4}");
         assertThat(routes.find(planned.name())).contains(planned.id());
+        assertThat(metrics.events()).containsExactly("subdomainClaimed RANDOM");
     }
 
     @Test
@@ -144,6 +147,7 @@ class RegisterTunnelsTest {
                 ErrorCode.SUBDOMAIN_UNAVAILABLE);
 
         assertThat(refused.ref()).contains("site");
+        assertThat(metrics.events()).containsExactly("subdomainClaimed REQUESTED", "subdomainClaimed UNAVAILABLE");
     }
 
     @Test
@@ -157,6 +161,7 @@ class RegisterTunnelsTest {
 
         assertThat(reserved.ref()).contains("web");
         assertThat(blocked.ref()).contains("web");
+        assertThat(metrics.events()).containsExactly("subdomainClaimed FORBIDDEN", "subdomainClaimed FORBIDDEN");
     }
 
     @Test
@@ -318,7 +323,7 @@ class RegisterTunnelsTest {
             }
         };
         RegisterTunnels registering = new RegisterTunnels(
-                verifier, admission, failingSecond, routes, RegistrationFixtures.policy(2, "localhost"));
+                verifier, admission, failingSecond, routes, RegistrationFixtures.policy(2, "localhost"), metrics);
 
         assertThatThrownBy(() -> registering.execute(
                         ticket(), register(ALICE_TOKEN, tcp("first", null), tcp("second", null)), HTTP))
@@ -362,7 +367,8 @@ class RegisterTunnelsTest {
                 admission,
                 ports,
                 routes,
-                RegistrationFixtures.policy(2, "localhost"));
+                RegistrationFixtures.policy(2, "localhost"),
+                metrics);
 
         Registration registration = registering.execute(ticket, register(ALICE_TOKEN, tcp("a", null)), HTTP);
         registering.release(registration);

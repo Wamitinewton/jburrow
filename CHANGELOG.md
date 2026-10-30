@@ -148,8 +148,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `LOCAL_SERVICE_ERROR`; a response that is complete before the request body ends cancels the
   rest of the body. `TunnelEvents.onExchangeCompleted` reports each exchange's method, target,
   status, body bytes and duration, never a header value or a body.
+- `jburrow http [host:]port`: exposes a local HTTP service at a public URL, with `--subdomain
+  <name>` (lower-cased, checked before connecting) and `--host-header rewrite`. It prints a line
+  per request when its response ends (time, method, target cut to 60 characters, status, response
+  body size and duration, or `-` and the reason for a request reset before its response), and
+  `--output json` writes a `request` event per exchange. A subdomain in use or not allowed exits 5
+  naming it, and a server without HTTP tunnels exits 6. `jburrow tcp` and `jburrow http` share
+  their options and their run loop.
+- Observability for HTTP tunnels: `jburrow_http_requests_total` by status class and origin,
+  `jburrow_http_edge_errors_total` by page code, `jburrow_http_response_head_seconds`,
+  `jburrow_flow_parked_bytes`, `jburrow_flow_parked_total`, `jburrow_flow_park_refused_total` and
+  `jburrow_subdomain_claims_total` by outcome, and an INFO line per exchange with its tunnel, host,
+  method, status, origin, body bytes and timings, never its target, headers or bodies.
+- `JBurrowClient.Builder.capabilities(set)`, to offer fewer capabilities than the client implements.
+- The HTTP end-to-end suite, on epoll and NIO: the method and status matrix, routing per request on
+  shared connections, 100 MiB bodies both ways with flat memory, paused readers with and without
+  parking, server-sent events, smuggling and forwarding headers, every error page, a client without
+  `http`, the new metrics, and log hygiene read from ECS JSON.
+- `scripts/http-echo-server.py`, an HTTP/1.1 service on the Python standard library for the smoke
+  test, the load driver and trying HTTP tunnels by hand: `/hello`, `/echo` (chunked back if sent
+  chunked), `/bytes/<n>`, `/sse` and `/stall`.
+- `StreamLoad --http`: requests to an HTTP tunnel over raw sockets, one connection each, as uploads
+  echoed back (by length or chunked), downloads checked against the echo service's pseudo-random
+  stream, or `GET /hello`; stalled responses beside a probe; `http` and `https` URLs. The native
+  smoke test runs it briefly. Phase 3's measurements are in its ARCHITECTURE.md §Performance.
 - A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
-  x64 and runs a real tunnel with it, 50 concurrent streams on one session and then one 4 MiB
-  stream, publishing nothing
+  x64 and runs real tunnels with it, publishing nothing: a TCP tunnel with 50 concurrent streams
+  on one session and then one 4 MiB stream, and an HTTP tunnel with 50 concurrent requests (256 KiB
+  uploads echoed back, half of them chunked, and 1 MiB downloads), every body checked by SHA-256,
+  and a server-sent event stream
   ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)). `make native` builds the binary
   locally and `make native-smoke` runs the same test.

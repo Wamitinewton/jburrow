@@ -283,7 +283,12 @@ class EdgeServerIntegrationTest {
                 InstantSource.system()));
         SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
         RegisterTunnels register = new RegisterTunnels(
-                new InMemoryAuthtokenVerifier(), admission, ports, routes, RegistrationFixtures.policy(1, "localhost"));
+                new InMemoryAuthtokenVerifier(),
+                admission,
+                ports,
+                routes,
+                RegistrationFixtures.policy(1, "localhost"),
+                metrics);
         return new EngineDependencies(
                 register,
                 admission,

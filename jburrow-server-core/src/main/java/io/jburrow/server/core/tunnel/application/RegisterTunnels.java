@@ -12,6 +12,8 @@ import io.jburrow.server.core.portpool.application.port.Reservation;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
 import io.jburrow.server.core.routing.application.port.SubdomainClaims;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ClaimOutcome;
 import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.TunnelId;
 import java.util.Arrays;
@@ -31,18 +33,21 @@ public final class RegisterTunnels {
     private final PortReservations ports;
     private final SubdomainClaims<Principal, TunnelId> names;
     private final RegistrationPolicy policy;
+    private final TunnelMetrics metrics;
 
     public RegisterTunnels(
             AuthtokenVerifier verifier,
             SessionAdmission admission,
             PortReservations ports,
             SubdomainClaims<Principal, TunnelId> names,
-            RegistrationPolicy policy) {
+            RegistrationPolicy policy,
+            TunnelMetrics metrics) {
         this.verifier = Objects.requireNonNull(verifier, "verifier");
         this.admission = Objects.requireNonNull(admission, "admission");
         this.ports = Objects.requireNonNull(ports, "ports");
         this.names = Objects.requireNonNull(names, "names");
         this.policy = Objects.requireNonNull(policy, "policy");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
 
     public RegistrationPolicy policy() {
@@ -145,21 +150,29 @@ public final class RegisterTunnels {
 
     private SubdomainName claimName(TunnelRequest request, Principal principal, TunnelId id) {
         if (request.subdomain() == null) {
-            return names.claimRandom(principal, id);
+            SubdomainName name = names.claimRandom(principal, id);
+            metrics.subdomainClaimed(ClaimOutcome.RANDOM);
+            return name;
         }
         try {
-            return names.claim(new SubdomainName(request.subdomain()), principal, id);
+            SubdomainName name = names.claim(new SubdomainName(request.subdomain()), principal, id);
+            metrics.subdomainClaimed(ClaimOutcome.REQUESTED);
+            return name;
         } catch (ClaimRefused refused) {
             ProtocolException error =
                     switch (refused.reason()) {
-                        case FORBIDDEN ->
-                            ProtocolException.session(
+                        case FORBIDDEN -> {
+                            metrics.subdomainClaimed(ClaimOutcome.FORBIDDEN);
+                            yield ProtocolException.session(
                                     ErrorCode.SUBDOMAIN_FORBIDDEN,
                                     "The subdomain is reserved or blocked on this server.");
-                        case UNAVAILABLE ->
-                            ProtocolException.session(
+                        }
+                        case UNAVAILABLE -> {
+                            metrics.subdomainClaimed(ClaimOutcome.UNAVAILABLE);
+                            yield ProtocolException.session(
                                     ErrorCode.SUBDOMAIN_UNAVAILABLE,
                                     "The subdomain is in use or held for someone else.");
+                        }
                     };
             throw error.forTunnel(request.ref());
         }

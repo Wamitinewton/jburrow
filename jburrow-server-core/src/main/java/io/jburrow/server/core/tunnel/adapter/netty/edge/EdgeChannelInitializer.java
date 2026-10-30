@@ -2,6 +2,7 @@ package io.jburrow.server.core.tunnel.adapter.netty.edge;
 
 import io.jburrow.server.core.tunnel.adapter.netty.http.DemandReadAllocator;
 import io.jburrow.server.core.tunnel.adapter.netty.http.EdgeErrorPage;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelInitializer;
@@ -33,6 +34,7 @@ final class EdgeChannelInitializer extends ChannelInitializer<Channel> {
     private final ClientAddressResolver clientAddresses;
     private final Supplier<? extends ChannelHandler> exchanges;
     private final EdgeErrorPage pages;
+    private final TunnelMetrics metrics;
 
     /** @param exchanges makes the exchange handler of a connection, the first time it carries a tunnel request */
     EdgeChannelInitializer(
@@ -41,13 +43,15 @@ final class EdgeChannelInitializer extends ChannelInitializer<Channel> {
             ConnectPipeline connect,
             ClientAddressResolver clientAddresses,
             Supplier<? extends ChannelHandler> exchanges,
-            EdgeErrorPage pages) {
+            EdgeErrorPage pages,
+            TunnelMetrics metrics) {
         this.settings = Objects.requireNonNull(settings, "settings");
         this.connections = Objects.requireNonNull(connections, "connections");
         this.connect = Objects.requireNonNull(connect, "connect");
         this.clientAddresses = Objects.requireNonNull(clientAddresses, "clientAddresses");
         this.exchanges = Objects.requireNonNull(exchanges, "exchanges");
         this.pages = Objects.requireNonNull(pages, "pages");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
 
     @Override
@@ -73,6 +77,7 @@ final class EdgeChannelInitializer extends ChannelInitializer<Channel> {
                                 clientAddresses,
                                 exchanges,
                                 pages,
-                                deadline));
+                                deadline,
+                                metrics));
     }
 }

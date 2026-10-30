@@ -44,6 +44,8 @@ import javax.net.ssl.TrustManagerFactory;
  *     and to answer {@code HELLO} and {@code REGISTER}
  * @param windows this client's receive windows, announced in its {@code HELLO}: the most the server may send it on one
  *     stream, and on all streams together, before it returns credit
+ * @param capabilities the capabilities offered in {@code HELLO}: by default every one this client implements, whatever
+ *     its tunnels need, so the server's answer says what it supports (§4.2); fewer only to stand in for an older client
  */
 public record ClientSettings(
         URI server,
@@ -53,7 +55,8 @@ public record ClientSettings(
         ClientInfo clientInfo,
         Optional<TrustManagerFactory> trustManager,
         Duration handshakeTimeout,
-        Windows windows) {
+        Windows windows,
+        Set<Capability> capabilities) {
 
     public static final String CONNECT_PATH = "/v1/connect";
     public static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
@@ -95,14 +98,42 @@ public record ClientSettings(
                     + MAX_HANDSHAKE_TIMEOUT.toMinutes() + " minutes");
         }
         Objects.requireNonNull(windows, "windows");
+        Objects.requireNonNull(capabilities, "capabilities");
+        capabilities = Set.copyOf(capabilities);
+        if (!ProtocolVersion.capabilities().containsAll(capabilities)) {
+            throw new IllegalArgumentException(
+                    "Only the capabilities this client implements can be offered: " + ProtocolVersion.capabilities());
+        }
+        for (TunnelSpec tunnel : tunnels) {
+            Optional<Capability> needed = tunnel.kind().capability();
+            if (needed.isPresent() && !capabilities.contains(needed.get())) {
+                throw new IllegalArgumentException(
+                        "A tunnel of kind " + tunnel.kind().wireName() + " needs the "
+                                + needed.get().wireName() + " capability offered");
+            }
+        }
     }
 
-    /**
-     * The capabilities offered in {@code HELLO}: every one this client implements, whatever its tunnels need, so the
-     * server's answer says what it supports (§4.2).
-     */
-    public Set<Capability> capabilities() {
-        return ProtocolVersion.capabilities();
+    /** Settings offering every capability this client implements. */
+    public ClientSettings(
+            URI server,
+            String authtoken,
+            List<TunnelSpec> tunnels,
+            TunnelEvents events,
+            ClientInfo clientInfo,
+            Optional<TrustManagerFactory> trustManager,
+            Duration handshakeTimeout,
+            Windows windows) {
+        this(
+                server,
+                authtoken,
+                tunnels,
+                events,
+                clientInfo,
+                trustManager,
+                handshakeTimeout,
+                windows,
+                ProtocolVersion.capabilities());
     }
 
     /** Whether the connection uses TLS: a {@code wss} URL. */
@@ -132,7 +163,8 @@ public record ClientSettings(
     public String toString() {
         return "ClientSettings[server=" + server + ", authtoken=***, tunnels=" + tunnels + ", clientInfo="
                 + clientInfo + ", trustManager=" + (trustManager.isPresent() ? "custom" : "system")
-                + ", handshakeTimeout=" + handshakeTimeout + ", windows=" + windows + "]";
+                + ", handshakeTimeout=" + handshakeTimeout + ", windows=" + windows + ", capabilities=" + capabilities
+                + "]";
     }
 
     /**
