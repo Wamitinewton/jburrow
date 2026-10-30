@@ -156,10 +156,14 @@ make native-smoke                # builds the server JAR too, then runs scripts/
 `scripts/native-smoke.sh` is what CI runs (Linux; needs Docker, `python3`, `jq` and `curl`). It
 starts Postgres and the server from its JVM build with the `local` profile, on ports of its own
 (edge 17080, API 17090, management 17091, tunnels 21100-21199) so it runs beside `make run`. It
-then starts `scripts/echo-server.py` on port 9000, opens a tunnel to it with the native binary
-using the development token, pushes 4 MiB of random bytes through the tunnel, and compares SHA-256
-of what went out and what came back. Finally it stops the CLI with `SIGINT`, as Ctrl-C would, and
-expects exit status 0 and a final `closed` event with reason `USER_CLOSED`. Logs land in
+then starts `scripts/echo-server.py` on port 9000, opens a TCP tunnel to it with the native binary
+using the development token, pushes random bytes through 50 concurrent streams and then one 4 MiB
+stream, and compares SHA-256 of what went out and what came back. Next it starts
+`scripts/http-echo-server.py` on port 9001, opens an HTTP tunnel to it, and sends 50 concurrent
+requests through `http://<name>.localhost:17080` (25 uploads of 256 KiB echoed back, every other one
+chunked, and 25 downloads of 1 MiB), comparing every body by SHA-256, then reads five server-sent
+events. Each tunnel is stopped with `SIGINT`, as Ctrl-C would, and must exit 0 with a final
+`closed` event with reason `USER_CLOSED`. Logs land in
 `target/native-smoke/` and are printed on failure. `JBURROW_BIN=<path>` runs the same scenario
 against another binary.
 

@@ -5,14 +5,19 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.server.core.portpool.application.port.PortPoolSnapshot;
+import io.jburrow.server.core.tunnel.adapter.netty.http.EdgeError;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.domain.StreamAdmission;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -24,8 +29,8 @@ import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 
 /**
- * {@link TunnelMetrics} on Micrometer, every metric of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md}
- * §Observability.
+ * {@link TunnelMetrics} on Micrometer, every metric of the §Observability sections of
+ * {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} and the phases after it.
  *
  * <p>Every label set is closed, so every series is registered up front: a dashboard sees a zero rather than a missing
  * series, and the event loops that report never touch the registry, only meters looked up in enum maps that are never
@@ -34,6 +39,22 @@ import java.util.function.ToIntFunction;
 public final class MicrometerTunnelMetrics implements TunnelMetrics {
 
     static final String ESTABLISHED = "established";
+
+    /**
+     * The buckets of {@code jburrow_http_response_head_seconds}: a few service-level objectives instead of a percentile
+     * histogram, so the series stay few.
+     */
+    static final Duration[] RESPONSE_HEAD_OBJECTIVES = {
+        Duration.ofMillis(10),
+        Duration.ofMillis(50),
+        Duration.ofMillis(100),
+        Duration.ofMillis(500),
+        Duration.ofSeconds(1),
+        Duration.ofSeconds(5),
+        Duration.ofSeconds(30)
+    };
+
+    private static final int STATUS_CLASSES = 5;
 
     private final MeterRegistry registry;
 
@@ -53,6 +74,14 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     private final Map<Side, Map<ErrorCode, Counter>> protocolErrors = new EnumMap<>(Side.class);
     private final Map<Direction, Counter> backpressurePauses;
     private final Map<FlowScope, Counter> flowBlocked;
+    /** By status class, {@code 1xx} at index 0, then by who answered. */
+    private final List<Map<ResponseOrigin, Counter>> httpRequests = new ArrayList<>(STATUS_CLASSES);
+
+    private final Map<String, Counter> edgeErrors = new HashMap<>();
+    private final Timer responseHead;
+    private final Counter streamsParked;
+    private final Counter parksRefused;
+    private final Map<ClaimOutcome, Counter> subdomainClaims;
 
     public MicrometerTunnelMetrics(MeterRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -149,6 +178,42 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
                                 "Times a visitor stopped being read because its stream's or session's credit ran out")
                         .tag("scope", label(scope))
                         .register(registry));
+
+        for (int statusClass = 1; statusClass <= STATUS_CLASSES; statusClass++) {
+            String status = statusClass + "xx";
+            httpRequests.add(byEnum(
+                    ResponseOrigin.class,
+                    origin -> Counter.builder("jburrow.http.requests")
+                            .description("HTTP responses sent to visitors, from the local service or the edge's own"
+                                    + " error pages")
+                            .tag("status", status)
+                            .tag("origin", label(origin))
+                            .register(registry)));
+        }
+        for (EdgeError error : EdgeError.values()) {
+            edgeErrors.put(
+                    error.name(),
+                    Counter.builder("jburrow.http.edge.errors")
+                            .description("Requests the edge answered with an error page")
+                            .tag("code", error.name())
+                            .register(registry));
+        }
+        responseHead = Timer.builder("jburrow.http.response.head")
+                .description("Time from an HTTP stream's OPEN to its final response head")
+                .serviceLevelObjectives(RESPONSE_HEAD_OBJECTIVES)
+                .register(registry);
+        streamsParked = Counter.builder("jburrow.flow.parked")
+                .description("Stalled responses whose held bytes were taken out of their session's window")
+                .register(registry);
+        parksRefused = Counter.builder("jburrow.flow.park.refused")
+                .description("Stalled responses the parking budget had no room for")
+                .register(registry);
+        subdomainClaims = byEnum(
+                ClaimOutcome.class,
+                outcome -> Counter.builder("jburrow.subdomain.claims")
+                        .description("Subdomains claimed by registration, or refused to it")
+                        .tag("outcome", label(outcome))
+                        .register(registry));
     }
 
     @Override
@@ -232,6 +297,54 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     @Override
     public void flowBlocked(FlowScope scope) {
         flowBlocked.get(scope).increment();
+    }
+
+    @Override
+    public void httpResponse(int status, ResponseOrigin origin) {
+        int statusClass = status / 100;
+        if (statusClass < 1 || statusClass > STATUS_CLASSES) {
+            throw new IllegalArgumentException(status + " is not an HTTP status");
+        }
+        httpRequests.get(statusClass - 1).get(origin).increment();
+    }
+
+    @Override
+    public void edgeErrorPage(String code) {
+        Counter counter = edgeErrors.get(Objects.requireNonNull(code, "code"));
+        if (counter == null) {
+            throw new IllegalArgumentException(code + " is not an edge error page");
+        }
+        counter.increment();
+    }
+
+    @Override
+    public void responseHead(long durationNanos) {
+        responseHead.record(durationNanos, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public void streamParked() {
+        streamsParked.increment();
+    }
+
+    @Override
+    public void parkRefused() {
+        parksRefused.increment();
+    }
+
+    @Override
+    public void subdomainClaimed(ClaimOutcome outcome) {
+        subdomainClaims.get(outcome).increment();
+    }
+
+    @Override
+    public void bindParkedBytes(LongSupplier parkedBytes) {
+        Objects.requireNonNull(parkedBytes, "parkedBytes");
+        Gauge.builder("jburrow.flow.parked.bytes", parkedBytes::getAsLong)
+                .description("Response bytes parked across the server: held for stalled visitors outside their"
+                        + " sessions' windows")
+                .baseUnit("bytes")
+                .register(registry);
     }
 
     @Override

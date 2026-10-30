@@ -122,17 +122,17 @@ public final class ExchangeHandler extends ChannelInboundHandlerAdapter {
                 ? Optional.of(EdgeError.SERVER_SHUTTING_DOWN)
                 : services.heads().check(head.head());
         if (refused.isPresent()) {
-            answer(refused.get(), false);
+            answerAlone(refused.get(), false);
             return;
         }
         Optional<TunnelId> tunnel = services.routes().find(head.name());
         Optional<SessionExchanges> exchanges = tunnel.flatMap(services.sessions()::find);
         if (exchanges.isEmpty()) {
-            answer(EdgeError.TUNNEL_NOT_FOUND, false);
+            answerAlone(EdgeError.TUNNEL_NOT_FOUND, false);
             return;
         }
         switch (services.heads().open(head.head(), tunnel.get().value(), head.visitor(), head.viaTrustedProxy())) {
-            case RequestHeads.Result.Refuse refuse -> answer(refuse.error(), false);
+            case RequestHeads.Result.Refuse refuse -> answerAlone(refuse.error(), false);
             case RequestHeads.Result.Forward forward -> {
                 HttpRequest decoded = head.head();
                 boolean http11 = decoded.protocolVersion().equals(HttpVersion.HTTP_1_1);
@@ -159,7 +159,7 @@ public final class ExchangeHandler extends ChannelInboundHandlerAdapter {
             }
             if (content.decoderResult().isFailure()) {
                 session = null;
-                answer(EdgeError.BAD_REQUEST, true);
+                answerAlone(EdgeError.BAD_REQUEST, true);
                 return;
             }
             if (content.content().isReadable()) {
@@ -188,7 +188,7 @@ public final class ExchangeHandler extends ChannelInboundHandlerAdapter {
         phase = Phase.FORWARDING;
         if (!session.submit(taken, requestEnded)) {
             session = null;
-            answer(EdgeError.SERVER_SHUTTING_DOWN, false);
+            answerAlone(EdgeError.SERVER_SHUTTING_DOWN, false);
         }
     }
 
@@ -216,6 +216,15 @@ public final class ExchangeHandler extends ChannelInboundHandlerAdapter {
     }
 
     /**
+     * Answers with {@code error}'s page a request no session has taken, so its exchange's line is logged here; a
+     * session logs the line of every exchange it took.
+     */
+    private void answerAlone(EdgeError error, boolean close) {
+        ExchangeLog.answeredByEdge(request.host(), request.head().method().name(), error);
+        answer(error, close);
+    }
+
+    /**
      * Answers the current request with {@code error}'s page, after which the rest of its body is discarded.
      *
      * @param close whether the connection can't carry another request after this one, whatever the request says
@@ -227,11 +236,6 @@ public final class ExchangeHandler extends ChannelInboundHandlerAdapter {
         releaseLeftover();
         services.metrics().edgeErrorPage(error.name());
         services.metrics().httpResponse(error.status(), ResponseOrigin.EDGE);
-        log.debug(
-                "edge page: host={} method={} code={}",
-                request.host(),
-                request.head().method().name(),
-                error);
         page = ErrorPageExchange.answer(
                 ctx,
                 request.head(),

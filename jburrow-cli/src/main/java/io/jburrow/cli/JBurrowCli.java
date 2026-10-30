@@ -10,7 +10,7 @@ import picocli.CommandLine.Spec;
         name = "jburrow",
         mixinStandardHelpOptions = true,
         versionProvider = BuildInfo.class,
-        subcommands = {TcpCommand.class, VersionCommand.class},
+        subcommands = {HttpCommand.class, TcpCommand.class, VersionCommand.class},
         description = "Expose a local port through a JBurrow server.")
 public final class JBurrowCli implements Runnable {
 

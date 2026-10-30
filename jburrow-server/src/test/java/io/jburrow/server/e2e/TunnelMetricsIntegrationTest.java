@@ -1,8 +1,12 @@
 package io.jburrow.server.e2e;
 
+import static io.jburrow.server.e2e.TunnelTestSupport.KERNEL_SOCKET_BUFFERS;
+import static io.jburrow.server.e2e.TunnelTestSupport.LOOPBACK_IS_THE_INGRESS;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.jburrow.client.TunnelStartException;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ErrorBody;
 import io.jburrow.protocol.control.RegisteredTunnel;
@@ -11,16 +15,19 @@ import io.jburrow.protocol.flow.FlowLimits;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
+import io.jburrow.server.e2e.support.HttpVisitor;
 import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCountUtil;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
@@ -373,6 +380,136 @@ class TunnelMetricsIntegrationTest extends TunnelTestSupport {
             assertThat(moved(before, after, "jburrow_backpressure_pauses_total", "direction", "outbound"))
                     .as("outbound pauses, which phase 2 no longer makes")
                     .isZero();
+        }
+    }
+
+    /**
+     * The series {@code docs/phase-3-http-tunnels/ARCHITECTURE.md} §Observability adds, read before and after an HTTP
+     * scenario of their own: names claimed and refused, responses from the tunnel and pages from the edge, and the time
+     * to each response head. Parking's series exist here; {@link PausedReadersIntegrationTest} moves them.
+     */
+    @Nested
+    @NestedTestConfiguration(NestedTestConfiguration.EnclosingConfiguration.OVERRIDE)
+    @TestPropertySource(
+            properties = {"jburrow.tcp.port-range=30980-30989", LOOPBACK_IS_THE_INGRESS, KERNEL_SOCKET_BUFFERS})
+    @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+    class Http extends TunnelTestSupport {
+
+        private static final byte[] BODY = new byte[1_000];
+
+        private final String requested = "metrics-"
+                + HexFormat.of().toHexDigits(ThreadLocalRandom.current().nextInt());
+        private final List<String> hosts = new ArrayList<>();
+        private Scrape before;
+        private Scrape after;
+
+        @BeforeAll
+        void runTheScenario() throws Exception {
+            LocalHttpService service = closeAfterTest(LocalHttpService.start());
+            before = Scrape.parse(scrape());
+
+            hosts.add(openHttpTunnel(ALICE_TOKEN, service.port()).host());
+            hosts.add(openTunnel(httpClient(BOB_TOKEN, service.port()).subdomain(requested))
+                    .host());
+            for (String refused : List.of(requested, "admin")) {
+                assertThatThrownBy(() -> openTunnel(
+                                httpClient(ALICE_TOKEN, service.port()).subdomain(refused)))
+                        .isInstanceOf(TunnelStartException.class);
+            }
+
+            HttpVisitor visitor = ingressConnection();
+            for (String host : List.of(hosts.get(0), hosts.get(1), hosts.get(0))) {
+                visitor.request("GET", host, "/hello");
+                assertThat(visitor.response().status()).isEqualTo(200);
+            }
+            visitor.request("POST", hosts.get(1), "/echo", BODY);
+            assertThat(visitor.response().body()).isEqualTo(BODY);
+            visitor.request("GET", hosts.get(0), "/status/404");
+            assertThat(visitor.response().status()).isEqualTo(404);
+            visitor.request("GET", "nobody-serves-this.localhost", "/");
+            assertThat(visitor.response().header("jburrow-error")).contains("TUNNEL_NOT_FOUND");
+            visitor.request("GET", "example.org", "/");
+            assertThat(visitor.response().header("jburrow-error")).contains("TUNNEL_NOT_FOUND");
+            visitor.request("GET", hosts.get(0), "/socket", "Connection", "Upgrade", "Upgrade", "websocket");
+            assertThat(visitor.response().header("jburrow-error")).contains("UPGRADE_NOT_SUPPORTED");
+
+            awaitNoExchanges();
+            after = Scrape.parse(scrape());
+        }
+
+        @Test
+        void subdomainClaimsByOutcome() {
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "random");
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "requested");
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "unavailable");
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "forbidden");
+            assertMoved(1, "jburrow_protocol_errors_total", "code", "SUBDOMAIN_UNAVAILABLE", "side", "local");
+            assertMoved(1, "jburrow_protocol_errors_total", "code", "SUBDOMAIN_FORBIDDEN", "side", "local");
+            assertMoved(0, "jburrow_protocol_errors_total", "code", "LOCAL_SERVICE_ERROR", "side", "remote");
+        }
+
+        @Test
+        void responsesByStatusClassAndOrigin() {
+            assertMoved(4, "jburrow_http_requests_total", "status", "2xx", "origin", "tunnel");
+            assertMoved(1, "jburrow_http_requests_total", "status", "4xx", "origin", "tunnel");
+            assertMoved(2, "jburrow_http_requests_total", "status", "4xx", "origin", "edge");
+            assertMoved(1, "jburrow_http_requests_total", "status", "5xx", "origin", "edge");
+            assertMoved(0, "jburrow_http_requests_total", "status", "5xx", "origin", "tunnel");
+
+            assertMoved(2, "jburrow_http_edge_errors_total", "code", "TUNNEL_NOT_FOUND");
+            assertMoved(1, "jburrow_http_edge_errors_total", "code", "UPGRADE_NOT_SUPPORTED");
+            assertMoved(0, "jburrow_http_edge_errors_total", "code", "LOCAL_SERVICE_ERROR");
+        }
+
+        @Test
+        void theTimeToEachResponseHeadInAFewBuckets() {
+            assertMoved(5, "jburrow_http_response_head_seconds_count");
+            assertThat(after.keysStartingWith("jburrow_http_response_head_seconds_bucket").stream()
+                            .map(key -> Scrape.labels(key).get("le")))
+                    .containsExactly("0.01", "0.05", "0.1", "0.5", "1.0", "5.0", "30.0", "+Inf");
+            assertThat(after.value("jburrow_http_response_head_seconds_bucket", "le", "+Inf"))
+                    .isEqualTo(after.value("jburrow_http_response_head_seconds_count"));
+        }
+
+        @Test
+        void streamsAndBytesOfKindHttp() {
+            assertMoved(5, "jburrow_streams_opened_total", "kind", "http");
+            assertThat(after.value("jburrow_streams_active", "kind", "http")).isZero();
+            assertThat(moved("jburrow_tunnel_bytes_total", "kind", "http", "direction", "inbound"))
+                    .isEqualTo(BODY.length);
+            assertThat(moved("jburrow_tunnel_bytes_total", "kind", "http", "direction", "outbound"))
+                    .isGreaterThanOrEqualTo(BODY.length);
+            assertMoved(0, "jburrow_streams_opened_total", "kind", "tcp");
+        }
+
+        @Test
+        void parkingSeriesExist() {
+            assertThat(after.value("jburrow_flow_parked_bytes")).isZero();
+            assertMoved(0, "jburrow_flow_parked_total");
+            assertMoved(0, "jburrow_flow_park_refused_total");
+        }
+
+        @Test
+        void noSeriesIsLabelledWithANameOrHost() {
+            for (String key : after.keysStartingWith("jburrow_")) {
+                Scrape.labels(key)
+                        .forEach((label, value) -> assertThat(value)
+                                .as("label %s of %s", label, key)
+                                .doesNotContain("localhost")
+                                .doesNotContain(requested)
+                                .doesNotContain(hosts.get(0).split("\\.")[0])
+                                .doesNotContain("/"));
+            }
+        }
+
+        private void assertMoved(double expected, String name, String... labels) {
+            assertThat(moved(name, labels))
+                    .as("change in %s %s", name, List.of(labels))
+                    .isEqualTo(expected);
+        }
+
+        private double moved(String name, String... labels) {
+            return TunnelMetricsIntegrationTest.moved(before, after, name, labels);
         }
     }
 

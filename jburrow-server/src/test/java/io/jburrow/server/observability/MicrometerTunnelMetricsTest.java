@@ -7,9 +7,11 @@ import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.server.core.portpool.application.port.PortPoolSnapshot;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ClaimOutcome;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Direction;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FlowScope;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FrameDirection;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResponseOrigin;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.SessionEnd;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Side;
 import io.jburrow.server.core.tunnel.domain.StreamAdmission;
@@ -64,7 +66,21 @@ class MicrometerTunnelMetricsTest {
                 .map(tag -> tag.getKey())
                 .collect(Collectors.toSet());
 
-        assertThat(keys).isSubsetOf("result", "reason", "kind", "code", "side", "type", "direction", "state", "scope");
+        assertThat(keys)
+                .isSubsetOf(
+                        "result",
+                        "reason",
+                        "kind",
+                        "code",
+                        "side",
+                        "type",
+                        "direction",
+                        "state",
+                        "scope",
+                        "status",
+                        "origin",
+                        "outcome",
+                        "le");
     }
 
     @Test
@@ -196,9 +212,45 @@ class MicrometerTunnelMetricsTest {
     }
 
     @Test
+    void countsHttpResponsesPagesParkingAndClaims() {
+        metrics.httpResponse(200, ResponseOrigin.TUNNEL);
+        metrics.httpResponse(204, ResponseOrigin.TUNNEL);
+        metrics.httpResponse(404, ResponseOrigin.EDGE);
+        metrics.edgeErrorPage("TUNNEL_NOT_FOUND");
+        metrics.responseHead(Duration.ofMillis(30).toNanos());
+        metrics.streamParked();
+        metrics.parkRefused();
+        metrics.subdomainClaimed(ClaimOutcome.FORBIDDEN);
+        metrics.bindParkedBytes(() -> 65_536);
+
+        assertThat(registry.get("jburrow.http.requests")
+                        .tag("status", "2xx")
+                        .tag("origin", "tunnel")
+                        .counter()
+                        .count())
+                .isEqualTo(2);
+        assertThat(registry.get("jburrow.http.requests")
+                        .tag("status", "4xx")
+                        .tag("origin", "edge")
+                        .counter()
+                        .count())
+                .isOne();
+        assertThat(counter("jburrow.http.edge.errors", "code", "TUNNEL_NOT_FOUND"))
+                .isOne();
+        assertThat(registry.get("jburrow.http.response.head").timer().count()).isOne();
+        assertThat(registry.get("jburrow.flow.parked").counter().count()).isOne();
+        assertThat(registry.get("jburrow.flow.park.refused").counter().count()).isOne();
+        assertThat(counter("jburrow.subdomain.claims", "outcome", "forbidden")).isOne();
+        assertThat(counter("jburrow.subdomain.claims", "outcome", "random")).isZero();
+        assertThat(gauge("jburrow.flow.parked.bytes")).isEqualTo(65_536);
+    }
+
+    @Test
     void aCodeOutsideTheLabelSetIsACallerBug() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> metrics.streamReset(ErrorCode.AUTHTOKEN_INVALID, Side.LOCAL));
+        assertThatIllegalArgumentException().isThrownBy(() -> metrics.edgeErrorPage("SOMETHING_ELSE"));
+        assertThatIllegalArgumentException().isThrownBy(() -> metrics.httpResponse(99, ResponseOrigin.EDGE));
     }
 
     private double counter(String name, String key, String value) {

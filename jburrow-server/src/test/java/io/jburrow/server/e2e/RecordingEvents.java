@@ -3,6 +3,7 @@ package io.jburrow.server.e2e;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.protocol.wire.ErrorCode;
 import java.time.Duration;
 import java.util.Optional;
@@ -18,6 +19,7 @@ final class RecordingEvents implements TunnelEvents {
 
     private final BlockingQueue<String> opened = new LinkedBlockingQueue<>();
     private final BlockingQueue<StreamClosed> closedStreams = new LinkedBlockingQueue<>();
+    private final BlockingQueue<ExchangeSummary> exchanges = new LinkedBlockingQueue<>();
 
     @Override
     public void onStreamOpened(int streamId, String tunnelRef, String remoteAddress, int remotePort) {
@@ -28,6 +30,18 @@ final class RecordingEvents implements TunnelEvents {
     public void onStreamClosed(
             int streamId, long bytesIn, long bytesOut, long durationMillis, Optional<ErrorCode> reset) {
         closedStreams.add(new StreamClosed(streamId, bytesIn, bytesOut, reset));
+    }
+
+    @Override
+    public void onExchangeCompleted(ExchangeSummary exchange) {
+        exchanges.add(exchange);
+    }
+
+    /** The next exchange the client reported finished. */
+    ExchangeSummary awaitExchange(Duration timeout) throws InterruptedException {
+        ExchangeSummary exchange = exchanges.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        assertThat(exchange).as("an exchange finished within %s", timeout).isNotNull();
+        return exchange;
     }
 
     /** The visitor address of the next stream the client opened. */

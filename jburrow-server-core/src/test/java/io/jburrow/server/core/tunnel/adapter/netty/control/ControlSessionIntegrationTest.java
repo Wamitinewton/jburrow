@@ -636,7 +636,7 @@ class ControlSessionIntegrationTest {
 
     private void start(TunnelListeners tunnelListeners, Set<Capability> capabilities) {
         EdgeSettings settings = settings(capabilities);
-        RegisterTunnels register = new RegisterTunnels(verifier, admission, ports, routes, POLICY);
+        RegisterTunnels register = new RegisterTunnels(verifier, admission, ports, routes, POLICY, metrics);
         EngineDependencies deps = new EngineDependencies(
                 register,
                 admission,

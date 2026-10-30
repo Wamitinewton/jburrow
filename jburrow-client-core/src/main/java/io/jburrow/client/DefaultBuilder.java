@@ -7,12 +7,15 @@ import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import javax.net.ssl.TrustManagerFactory;
 
 /** Collects settings; {@link #build()} validates them all at once through {@link ClientSettings}. */
@@ -32,6 +35,7 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     private TrustManagerFactory trustManager;
     private Duration handshakeTimeout = ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT;
     private Windows windows = ClientSettings.DEFAULT_WINDOWS;
+    private Set<Capability> capabilities = ProtocolVersion.capabilities();
 
     @Override
     public JBurrowClient.Builder server(URI uri) {
@@ -101,6 +105,12 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     }
 
     @Override
+    public JBurrowClient.Builder capabilities(Set<Capability> offered) {
+        this.capabilities = Objects.requireNonNull(offered, "offered");
+        return this;
+    }
+
+    @Override
     public JBurrowClient build() {
         return new NettyTunnelClient(settings());
     }
@@ -115,7 +125,8 @@ final class DefaultBuilder implements JBurrowClient.Builder {
                 ClientSettings.clientInfo(clientName, clientVersion),
                 Optional.ofNullable(trustManager),
                 handshakeTimeout,
-                windows);
+                windows,
+                capabilities);
     }
 
     /** The tunnels from {@link #tunnel}, then the one {@link #http} describes. */

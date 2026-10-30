@@ -1,8 +1,10 @@
 package io.jburrow.cli.output;
 
 import io.jburrow.client.TunnelStartException;
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
+import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.ErrorCode;
 import java.io.PrintWriter;
@@ -13,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import tools.jackson.core.json.JsonWriteFeature;
 import tools.jackson.databind.MapperFeature;
 import tools.jackson.databind.json.JsonMapper;
@@ -20,7 +23,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * {@code --output json}: one JSON object per line on stdout, {@code type} first, times in ISO-8601 UTC. Every run ends
  * with exactly one {@code closed} line, whether the session ended, never started, or the arguments were refused, so a
- * script always gets a final event.
+ * script always gets a final event. An HTTP tunnel's stream also has a {@code request} line, just before its
+ * {@code stream_closed}.
  *
  * <p>These events aren't protocol messages, so they have their own mapper rather than the protocol's strict one. Its
  * output is ASCII: anything else is escaped.
@@ -50,13 +54,26 @@ public final class JsonLinesOutput implements Output {
     record StreamClosed(
             String type, String time, int streamId, long bytesIn, long bytesOut, long durationMs, String reset) {}
 
+    /** {@code status} is null until a final response head arrived; {@code reset} unless the response was complete. */
+    record Request(
+            String type,
+            String time,
+            int streamId,
+            String method,
+            String target,
+            Integer status,
+            String reset,
+            long requestBytes,
+            long responseBytes,
+            long durationMs) {}
+
     record Closed(String type, String time, String reason, String code, String message) {}
 
-    /** @param targets each tunnel's local target, by its {@code ref} */
-    public JsonLinesOutput(PrintWriter out, Clock clock, Map<String, LocalTarget> targets) {
+    /** @param tunnels the tunnels the command asked for */
+    public JsonLinesOutput(PrintWriter out, Clock clock, List<TunnelSpec> tunnels) {
         this.out = Objects.requireNonNull(out, "out");
         this.clock = Objects.requireNonNull(clock, "clock");
-        this.targets = Map.copyOf(targets);
+        this.targets = tunnels.stream().collect(Collectors.toUnmodifiableMap(TunnelSpec::ref, TunnelSpec::target));
     }
 
     @Override
@@ -88,6 +105,21 @@ public final class JsonLinesOutput implements Output {
                 bytesOut,
                 durationMillis,
                 reset.map(ErrorCode::name).orElse(null)));
+    }
+
+    @Override
+    public void onExchangeCompleted(ExchangeSummary exchange) {
+        write(new Request(
+                "request",
+                now(),
+                exchange.streamId(),
+                exchange.method(),
+                exchange.target(),
+                exchange.status().isPresent() ? exchange.status().getAsInt() : null,
+                exchange.reset().map(ErrorCode::name).orElse(null),
+                exchange.requestBytes(),
+                exchange.responseBytes(),
+                exchange.durationMillis()));
     }
 
     @Override

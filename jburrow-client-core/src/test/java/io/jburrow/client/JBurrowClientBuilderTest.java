@@ -14,6 +14,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -192,6 +193,24 @@ class JBurrowClientBuilderTest {
     void theClientOffersHttpWhateverItsTunnel() {
         assertThat(settings("wss://connect.example.dev/v1/connect").capabilities())
                 .containsExactly(Capability.HTTP);
+    }
+
+    @Test
+    void aClientStandingInForAnOlderOneOffersNoCapabilities() {
+        ClientSettings settings = settingsOf(JBurrowClient.builder()
+                .server(URI.create("wss://connect.example.dev/v1/connect"))
+                .authtoken(TOKEN)
+                .tunnel(TUNNEL)
+                .capabilities(Set.of()));
+
+        assertThat(settings.capabilities()).isEmpty();
+    }
+
+    @Test
+    void anHttpTunnelNeedsHttpOffered() {
+        assertThatThrownBy(() -> settingsOf(http().capabilities(Set.of())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A tunnel of kind http needs the http capability offered");
     }
 
     @Test

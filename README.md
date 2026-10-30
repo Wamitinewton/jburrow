@@ -73,9 +73,28 @@ JBURROW_AUTHTOKEN=jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00 \
 echo hello | ncat localhost 21037         # another terminal, with the port printed above
 ```
 
+An HTTP service gets a URL instead of a port. Locally, tunnel names are under `localhost`, which
+browsers and curl resolve to this machine without any DNS setup:
+
+```bash
+python3 scripts/http-echo-server.py 3000 &  # an HTTP service to tunnel to
+JBURROW_AUTHTOKEN=jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00 \
+  java -jar jburrow-cli/target/jburrow-cli-*.jar http 3000 --server ws://localhost:7080/v1/connect
+# Forwarding  http://quiet-otter-4f2a.localhost:7080 -> http://localhost:3000
+#
+# 14:02:11  GET  /hello                 200       6 B     4 ms
+
+curl http://quiet-otter-4f2a.localhost:7080/hello   # another terminal, with the URL printed above
+```
+
+`--subdomain myapp` asks for `myapp.localhost:7080` instead of a random name, and
+`--host-header rewrite` sends the local service `localhost:3000` as its `Host`, for frameworks that
+only answer their own name.
+
 `jburrow tcp 22` instead tunnels to your SSH daemon (`ssh -p 21037 localhost`). Add `--output json`
 for one JSON event per line. Ctrl-C stops the tunnel with exit code 0; any other exit code says
-what went wrong (`jburrow tcp --help`, and ARCHITECTURE.md §The CLI for the list). Pass the token
+what went wrong (`jburrow tcp --help`, and ARCHITECTURE.md §The CLI for the list); `jburrow http`
+uses the same codes. Pass the token
 through `JBURROW_AUTHTOKEN` rather than `--authtoken`: a command-line argument is visible to every
 user of the machine.
 

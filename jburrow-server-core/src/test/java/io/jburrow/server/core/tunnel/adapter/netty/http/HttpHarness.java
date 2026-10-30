@@ -177,7 +177,8 @@ final class HttpHarness implements AutoCloseable {
                 admission,
                 ports,
                 routes,
-                RegistrationFixtures.policy(1, "localhost"));
+                RegistrationFixtures.policy(1, "localhost"),
+                metrics);
         EngineDependencies deps = new EngineDependencies(
                 register,
                 admission,

@@ -6,6 +6,8 @@ import io.jburrow.server.core.tunnel.adapter.netty.http.EdgeErrorPage;
 import io.jburrow.server.core.tunnel.adapter.netty.http.ErrorPageExchange;
 import io.jburrow.server.core.tunnel.adapter.netty.http.ExchangeEnded;
 import io.jburrow.server.core.tunnel.adapter.netty.http.ExchangeRequest;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResponseOrigin;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -61,6 +63,7 @@ final class HostDispatcher extends ChannelInboundHandlerAdapter {
     private final Supplier<? extends ChannelHandler> exchanges;
     private final EdgeErrorPage pages;
     private final RequestDeadline deadline;
+    private final TunnelMetrics metrics;
 
     private final ArrayDeque<Object> held = new ArrayDeque<>();
     private State state = State.BETWEEN_EXCHANGES;
@@ -82,7 +85,8 @@ final class HostDispatcher extends ChannelInboundHandlerAdapter {
             ClientAddressResolver clientAddresses,
             Supplier<? extends ChannelHandler> exchanges,
             EdgeErrorPage pages,
-            RequestDeadline deadline) {
+            RequestDeadline deadline,
+            TunnelMetrics metrics) {
         this.connectHost = normalize(Objects.requireNonNull(connectHost, "connectHost"));
         this.http = Objects.requireNonNull(http, "http");
         this.requestTimeoutNanos = requestTimeout.toNanos();
@@ -91,6 +95,7 @@ final class HostDispatcher extends ChannelInboundHandlerAdapter {
         this.exchanges = Objects.requireNonNull(exchanges, "exchanges");
         this.pages = Objects.requireNonNull(pages, "pages");
         this.deadline = Objects.requireNonNull(deadline, "deadline");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
 
     /**
@@ -195,6 +200,8 @@ final class HostDispatcher extends ChannelInboundHandlerAdapter {
 
     private void answer(ChannelHandlerContext ctx, HttpRequest request, EdgeError error, String host) {
         beginExchange(ctx);
+        metrics.edgeErrorPage(error.name());
+        metrics.httpResponse(error.status(), ResponseOrigin.EDGE);
         log.debug(
                 "edge page: client={} code={}",
                 ClientAddressResolver.clientAddress(ctx.channel()).getHostAddress(),

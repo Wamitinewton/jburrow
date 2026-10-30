@@ -18,6 +18,8 @@ import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
+import io.jburrow.server.e2e.support.HttpVisitor;
+import io.jburrow.server.e2e.support.Ingress;
 import io.jburrow.server.support.TestContainersConfiguration;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.IOException;
@@ -57,9 +59,11 @@ import org.springframework.web.client.RestClient;
  * The end-to-end harness: the full server context on real Postgres, with the real client and real sockets on loopback.
  * Nothing on the byte path is mocked.
  *
- * <p>Each subclass names its own {@code jburrow.tcp.port-range}, within 31000-31999, so each gets a context of its own
+ * <p>Each subclass names its own {@code jburrow.tcp.port-range}, within 30900-31999, so each gets a context of its own
  * and no two classes share tunnel ports. The port pool quarantines and retries a port another process holds,
- * so a collision with something else on the host is harmless.
+ * so a collision with something else on the host is harmless. The HTTP classes that need no settings of their own are
+ * the exception: they name the same properties, {@link #HTTP_PORTS_ON_EPOLL} or {@link #HTTP_PORTS_ON_NIO} among
+ * them, so they share one context per transport. An HTTP tunnel holds no port, so they can.
  *
  * <p>Everything a test opens through this class is closed after it, in reverse order, so no tunnel holds a port into
  * the next test.
@@ -78,6 +82,24 @@ abstract class TunnelTestSupport {
     static final String UNKNOWN_TOKEN = "jb_TEST-ONLY-nobody-unlocks-nothing-real-00000";
 
     static final Duration TIMEOUT = Duration.ofSeconds(10);
+
+    /** The tunnel ports of the shared HTTP context on epoll; an HTTP tunnel needs none, a TCP one a few. */
+    static final String HTTP_PORTS_ON_EPOLL = "jburrow.tcp.port-range=30900-30909";
+
+    static final String HTTP_PORTS_ON_NIO = "jburrow.tcp.port-range=30910-30919";
+
+    static final String ON_EPOLL = "jburrow.edge.transport=epoll";
+
+    static final String ON_NIO = "jburrow.edge.transport=nio";
+
+    /** The test's own connections come from loopback, which this makes the ingress. */
+    static final String LOOPBACK_IS_THE_INGRESS = "jburrow.edge.trusted-proxies=127.0.0.1/32";
+
+    /**
+     * Edge connections keep the kernel's buffer sizes, as the {@code local} profile does: on loopback a small buffer is
+     * advertised as a zero window until the persist timer fires, which would make a large body crawl.
+     */
+    static final String KERNEL_SOCKET_BUFFERS = "jburrow.http.socket-buffer=0";
 
     private static final int CHUNK = 64 * 1024;
 
@@ -102,6 +124,11 @@ abstract class TunnelTestSupport {
 
         int port() {
             return registered().publicPort();
+        }
+
+        /** An HTTP tunnel's host, which a request names in {@code Host}. */
+        String host() {
+            return registered().publicHost();
         }
 
         TunnelClosed awaitClosed(Duration timeout) throws InterruptedException {
@@ -169,6 +196,34 @@ abstract class TunnelTestSupport {
                 .authtoken(token)
                 .tunnel(spec)
                 .clientInfo("jburrow-e2e", "1.0.0");
+    }
+
+    /** An HTTP tunnel for {@code token} to the service on loopback {@code localPort}, on a name the server chooses. */
+    Tunnel openHttpTunnel(String token, int localPort) throws TunnelStartException {
+        return openTunnel(httpClient(token, localPort));
+    }
+
+    JBurrowClient.Builder httpClient(String token, int localPort) {
+        return JBurrowClient.builder()
+                .server(connectUri())
+                .authtoken(token)
+                .http(LocalTarget.of("127.0.0.1", localPort))
+                .clientInfo("jburrow-e2e", "1.0.0");
+    }
+
+    /** A connection to the edge, as a visitor with no proxy in front of it. */
+    HttpVisitor visitor() throws IOException {
+        return closeAfterTest(HttpVisitor.connect(edge.boundPort(), TIMEOUT));
+    }
+
+    /** A connection to the edge as the ingress keeps one, forwarding for {@link HttpVisitor#VISITOR_ADDRESS}. */
+    HttpVisitor ingressConnection() throws IOException {
+        return visitor().asIngress();
+    }
+
+    /** {@code size} connections to the edge as the ingress pools them. */
+    Ingress ingress(int size) throws IOException {
+        return closeAfterTest(Ingress.connect(edge.boundPort(), size, TIMEOUT));
     }
 
     static TunnelSpec tcp(int localPort) {
@@ -280,6 +335,11 @@ abstract class TunnelTestSupport {
     /** Waits until the server holds no stream, so a new visitor gets one. */
     void awaitNoStreams() throws InterruptedException {
         await("the server holds no stream", () -> gauge("jburrow.streams.active", "kind", "tcp") == 0);
+    }
+
+    /** Waits until the server holds no HTTP exchange. */
+    void awaitNoExchanges() throws InterruptedException {
+        await("the server holds no exchange", () -> gauge("jburrow.streams.active", "kind", "http") == 0);
     }
 
     /** Waits until every tunnel port is back in the pool. */

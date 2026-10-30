@@ -1,6 +1,6 @@
 # The test profile: TestContainersConfiguration supplies Postgres, Mailpit and an ephemeral edge port.
 # Each end-to-end test class sets its own jburrow.tcp.port-range, so classes never share tunnel ports.
-# The ranges stay in 31000-31999, below Linux's ephemeral range (32768 up), so an outgoing connection
+# The ranges stay in 30900-31999, below Linux's ephemeral range (32768 up), so an outgoing connection
 # can't hold a tunnel port that a test requests by number.
 spring:
   mail:

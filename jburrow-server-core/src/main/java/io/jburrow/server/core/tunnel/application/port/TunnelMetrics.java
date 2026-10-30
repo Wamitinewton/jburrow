@@ -58,6 +58,18 @@ public interface TunnelMetrics {
         EDGE
     }
 
+    /** How a registration's claim on a subdomain ended. */
+    enum ClaimOutcome {
+        /** The server chose the name. */
+        RANDOM,
+        /** The client's requested name was claimed. */
+        REQUESTED,
+        /** The requested name is in use, or held for someone else. */
+        UNAVAILABLE,
+        /** The requested name is reserved or blocked. */
+        FORBIDDEN
+    }
+
     /** A connection upgraded and its session began: {@code jburrow_sessions_active} up. */
     void sessionStarted();
 
@@ -118,6 +130,9 @@ public interface TunnelMetrics {
 
     /** {@code jburrow_flow_park_refused_total}: a stalled response didn't fit the parking budget. */
     default void parkRefused() {}
+
+    /** {@code jburrow_subdomain_claims_total}: registration claimed a name, or was refused the one it asked for. */
+    default void subdomainClaimed(ClaimOutcome outcome) {}
 
     /** Binds {@code jburrow_flow_parked_bytes} to the bytes parked across the server. */
     default void bindParkedBytes(LongSupplier parkedBytes) {}

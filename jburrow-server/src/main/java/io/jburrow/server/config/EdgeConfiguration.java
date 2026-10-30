@@ -105,6 +105,7 @@ class EdgeConfiguration {
             SessionAdmission admission,
             PortReservationService ports,
             SubdomainRoutes<Principal, TunnelId> routes,
+            MicrometerTunnelMetrics metrics,
             JBurrowProperties properties) {
         JBurrowProperties.Http http = properties.http();
         return new RegisterTunnels(
@@ -115,7 +116,8 @@ class EdgeConfiguration {
                 new RegistrationPolicy(
                         TUNNELS_PER_SESSION,
                         properties.tcp().publicHost(),
-                        new RegistrationPolicy.HttpPublic(http.domain(), http.publicScheme(), http.publicPort())));
+                        new RegistrationPolicy.HttpPublic(http.domain(), http.publicScheme(), http.publicPort())),
+                metrics);
     }
 
     /**
