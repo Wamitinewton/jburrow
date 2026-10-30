@@ -1,4 +1,6 @@
-# JBurrow
+<h1 align="center">
+  <img src="docs/assets/jburrow-logo.png" alt="JBurrow" width="560">
+</h1>
 
 An open-source, self-hostable tunneling server, in the style of ngrok, written in Java.
 
