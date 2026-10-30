@@ -927,8 +927,11 @@ other workloads share.
 a `StreamFlow` and a few small objects for its two halves: measured in checkpoint 10 against phase 2's
 2.8 KiB per stream.
 
-The pod's 1 GiB still covers it: heap, direct memory and kernel buffers as phase 2 sized them, with the
-parked budget inside the direct memory cap.
+At the code's defaults, a 1 GiB pod still covers it: heap, direct memory and kernel buffers as phase 2
+sized them, with the parked budget inside the direct memory cap. Production runs a 4 GiB pod sized
+for 1,000 sessions, 8,000 streams and 64 MB of parked responses
+([ADR-0013](../adr/0013-four-gib-production-pod.md)): 943 MiB of direct memory budgeted against a
+1,280 MiB cap, and 500 MiB of socket buffers.
 
 ## Performance
 
