@@ -82,7 +82,10 @@ final class ControlFrameHandler extends ChannelInboundHandlerAdapter {
             }
             session.checkInbound(frame.type());
             switch (frame) {
-                case Frame.ServerHello hello -> liveness.start(session.onServerHello(hello.message()));
+                case Frame.ServerHello hello -> {
+                    liveness.start(session.onServerHello(hello.message()));
+                    connection.onServerHello();
+                }
                 case Frame.Registered registered ->
                     connection.onEstablished(session.onRegistered(registered.message()));
                 case Frame.Open open -> streams.open(open);

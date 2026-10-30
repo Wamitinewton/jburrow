@@ -781,28 +781,36 @@ read gate.
   exchange ends. Pooling is an open question for [Performance](#performance).
 - **The request.** `LocalExchangeHandler` writes the head from `OPEN`: the fields as given,
   `content-length` or `transfer-encoding: chunked` from `body`, and with `--host-header rewrite`,
-  `host` set to the local target's `host:port`. `DATA` becomes body content, `CLOSE` the end of the
-  body. Server `DATA` waits in the stream's queue while the connection is being made, bounded by the
+  `host` set to the local target's `host:port`. It never writes `expect`, even if a head carried one,
+  since the edge has answered it, and adds no connection-specific field. `DATA` becomes body content,
+  `CLOSE` the end of the body. Server `DATA` waits in the stream's queue while the connection is being made, bounded by the
   client's stream window, as in phase 2.
 - **The response.** A `1xx` from the local service becomes a `1xx` `HEADERS`, except `101`, which can't
   happen because the client never forwards `Upgrade`, and is treated as invalid. The final response
   becomes `HEADERS` (connection-specific fields removed, `body` from the response's framing and the
-  request's method), then body content as `DATA` and its end as `CLOSE`. A response head that encodes
-  over 16,384 bytes, invalid HTTP, or a connection that ends early becomes `CLOSE RST
-  LOCAL_SERVICE_ERROR`; a refused connection `LOCAL_SERVICE_UNREACHABLE`.
+  request's method), then body content as `DATA` and its end as `CLOSE`, after which the client closes
+  the local connection, and sends `CLOSE RST CANCELLED` if the request body hasn't ended. A response
+  head that encodes over 16,384 bytes or breaks a field rule, a transfer coding other than `chunked`
+  alone (the tunnel can't carry it without the coding's own framing), invalid HTTP, or a connection
+  that ends early becomes `CLOSE RST LOCAL_SERVICE_ERROR`; a refused connection
+  `LOCAL_SERVICE_UNREACHABLE`.
 - **Flow.** The local connection is read through phase 2's `ReadGate` and
   `CreditBoundedRecvByteBufAllocator`, which cap a read at what the stream may send. The codec's
   decoded content is never more than the bytes read, so a read still fits one frame and its credit.
   The client has no loop crossing: its local connections are on its control loop (phase 1).
-- **`HELLO`** offers `http`. A server that doesn't answer with it can't have HTTP tunnels, and
-  `jburrow http` reports that the server doesn't support them (exit code 6). A client that wants an
+- **`HELLO`** offers `http`. A server that doesn't answer with it can't have HTTP tunnels: the client
+  ends the session as a client that stops does, a close with status `1000` and no `ERROR`, without
+  sending `REGISTER`, and `start()` fails with `TunnelStartException.Kind.UNSUPPORTED_BY_SERVER`, which
+  `jburrow http` reports as the server not supporting them (exit code 6). A client that wants an
   HTTP tunnel sends its `REGISTER` only once the server's `HELLO` has arrived and listed `http`:
   `"http"` is something the capability introduces, which protocol.md §4.2 forbids before the
   session has it, and the reference codec refuses to encode it until then. That costs HTTP sessions
   one round trip at setup; TCP sessions still register at once.
 - **`JBurrowClient.Builder`** gains `http(localTarget)` with `subdomain` and `hostHeader`, and
-  `TunnelHandle` reports each completed exchange (method, path, status, bytes, duration) to
-  `TunnelEvents`, which is what the CLI prints. The path is reported on the developer's own machine
+  the client reports each finished exchange (method, target, status, bytes, duration) to
+  `TunnelEvents.onExchangeCompleted`, just before the stream's `onStreamClosed`, which is what the CLI
+  prints. An exchange whose response was complete counts as completed even if its stream was then
+  reset to cancel the rest of the request body. The path is reported on the developer's own machine
   only; the server never logs it ([Observability](#observability)).
 
 ## The CLI

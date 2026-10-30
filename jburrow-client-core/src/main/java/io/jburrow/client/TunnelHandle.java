@@ -11,7 +11,10 @@ public interface TunnelHandle {
     /** The id the server gave the session. Not a secret: it appears in the server's logs. */
     String sessionId();
 
-    /** The tunnels the server created, in the order they were asked for, with their public URLs. */
+    /**
+     * The tunnels the server created, in the order they were asked for, with their public URLs: {@code
+     * https://<name>.<domain>} (or {@code http://}) for an HTTP tunnel, {@code tcp://<host>:<port>} for a TCP one.
+     */
     List<RegisteredTunnel> tunnels();
 
     /** Completes once, when the session has ended, with the reason. Never completes exceptionally. */

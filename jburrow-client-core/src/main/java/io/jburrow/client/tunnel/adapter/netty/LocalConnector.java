@@ -2,10 +2,14 @@ package io.jburrow.client.tunnel.adapter.netty;
 
 import io.jburrow.client.tunnel.domain.ActiveTunnel;
 import io.jburrow.client.tunnel.domain.ClientSession;
+import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.LocalTarget;
+import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.adapter.netty.CreditBoundedRecvByteBufAllocator;
 import io.jburrow.protocol.adapter.netty.Frame;
+import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.flow.Credit;
 import io.jburrow.protocol.flow.DataOutcome;
 import io.jburrow.protocol.stream.StreamEvent;
@@ -25,6 +29,8 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.socket.DuplexChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.CodecException;
+import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.concurrent.Future;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -51,6 +57,13 @@ import org.slf4j.LoggerFactory;
  * credit only once its write to the local connection has completed, successfully or not. A local service that stops
  * reading so holds back only its own stream, and the control connection is always read.
  *
+ * <p>A stream of an HTTP tunnel carries one exchange (§9.7, and phase 3's ARCHITECTURE.md §The client) on a local
+ * connection of its own, closed when the exchange ends: its {@link LocalExchangeHandler} writes the request and reads
+ * the response, which goes out as {@code HEADERS}, {@code DATA} and {@code CLOSE}, through the same read gate. The
+ * server's {@code CLOSE} ends the request body rather than the connection's output. A response that is complete while
+ * the request body is still arriving is followed by {@code CLOSE RST CANCELLED}. A local service that breaks HTTP/1.1,
+ * or whose connection ends before its response does, resets the stream with {@code LOCAL_SERVICE_ERROR}.
+ *
  * <p>Opening is optimistic (§9.4): {@code DATA} that arrives while a local connection is being made is held, with no
  * limit but the client's stream window, which the server can't pass until that data is written and released. If the
  * connection fails, the held data is released and its session credit returned.
@@ -76,6 +89,7 @@ final class LocalConnector {
     private final ClientSession session;
     private final Channel control;
     private final LocalDial dial;
+    private final ControlJson json;
     private final LongSupplier nanoTime;
     private final ReadGate gate;
     private final Map<Integer, LocalRelayHandler> streams = new LinkedHashMap<>();
@@ -93,15 +107,22 @@ final class LocalConnector {
         Future<Channel> dial(LocalTarget target);
     }
 
-    LocalConnector(ControlConnection connection, Channel control, Dialer dialer, LongSupplier nanoTime) {
-        this(connection, control, tcp(dialer, control), nanoTime);
+    LocalConnector(
+            ControlConnection connection, Channel control, Dialer dialer, ControlJson json, LongSupplier nanoTime) {
+        this(connection, control, tcp(dialer, control), json, nanoTime);
     }
 
     LocalConnector(ControlConnection connection, Channel control, LocalDial dial, LongSupplier nanoTime) {
+        this(connection, control, dial, ControlJson.create(), nanoTime);
+    }
+
+    LocalConnector(
+            ControlConnection connection, Channel control, LocalDial dial, ControlJson json, LongSupplier nanoTime) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.session = connection.session();
         this.control = Objects.requireNonNull(control, "control");
         this.dial = Objects.requireNonNull(dial, "dial");
+        this.json = Objects.requireNonNull(json, "json");
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
         this.gate = new ReadGate(session, control, new CarriedOutput());
     }
@@ -131,6 +152,10 @@ final class LocalConnector {
         int streamId = open.streamId();
         ActiveTunnel tunnel = session.onOpen(streamId, open.message());
         LocalRelayHandler stream = new LocalRelayHandler(this, streamId, tunnel, nanoTime.getAsLong());
+        if (tunnel.registered().kind() == TunnelKind.HTTP) {
+            stream.exchange(new LocalExchangeHandler(
+                    this, stream, open.message().request(), tunnel.spec().hostHeader(), tunnel.target(), json));
+        }
         streams.put(streamId, stream);
         RemoteAddress remote = open.message().remote();
         log.debug(
@@ -209,7 +234,7 @@ final class LocalConnector {
                     resetConnection(stream);
                 } else if (accepted.next() == StreamState.HALF_CLOSED_REMOTE) {
                     if (stream.isConnected()) {
-                        shutdownOutputAfterWrites(stream.channel());
+                        endOutput(stream);
                     } else {
                         stream.shutdownOutputOnConnect();
                     }
@@ -306,10 +331,17 @@ final class LocalConnector {
 
     /**
      * The local target sent {@code FIN}: half-close the stream, and finish it if the server had closed its half. A
-     * half-close follows the stream's last byte, so while bytes are carried it waits for them.
+     * half-close follows the stream's last byte, so while bytes are carried it waits for them. For an exchange, the
+     * codec has already ended a response the {@code FIN} delimits; one it hasn't ended was cut short.
      */
     void onLocalInputShutdown(LocalRelayHandler stream) {
         if (!isOpen(stream) || session.isClosing()) {
+            return;
+        }
+        if (stream.isHttp()) {
+            if (!stream.exchange().responseEnded()) {
+                onLocalServiceError(stream, "the connection ended before the response did");
+            }
             return;
         }
         if (stream.hasCarry()) {
@@ -329,12 +361,20 @@ final class LocalConnector {
         }
     }
 
-    /** The local connection failed, or a write to it did: an I/O error is the local target resetting. */
+    /**
+     * The local connection failed, or a write to it did: an I/O error is the local target resetting, and for an
+     * exchange, so is the codec finding the response broken or missing.
+     */
     void onLocalFailed(LocalRelayHandler stream, Throwable cause) {
         if (!isOpen(stream)) {
             return;
         }
-        if (cause instanceof IOException) {
+        if (stream.isHttp() && (cause instanceof IOException || cause instanceof CodecException)) {
+            if (!stream.exchange().responseEnded()) {
+                onLocalServiceError(
+                        stream, "the connection failed: " + cause.getClass().getSimpleName());
+            }
+        } else if (cause instanceof IOException) {
             log.debug("local connection failed: stream={}: {}", stream.streamId(), cause.toString());
             resetFromLocal(stream, ErrorCode.PEER_RESET);
         } else {
@@ -343,11 +383,67 @@ final class LocalConnector {
         }
     }
 
-    /** The local connection closed. A stream still open then was cut, not closed. */
+    /** The local connection closed. A stream still open then was cut, not closed, unless its response had ended. */
     void onLocalInactive(LocalRelayHandler stream) {
-        if (isOpen(stream)) {
-            resetFromLocal(stream, ErrorCode.PEER_RESET);
+        if (!isOpen(stream)) {
+            return;
         }
+        if (!stream.isHttp()) {
+            resetFromLocal(stream, ErrorCode.PEER_RESET);
+        } else if (!stream.exchange().responseEnded()) {
+            onLocalServiceError(stream, "the connection closed before the response ended");
+        }
+    }
+
+    // An exchange's response.
+
+    /** A response head from the local service: {@code HEADERS}, not flow-controlled, flushed with the read batch. */
+    void onLocalHead(LocalRelayHandler stream, HttpResponseHead head) {
+        if (!isOpen(stream) || session.isClosing()) {
+            return;
+        }
+        session.onHeadersSent(stream.streamId(), head);
+        control.write(new Frame.Headers(stream.streamId(), head), control.voidPromise());
+    }
+
+    /** The response ended: {@code CLOSE} goes out after its last byte, so while bytes are carried it waits for them. */
+    void onLocalResponseEnd(LocalRelayHandler stream) {
+        if (!isOpen(stream) || session.isClosing()) {
+            return;
+        }
+        if (stream.hasCarry()) {
+            stream.closeAfterCarry();
+            return;
+        }
+        endResponse(stream);
+    }
+
+    /** The local service broke HTTP/1.1, or its connection ended mid-response: reset with {@code LOCAL_SERVICE_ERROR}. */
+    void onLocalServiceError(LocalRelayHandler stream, String reason) {
+        if (!isOpen(stream)) {
+            return;
+        }
+        log.debug("local service error: stream={}: {}", stream.streamId(), reason);
+        resetFromLocal(stream, ErrorCode.LOCAL_SERVICE_ERROR);
+    }
+
+    /**
+     * Sends {@code CLOSE} for the complete response, then {@code CLOSE RST CANCELLED} if the request body hasn't ended,
+     * so the server stops sending it (§9.7), and closes the local connection: one exchange per connection.
+     */
+    private void endResponse(LocalRelayHandler stream) {
+        int streamId = stream.streamId();
+        session.onStreamSent(streamId, StreamEvent.CLOSE_SENT);
+        control.write(Frame.Close.half(streamId), control.voidPromise());
+        Optional<ErrorCode> cancelled = Optional.empty();
+        if (session.streamState(streamId).isPresent()) {
+            session.onStreamSent(streamId, StreamEvent.RST_SENT);
+            control.write(Frame.Close.reset(streamId, ErrorCode.CANCELLED), control.voidPromise());
+            cancelled = Optional.of(ErrorCode.CANCELLED);
+        }
+        control.flush();
+        finish(stream, cancelled, Optional.empty(), cancelled.isPresent() ? "responded, request cancelled" : "closed");
+        stream.channel().close();
     }
 
     // The session ending.
@@ -392,12 +488,33 @@ final class LocalConnector {
         // this allocator sizes every read.
         channel.config().setRecvByteBufAllocator(new CreditBoundedRecvByteBufAllocator(() -> gate.sendable(stream)));
         stream.connected(channel);
+        LocalExchangeHandler exchange = stream.exchange();
+        if (exchange != null) {
+            channel.pipeline().addLast("http", LocalExchangeHandler.newCodec()).addLast("exchange", exchange);
+        }
         channel.pipeline().addLast(stream);
+        if (exchange != null) {
+            channel.write(exchange.requestHead(), channel.voidPromise());
+        }
         writePending(stream);
         if (stream.isShutdownOutputOnConnect()) {
-            shutdownOutputAfterWrites(channel);
+            endOutput(stream);
         }
         gate.onConnected(stream);
+    }
+
+    /**
+     * The server's half of the stream is complete: the end of the request body for an exchange, or a TCP shutdown of
+     * the local connection's output once what was written before it is on the wire.
+     */
+    private static void endOutput(LocalRelayHandler stream) {
+        if (stream.isHttp()) {
+            stream.channel()
+                    .writeAndFlush(
+                            LastHttpContent.EMPTY_LAST_CONTENT, stream.channel().voidPromise());
+        } else {
+            shutdownOutputAfterWrites(stream.channel());
+        }
     }
 
     /** Writes what arrived while the connection was being made, in order, each releasing its credit once written. */
@@ -469,6 +586,15 @@ final class LocalConnector {
      * released into the flow, so its session credit comes back.
      */
     private void finish(LocalRelayHandler stream, Optional<ErrorCode> reset, String ending) {
+        finish(stream, reset, reset, ending);
+    }
+
+    /**
+     * {@link #finish}, where an exchange's own outcome can differ from its stream's: {@code exchangeReset} is empty when
+     * the response was complete, even if the stream was then reset to cancel the request body.
+     */
+    private void finish(
+            LocalRelayHandler stream, Optional<ErrorCode> reset, Optional<ErrorCode> exchangeReset, String ending) {
         streams.remove(stream.streamId());
         written.remove(stream);
         gate.onRemoved(stream);
@@ -481,6 +607,19 @@ final class LocalConnector {
                 stream.bytesOut(),
                 durationMillis,
                 ending);
+        LocalExchangeHandler exchange = stream.exchange();
+        if (exchange != null) {
+            ExchangeSummary summary = new ExchangeSummary(
+                    stream.streamId(),
+                    exchange.request().method(),
+                    exchange.request().target(),
+                    exchange.status(),
+                    exchangeReset,
+                    stream.bytesIn(),
+                    stream.bytesOut(),
+                    durationMillis);
+            connection.tell(events -> events.onExchangeCompleted(summary));
+        }
         connection.tell(events ->
                 events.onStreamClosed(stream.streamId(), stream.bytesIn(), stream.bytesOut(), durationMillis, reset));
     }
@@ -550,7 +689,11 @@ final class LocalConnector {
 
         @Override
         public void sendDeferredClose(LocalRelayHandler stream) {
-            halfClose(stream);
+            if (stream.isHttp()) {
+                endResponse(stream);
+            } else {
+                halfClose(stream);
+            }
         }
 
         @Override

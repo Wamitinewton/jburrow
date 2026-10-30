@@ -138,6 +138,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   draft 2 unchanged. The startup budget line adds the parked bytes, and the kernel line names
   exchanges' socket buffers; the `local` profile leaves those to the kernel, since on loopback a
   16 KB buffer is smaller than one segment.
+- HTTP tunnels in `JBurrowClient`: `JBurrowClient.Builder.http(localTarget)`, with optional
+  `subdomain(name)` and `hostHeader(HostHeader.REWRITE)`. The client offers `http` in every
+  `HELLO`, and sends an HTTP tunnel's `REGISTER` once the server's `HELLO` has listed it; against a
+  server that doesn't, `start()` fails with `TunnelStartException.Kind.UNSUPPORTED_BY_SERVER`
+  before anything is registered. Each request becomes one HTTP/1.1 exchange with the local service
+  on a connection of its own, both bodies under the same flow control as TCP streams. A response
+  that isn't valid HTTP/1.1, or a connection that ends before its response does, resets the stream
+  with `LOCAL_SERVICE_ERROR`; a response that is complete before the request body ends cancels the
+  rest of the body. `TunnelEvents.onExchangeCompleted` reports each exchange's method, target,
+  status, body bytes and duration, never a header value or a body.
 - A `native` check on every pull request that builds `jburrow` as a GraalVM native binary on Linux
   x64 and runs a real tunnel with it, 50 concurrent streams on one session and then one 4 MiB
   stream, publishing nothing

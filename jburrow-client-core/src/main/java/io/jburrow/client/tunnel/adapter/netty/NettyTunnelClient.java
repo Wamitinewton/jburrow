@@ -59,7 +59,8 @@ import javax.net.ssl.SSLException;
  * UpgradeFailures                     reads a refused upgrade's JSON before Netty's handshaker drops it
  * WebSocketClientProtocolHandler      the upgrade; masking, no extensions, no Origin
  * WebSocketFrameAggregator            whole messages of at most 65,546 bytes
- * WebSocketFrameDecoder / Encoder     binary message to and from a protocol frame
+ * WebSocketFrameDecoder / Encoder     binary message to and from a protocol frame; what {@code http} introduces only
+ *                                     once the server's {@code HELLO} has listed it
  * ClientLivenessHandler               PING, PONG and the idle timeout
  * ControlFrameHandler                 the session
  * </pre>
@@ -82,7 +83,6 @@ public final class NettyTunnelClient implements JBurrowClient {
     private final ExecutorService blocking;
     private final Dialer dialer;
     private final ControlJson json = ControlJson.create();
-    private final FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, json);
     private final LongSupplier nanoTime = System::nanoTime;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -192,7 +192,8 @@ public final class NettyTunnelClient implements JBurrowClient {
 
     private void initControlPipeline(SocketChannel channel, ControlConnection session, ClientTls tls) {
         ClientLivenessHandler liveness = new ClientLivenessHandler(session.session(), session, nanoTime);
-        LocalConnector streams = new LocalConnector(session, channel, dialer, nanoTime);
+        LocalConnector streams = new LocalConnector(session, channel, dialer, json, nanoTime);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, json, session.session()::httpEnabled);
         if (tls != null) {
             channel.pipeline().addLast("tls", tls.newHandler(channel.alloc()));
         }

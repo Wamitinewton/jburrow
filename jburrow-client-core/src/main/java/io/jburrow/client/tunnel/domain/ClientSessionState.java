@@ -4,7 +4,10 @@ package io.jburrow.client.tunnel.domain;
 public enum ClientSessionState {
     /** Connecting and upgrading; no frame has been exchanged. */
     CONNECTING,
-    /** {@code HELLO} and {@code REGISTER} are sent; the server's {@code HELLO} hasn't arrived. */
+    /**
+     * {@code HELLO} is sent, and {@code REGISTER} too unless it needs a capability the server's {@code HELLO} must list
+     * first; the server's {@code HELLO} hasn't arrived.
+     */
     AWAITING_HELLO,
     /** The server's {@code HELLO} arrived; its {@code REGISTER} reply hasn't. */
     AWAITING_REGISTERED,

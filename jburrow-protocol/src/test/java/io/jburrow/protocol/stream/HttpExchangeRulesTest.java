@@ -241,6 +241,55 @@ class HttpExchangeRulesTest {
         assertThatIllegalArgumentException().isThrownBy(() -> rules.onResponseData(0));
     }
 
+    // At the client, the request is the peer's and the response its own.
+
+    @Test
+    void atTheClientARequestBodyPastItsContentLengthIsTheServersProtocolError() {
+        HttpExchangeRules rules = HttpExchangeRules.atClient(POST_5);
+        rules.onRequestData(5);
+
+        assertProtocolError(() -> rules.onRequestData(1));
+    }
+
+    @Test
+    void atTheClientRequestDataOnAnEmptyBodyIsTheServersProtocolError() {
+        HttpExchangeRules rules = HttpExchangeRules.atClient(GET);
+
+        assertProtocolError(() -> rules.onRequestData(1));
+    }
+
+    @Test
+    void atTheClientARequestEndingShortIsTheServersProtocolError() {
+        HttpExchangeRules rules = HttpExchangeRules.atClient(POST_5);
+        rules.onRequestData(4);
+
+        assertProtocolError(rules::onRequestEnd);
+    }
+
+    @Test
+    void atTheClientABrokenResponseIsItsOwnBug() {
+        HttpExchangeRules rules =
+                HttpExchangeRules.atClient(request("HEAD", HeaderFields.of("host", "x"), BodyFraming.EMPTY));
+        assertThatIllegalStateException().isThrownBy(() -> rules.onResponseData(1));
+        assertThatIllegalStateException().isThrownBy(() -> rules.onResponseHead(OK_5));
+
+        rules.onResponseHead(OK_EMPTY);
+        assertThatIllegalStateException().isThrownBy(() -> rules.onResponseHead(OK_EMPTY));
+        assertThatIllegalStateException().isThrownBy(() -> rules.onResponseData(1));
+    }
+
+    @Test
+    void atTheClientAWholeExchangeFollowsTheSameRules() {
+        HttpExchangeRules rules = HttpExchangeRules.atClient(POST_5);
+
+        rules.onRequestData(5);
+        rules.onRequestEnd();
+        rules.onResponseHead(EARLY_HINTS);
+        rules.onResponseHead(OK_5);
+        rules.onResponseData(5);
+        rules.onResponseEnd();
+    }
+
     private static void assertProtocolError(ThrowingCallable call) {
         assertThatExceptionOfType(ProtocolException.class).isThrownBy(call).satisfies(e -> {
             assertThat(e.code()).isEqualTo(ErrorCode.PROTOCOL_ERROR);

@@ -1,6 +1,8 @@
 package io.jburrow.client;
 
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
+import io.jburrow.client.tunnel.domain.HostHeader;
+import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.Windows;
 import java.net.URI;
@@ -22,6 +24,9 @@ import javax.net.ssl.TrustManagerFactory;
  *     handle.closed().toCompletableFuture().join();
  * }
  * }</pre>
+ *
+ * <p>An HTTP tunnel is the same with {@code .http(LocalTarget.of("localhost", 3000))} in place of {@code .tunnel(...)},
+ * and optionally {@code .subdomain("myapp")} and {@code .hostHeader(HostHeader.REWRITE)}.
  *
  * <p>A client runs one session, on one daemon I/O thread of its own, and is started once. There is no reconnect in this
  * version: when the session ends, {@link TunnelHandle#closed()} says why, and a new client is needed for a new
@@ -50,7 +55,10 @@ public interface JBurrowClient extends AutoCloseable {
     @Override
     void close();
 
-    /** Collects a client's settings. {@link #server}, {@link #authtoken} and one {@link #tunnel} are required. */
+    /**
+     * Collects a client's settings. {@link #server}, {@link #authtoken} and one tunnel, from {@link #tunnel} or
+     * {@link #http}, are required.
+     */
     interface Builder {
 
         /**
@@ -62,8 +70,24 @@ public interface JBurrowClient extends AutoCloseable {
         /** The credential sent in {@code REGISTER}. Never logged and never part of any {@code toString}. */
         Builder authtoken(String token);
 
-        /** The tunnel to open. This version opens exactly one per client. */
+        /** The tunnel to open. This version opens exactly one per client, so this excludes {@link #http}. */
         Builder tunnel(TunnelSpec spec);
+
+        /**
+         * Opens an HTTP tunnel to {@code target}, with the ref {@code default}: each request becomes one HTTP/1.1
+         * exchange with the local service, on a connection of its own. Excludes {@link #tunnel}; called again, the
+         * last target wins.
+         */
+        Builder http(LocalTarget target);
+
+        /**
+         * Asks the server for this name for the {@link #http} tunnel; without it, the server chooses one. Checked
+         * against the protocol's rule when the client is built: 3 to 63 lower-case letters, digits and hyphens.
+         */
+        Builder subdomain(String name);
+
+        /** What the {@link #http} tunnel sends the local service as {@code host}. {@link HostHeader#KEEP} by default. */
+        Builder hostHeader(HostHeader option);
 
         /** Who hears about the session; optional. Called on the client's I/O thread, so it must not block. */
         Builder events(TunnelEvents listener);

@@ -25,6 +25,10 @@ import java.util.Objects;
  * <p>Each read is sized by the gate: at most what the stream may send right now, so a read becomes one {@code DATA}
  * frame. What a read takes beyond that waits in the carry slot, owned here until it is sent or released.
  *
+ * <p>A stream of an HTTP tunnel also has a {@link LocalExchangeHandler}, in front of this handler on the same channel,
+ * which turns the connection's HTTP/1.1 into the exchange's heads and body bytes; this handler then sees only the
+ * connection's events, never its reads.
+ *
  * <p>Added to its channel only once the connection is made. Confined to the session's event loop.
  */
 final class LocalRelayHandler extends ChannelInboundHandlerAdapter {
@@ -35,6 +39,7 @@ final class LocalRelayHandler extends ChannelInboundHandlerAdapter {
     private final long openedNanos;
     private final ArrayDeque<ByteBuf> pending = new ArrayDeque<>();
 
+    private LocalExchangeHandler exchange;
     private Future<Channel> dialing;
     private DuplexChannel channel;
     private boolean shutdownOutputOnConnect;
@@ -103,6 +108,19 @@ final class LocalRelayHandler extends ChannelInboundHandlerAdapter {
         return openedNanos;
     }
 
+    void exchange(LocalExchangeHandler exchange) {
+        this.exchange = exchange;
+    }
+
+    /** The HTTP exchange the stream carries; {@code null} for a stream of a TCP tunnel. */
+    LocalExchangeHandler exchange() {
+        return exchange;
+    }
+
+    boolean isHttp() {
+        return exchange != null;
+    }
+
     void dialing(Future<Channel> dialing) {
         this.dialing = dialing;
     }
@@ -137,7 +155,10 @@ final class LocalRelayHandler extends ChannelInboundHandlerAdapter {
         return pending.poll();
     }
 
-    /** The server half-closed the stream before the connection was made: shut down its output once it is. */
+    /**
+     * The server half-closed the stream before the connection was made: end its output once it is, with a TCP
+     * shutdown, or the end of the request body for an exchange.
+     */
     void shutdownOutputOnConnect() {
         shutdownOutputOnConnect = true;
     }
