@@ -148,7 +148,7 @@ day-to-day work; you need it when the `native` CI job fails on your change.
 
 ```bash
 sdk install java 21-graalce      # or any GraalVM for JDK 21, as the JDK Maven runs on
-make native                      # jburrow-cli/target/jburrow, beside the fat JAR
+make native                      # jburrow-cli/target/jburrow, beside the fat JAR, copied to ~/.local/bin
 ./jburrow-cli/target/jburrow version
 make native-smoke                # builds the server JAR too, then runs scripts/native-smoke.sh
 ```

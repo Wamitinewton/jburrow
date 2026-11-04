@@ -1,7 +1,7 @@
 # Phase 3, HTTP Tunnels: Architecture
 
-Status: designed, not yet built. Fourth phase of `PROJECT.md` §Build roadmap, built on phase 2's
-multiplexed sessions and flow control.
+Status: implemented; phase 3 is complete and runs in production. Fourth phase of `PROJECT.md`
+§Build roadmap, built on phase 2's multiplexed sessions and flow control.
 
 `PROJECT.md` gives phase 3 one line: host routing on the edge listener, per-request routing, random
 and requested subdomains, the blocklist, the wildcard certificate through the DNS-01 `Issuer`; done
@@ -430,7 +430,8 @@ Netty, and nothing the edge needs to hold a lock for.
   which is the larger cost. Both lists are compared after lower-casing, which `SubdomainName` already
   requires.
 - **The route table** (`SubdomainRoutes`) maps a name to its tunnel. A claim is *active* while the
-  tunnel exists, and *held* for `jburrow.http.name-hold` (60 s) after it ends, for the principal that
+  tunnel exists, and *held* for `jburrow.http.name-hold` (60 s; replaced in phase 4 by
+  `jburrow.session.resume-window`, 120 s, which holds ports too) after it ends, for the principal that
   had it: only that principal may claim the name while it is held, and random names skip it. So a
   tester whose CLI restarts gets the URL back with `--subdomain`, and nobody can take over a URL in the
   seconds after its owner's session drops. Phase 5's leases replace the hold with a durable
@@ -595,7 +596,9 @@ that fails answers with an [error page](#error-pages) and the exchange ends:
 7. **Response head.** `HEADERS` arrives on the session's loop; the response's headers are adjusted
    ([below](#response-headers-the-edge-changes)), framed from `body`, and written. A `1xx` is written
    as an informational response. No final head within `jburrow.http.response-timeout` (60 s) of
-   `OPEN` → the stream is reset with `CANCELLED` and the visitor gets `504`, `RESPONSE_TIMEOUT`.
+   the end of the request body (the edge's `CLOSE`, right after `OPEN` for a request without one;
+   from `OPEN` until phase 4) → the stream is reset with `CANCELLED` and the visitor gets `504`,
+   `RESPONSE_TIMEOUT`.
 8. **End.** The client's `CLOSE` writes the end of the response. The connection stays open for the
    next request if the request body was read to its end, the visitor didn't ask to close, and the
    response was framed by length or chunks; otherwise it closes once the response is flushed.
@@ -768,7 +771,7 @@ and `ErrorCodeSpaceTest` covers them with the others:
 | `LOCAL_SERVICE_UNREACHABLE` | 502 | The client couldn't connect to its local service. |
 | `LOCAL_SERVICE_ERROR` | 502 | The local service's response wasn't valid, or its head was too large. |
 | `TUNNEL_BUSY` | 503 | A stream cap refused the request. `Retry-After: 1`. |
-| `SERVER_SHUTTING_DOWN` | 503 | The server is stopping. `Retry-After` as for a refused upgrade. |
+| `SERVER_SHUTTING_DOWN` | 503 | The server is stopping. `Retry-After` as for a refused upgrade; from phase 4, `Retry-After: 10`, the restart budget ([phase 4 §The drain](../phase-4-staying-connected/ARCHITECTURE.md#the-drain)). |
 | `RESPONSE_TIMEOUT` | 504 | No response head within `jburrow.http.response-timeout`. |
 
 ## The client
@@ -877,9 +880,9 @@ reaching `routing.domain` directly. The protocol model's new records are pure, a
 | `jburrow.http.public-scheme` | | `http` | `https` | the scheme in `url` |
 | `jburrow.http.public-port` | | `7080` | `443` | the port in `url`, left out when it is the scheme's default |
 | `jburrow.http.reserved-names` | `JBURROW_HTTP_RESERVED_NAMES` | empty | empty | added to the built-in reserved names |
-| `jburrow.http.name-hold` | | `60s` | `60s` | `0s` turns the hold off |
+| `jburrow.http.name-hold` | | `60s` | `60s` | `0s` turns the hold off. Replaced in phase 4 by `jburrow.session.resume-window`; setting it now fails startup |
 | `jburrow.http.max-request-body` | | `100MB` | `100MB` | |
-| `jburrow.http.response-timeout` | | `60s` | `60s` | to the final response head; must be below the ingress's read timeout |
+| `jburrow.http.response-timeout` | | `60s` | `60s` | from the end of the request body to the final response head (from `OPEN` until phase 4); must be below the ingress's read timeout |
 | `jburrow.http.keep-alive-timeout` | | `75s` | `75s` | idle time between exchanges; must be above the ingress's upstream keep-alive |
 | `jburrow.http.socket-buffer` | | `0` | `16KB` | `SO_SNDBUF` and `SO_RCVBUF` of an edge connection that carries exchanges; `0` leaves it to the kernel. Loopback's segments are about 64 KiB, larger than a 16 KB buffer, which Linux then advertises as a zero window until its persist timer fires, so `local` leaves it to the kernel; on the ingress's hop segments are about 1.4 KiB |
 | `jburrow.http.park-after` | | `1s` | `1s` | |
@@ -1045,7 +1048,8 @@ What the rows decide:
 - **A long upload meets `response-timeout`.** The timeout runs from `OPEN` to the final head, and a
   local service that answers only once it has the whole body (as the echo service does, and as most
   upload handlers do) can't answer a 100 MiB upload at 1.2 MiB/s within 60 s. The visitor gets a
-  `504` with the upload still flowing ([Open questions](#open-questions)).
+  `504` with the upload still flowing ([Open questions](#open-questions)). Phase 4 counts the
+  timeout from the end of the request body instead.
 
 ## Security and threat model
 
@@ -1168,48 +1172,47 @@ working.
 - **WebSocket passthrough sooner.** Development servers with hot reload (Vite, Next.js) open a
   WebSocket from the page. Without it the page still loads, but hot reload doesn't work through the
   tunnel. If testers miss it, the `101` hook above is small enough to pull forward from phase 8.
-- **The response timeout and long uploads.** `response-timeout` counts from `OPEN`, so it includes
-  the time the request body takes to arrive. Checkpoint 10 measured a 100 MiB upload getting `504`
-  at round trips of 50 ms and more, because the local service answers only after the body. Counting
-  the timeout from the end of the request body instead (or pausing it while the body is still
-  arriving) would keep its purpose, a local service that never answers, without cutting slow
-  uploads. It changes a decision this document records, so it needs a decision before production;
-  until then a tester's large upload over a slow link fails after 60 s.
+- **The response timeout and long uploads.** Resolved in phase 4
+  ([`docs/phase-4-staying-connected/ARCHITECTURE.md`](../phase-4-staying-connected/ARCHITECTURE.md)
+  §The response timeout). Phase 3 counted `response-timeout` from `OPEN`, so it included the time
+  the request body takes to arrive, and checkpoint 10 measured a 100 MiB upload getting `504` at
+  round trips of 50 ms and more, because the local service answers only after the body. Phase 4
+  counts it from the end of the request body, which keeps its purpose, a local service that never
+  answers, without cutting slow uploads.
 - **Uploads against downloads.** Uploads ran at 41 to 69% of the download rate at round trips of 20
-  to 100 ms on loopback, cause not separated ([Performance](#performance)). Checkpoint 13 measures
-  an upload through the real ingress; if the gap holds there, the demand size or the edge's receive
-  buffer is where to look.
-
-The parking budget is settled: a paused video holds one stream window, so 2 MiB per session and
-16 MiB server-wide stay ([Memory budget](#memory-budget)).
+  to 100 ms on loopback, cause not separated ([Performance](#performance)). If the gap shows through
+  the real ingress too, the demand size or the edge's receive buffer is where to look.
 - **A connection per request to the local service.** Cheap on Linux and macOS. On Windows, thousands
   of short connections can run out of ephemeral ports in `TIME_WAIT`. A pool is the fix if a tester
   hits it.
 - **A separate tunnel domain**, and the Public Suffix List (`PROJECT.md` §Open questions). HTTP
   tunnels are what make them real: the first phishing report decides how soon.
 
+The parking budget is settled: a paused video holds one stream window, so 2 MiB per session and
+16 MiB server-wide stay ([Memory budget](#memory-budget)).
+
 ## Exit criteria
 
 Phase 3 is done when all of these hold:
 
-- [ ] From a network other than the laptop's, `curl https://<name>.cloudnativehub.app/` reaches a
+- [x] From a network other than the laptop's, `curl https://<name>.cloudnativehub.app/` reaches a
       local web server through a **native** `jburrow http 3000` on a laptop behind NAT, and `curl`
       accepts the certificate without `-k`. The certificate is the wildcard one from the DNS-01
       `Issuer`.
-- [ ] A browser on that other network loads a real development application through the tunnel,
+- [x] A browser on that other network loads a real development application through the tunnel,
       assets included, and the CLI prints a line per request.
-- [ ] `jburrow http 3000 --subdomain <name>` gets `https://<name>.cloudnativehub.app`; a second
+- [x] `jburrow http 3000 --subdomain <name>` gets `https://<name>.cloudnativehub.app`; a second
       session asking for the same name is refused with `SUBDOMAIN_UNAVAILABLE`; `--subdomain paypal-login`
       is refused with `SUBDOMAIN_FORBIDDEN`.
-- [ ] A 100 MiB download and a 100 MiB upload through the tunnel match their checksums, and neither
+- [x] A 100 MiB download and a 100 MiB upload through the tunnel match their checksums, and neither
       is slower than phase 2's TCP tunnel from the same laptop and network.
-- [ ] With four downloads through the tunnel stalled by their readers, small requests to the same
+- [x] With four downloads through the tunnel stalled by their readers, small requests to the same
       tunnel keep answering, and `jburrow_flow_parked_bytes` shows the stalled bytes parked.
-- [ ] Server-sent events from the local service reach the browser as they are written.
-- [ ] A phase 2 CLI still runs `jburrow tcp 22` against the phase 3 server.
-- [ ] A host under the domain that no tunnel holds gets the `404` page.
-- [ ] The `verify`, `native` and `fuzz` jobs are green on `main`.
-- [ ] `docs/protocol.md` defines the `http` capability with its vectors, and ADR-0011 and ADR-0012
+- [x] Server-sent events from the local service reach the browser as they are written.
+- [x] A phase 2 CLI still runs `jburrow tcp 22` against the phase 3 server.
+- [x] A host under the domain that no tunnel holds gets the `404` page.
+- [x] The `verify`, `native` and `fuzz` jobs are green on `main`.
+- [x] `docs/protocol.md` defines the `http` capability with its vectors, and ADR-0011 and ADR-0012
       are written and indexed.
-- [ ] `git grep` across the repository finds no hostname, IP address, organization or repository
+- [x] `git grep` across the repository finds no hostname, IP address, organization or repository
       name that belongs to the deployment.

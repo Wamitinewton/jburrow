@@ -7,6 +7,7 @@ import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.DrainSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettings;
@@ -19,11 +20,16 @@ import org.springframework.util.unit.DataSize;
 class EdgeConfigurationTest {
 
     private static final PortRange RANGE = new PortRange(21_000, 21_099);
+    private static final JBurrowProperties.Drain DRAIN =
+            new JBurrowProperties.Drain(Duration.ofSeconds(5), Duration.ofSeconds(2));
 
     @Test
     void buildsEdgeSettingsFromTheProperties() {
-        EdgeSettings settings =
-                EdgeConfiguration.edgeSettings(edge("0.0.0.0", List.of("10.42.0.0/16")), http(List.of()), "1.2.3");
+        EdgeSettings settings = EdgeConfiguration.edgeSettings(
+                edge("0.0.0.0", List.of("10.42.0.0/16")),
+                http(List.of()),
+                new JBurrowProperties.Drain(Duration.ofSeconds(4), Duration.ofMillis(1_500)),
+                "1.2.3");
 
         assertThat(settings.bind().getAddress().getHostAddress()).isEqualTo("0.0.0.0");
         assertThat(settings.bind().getPort()).isEqualTo(7080);
@@ -47,7 +53,8 @@ class EdgeConfigurationTest {
                         Duration.ofSeconds(1),
                         16L * 1024 * 1024,
                         2L * 1024 * 1024));
-        assertThat(settings.capabilities()).containsExactly(Capability.HTTP);
+        assertThat(settings.capabilities()).containsExactlyInAnyOrder(Capability.HTTP, Capability.RESUME);
+        assertThat(settings.drain()).isEqualTo(new DrainSettings(Duration.ofSeconds(4), Duration.ofMillis(1_500)));
     }
 
     @Test
@@ -87,7 +94,8 @@ class EdgeConfigurationTest {
     @Test
     void aBindAddressMustBeAnIpLiteral() {
         assertThatIllegalStateException()
-                .isThrownBy(() -> EdgeConfiguration.edgeSettings(edge("localhost", List.of()), http(List.of()), "1"))
+                .isThrownBy(
+                        () -> EdgeConfiguration.edgeSettings(edge("localhost", List.of()), http(List.of()), DRAIN, "1"))
                 .withMessage("Invalid jburrow.edge.bind-address: must be an IP address literal");
     }
 
@@ -114,7 +122,6 @@ class EdgeConfigurationTest {
                 "https",
                 443,
                 reservedNames,
-                Duration.ofSeconds(60),
                 DataSize.ofMegabytes(100),
                 Duration.ofSeconds(60),
                 Duration.ofSeconds(75),

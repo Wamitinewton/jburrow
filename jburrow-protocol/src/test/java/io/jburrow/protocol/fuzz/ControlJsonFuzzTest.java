@@ -5,16 +5,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.code_intelligence.jazzer.junit.FuzzTest;
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.control.ControlMessage;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.ProtocolException;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
 /**
  * Reads arbitrary bytes as every control payload type, the way the codec hands a frame's payload to
- * {@link ControlJson}.
+ * {@link ControlJson}: once knowing every capability, and once knowing none, when the fields a capability introduces
+ * are unknown keys.
  *
  * <p>The property: each read returns a record or throws a session-scoped {@link ProtocolException} with
  * {@code PROTOCOL_ERROR} or {@code VALIDATION_FAILED}, and nothing else. Any record returned writes and reads back to
@@ -33,19 +36,22 @@ class ControlJsonFuzzTest {
 
     @FuzzTest(maxDuration = "2m")
     void read(byte[] payload) {
-        for (Class<? extends ControlMessage> type : PAYLOAD_TYPES) {
-            ControlMessage message = readOrNull(payload, type);
-            if (message != null) {
-                assertThat(JSON.read(JSON.write(message), type))
-                        .as("%s written and read back", type.getSimpleName())
-                        .isEqualTo(message);
+        for (Set<Capability> negotiated : List.of(ProtocolVersion.capabilities(), Set.<Capability>of())) {
+            for (Class<? extends ControlMessage> type : PAYLOAD_TYPES) {
+                ControlMessage message = readOrNull(payload, type, negotiated);
+                if (message != null) {
+                    assertThat(JSON.read(JSON.write(message), type, negotiated))
+                            .as("%s written and read back with %s", type.getSimpleName(), negotiated)
+                            .isEqualTo(message);
+                }
             }
         }
     }
 
-    private static ControlMessage readOrNull(byte[] payload, Class<? extends ControlMessage> type) {
+    private static ControlMessage readOrNull(
+            byte[] payload, Class<? extends ControlMessage> type, Set<Capability> negotiated) {
         try {
-            return JSON.read(payload, type);
+            return JSON.read(payload, type, negotiated);
         } catch (ProtocolException rejected) {
             assertThat(rejected.scope()).isEqualTo(ErrorScope.SESSION);
             assertThat(rejected.code()).isIn(PAYLOAD_ERRORS);

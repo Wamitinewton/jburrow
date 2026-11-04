@@ -24,7 +24,10 @@ import org.junit.jupiter.params.provider.EnumSource;
 import picocli.CommandLine;
 import picocli.CommandLine.ParameterException;
 
-/** Phase 1 ARCHITECTURE.md §The CLI's exit code table, row for row, and phase 2's {@code FLOW_CONTROL_ERROR}. */
+/**
+ * Phase 1 ARCHITECTURE.md §The CLI's exit code table, row for row, phase 2's {@code FLOW_CONTROL_ERROR} and phase 4's
+ * {@code SESSION_REPLACED}.
+ */
 class ExitCodesTest {
 
     @ParameterizedTest(name = "{0} exits {1}")
@@ -35,6 +38,7 @@ class ExitCodesTest {
         "SERVER_SHUTTING_DOWN, 4",
         "HANDSHAKE_TIMEOUT, 4",
         "HEARTBEAT_TIMEOUT, 4",
+        "SESSION_REPLACED, 4",
         "INTERNAL_ERROR, 4",
         "VALIDATION_FAILED, 5",
         "TUNNEL_LIMIT_EXCEEDED, 5",

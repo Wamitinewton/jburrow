@@ -3,6 +3,7 @@ package io.jburrow.protocol.adapter.netty;
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.wire.Capability;
@@ -23,7 +24,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.function.BooleanSupplier;
+import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Turns one binary WebSocket message into a {@link Frame} and back. The only code that reads untrusted bytes as
@@ -34,13 +36,15 @@ import java.util.function.BooleanSupplier;
  * session's and the stream's state, are the session's. The direction rules of §6 are checked with rule 4: a peer that
  * sends a type its role never sends fails here, before any session sees it.
  *
- * <p>What the {@code http} capability introduces (§4.2) is decoded and encoded only while {@code httpEnabled} says the
- * session has it: {@code HEADERS}, the {@code "http"} tunnel kind and the capability's error codes. Without it, each is
- * refused as the draft refuses anything unknown. Which tunnel a stream belongs to, and every ordering rule of an HTTP
- * stream, is the session's, not the codec's.
+ * <p>What a capability introduces (§4.2) is decoded and encoded only while the session has it. Without {@code http},
+ * {@code HEADERS}, the {@code "http"} tunnel kind and the capability's error codes are refused as the draft refuses
+ * anything unknown. Without {@code resume}, {@code SESSION_REPLACED} is refused the same way, {@code REGISTER.resume}
+ * and the reply's {@code resumeToken} are unknown keys, dropped unread, and a {@code GOAWAY} is decoded only as far as
+ * its header, as {@link Frame.Unsupported}, for the session to refuse at step 9. Which tunnel a stream belongs to, and
+ * every ordering rule of a session or an HTTP stream, is the session's, not the codec's.
  *
- * <p>Thread-safe. A codec built without {@code httpEnabled} keeps no state and may be shared by every session of its
- * {@link Role}; one built with it belongs to the session whose capabilities it reads.
+ * <p>Thread-safe. A codec built without capabilities keeps no state and may be shared by every session of its
+ * {@link Role}; one built with them belongs to the session whose capabilities it reads.
  */
 public final class FrameCodec {
 
@@ -57,21 +61,21 @@ public final class FrameCodec {
 
     private final Role localRole;
     private final ControlJson json;
-    private final BooleanSupplier httpEnabled;
+    private final Supplier<Set<Capability>> capabilities;
 
     /** A codec for a session without capabilities. */
     public FrameCodec(Role localRole, ControlJson json) {
-        this(localRole, json, () -> false);
+        this(localRole, json, Set::of);
     }
 
     /**
-     * A codec for one session. {@code httpEnabled} answers whether the session has negotiated {@code http}: false
-     * until the {@code HELLO}s are exchanged, then fixed. It is read on the thread that decodes or encodes.
+     * A codec for one session. {@code capabilities} answers which capabilities the session has negotiated: none until
+     * the {@code HELLO}s are exchanged, then fixed. It is read on the thread that decodes or encodes.
      */
-    public FrameCodec(Role localRole, ControlJson json, BooleanSupplier httpEnabled) {
+    public FrameCodec(Role localRole, ControlJson json, Supplier<Set<Capability>> capabilities) {
         this.localRole = Objects.requireNonNull(localRole, "localRole");
         this.json = Objects.requireNonNull(json, "json");
-        this.httpEnabled = Objects.requireNonNull(httpEnabled, "httpEnabled");
+        this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
     }
 
     public Role localRole() {
@@ -125,6 +129,7 @@ public final class FrameCodec {
                 case Frame.Registered registered -> encodeControl(registered, registered.message(), alloc);
                 case Frame.Open open -> encodeControl(open, open.message(), alloc);
                 case Frame.Headers headers -> encodeControl(headers, headers.head(), alloc);
+                case Frame.GoAway goAway -> encodeControl(goAway, goAway.message(), alloc);
                 case Frame.Error error -> encodeControl(error, error.body(), alloc);
                 case Frame.WindowUpdate update ->
                     header(alloc, update, 0, FrameLimits.WINDOW_UPDATE_PAYLOAD_LENGTH)
@@ -135,7 +140,8 @@ public final class FrameCodec {
                 case Frame.Pong pong ->
                     header(alloc, pong, 0, FrameLimits.PING_PAYLOAD_LENGTH).writeLong(pong.opaque());
                 case Frame.Unsupported unsupported ->
-                    throw new IllegalArgumentException(unsupported.type() + " is not sent in this protocol draft");
+                    throw new IllegalArgumentException(
+                            unsupported.type() + " without its payload is never sent; send Frame.GoAway");
             };
         } catch (RuntimeException | Error e) {
             frame.release();
@@ -181,7 +187,7 @@ public final class FrameCodec {
 
     // Rule 4, the capability half: HEADERS is unknown to a session without http.
     private void requireTypeNegotiated(FrameType type) {
-        if (type == FrameType.HEADERS && !httpEnabled.getAsBoolean()) {
+        if (type == FrameType.HEADERS && !negotiated(Capability.HTTP)) {
             throw protocolError("HEADERS is not allowed in a session without the http capability");
         }
     }
@@ -240,14 +246,17 @@ public final class FrameCodec {
                         : Frame.Close.reset(streamId, readResetCode(message, offset, length));
             case PING -> new Frame.Ping(message.getLong(offset));
             case PONG -> new Frame.Pong(message.getLong(offset));
-            case GOAWAY -> new Frame.Unsupported(streamId, type);
+            case GOAWAY ->
+                negotiated(Capability.RESUME)
+                        ? new Frame.GoAway(readJson(message, offset, length, GoAway.class))
+                        : new Frame.Unsupported(streamId, type);
         };
     }
 
     /** Parses straight from the message's memory; a plain slice shares it without touching the reference count. */
     private <T extends ControlMessage> T readJson(ByteBuf message, int offset, int length, Class<T> type) {
         try (ByteBufInputStream in = new ByteBufInputStream(message.slice(offset, length))) {
-            return json.read(in, type);
+            return json.read(in, type, capabilities.get());
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -312,8 +321,17 @@ public final class FrameCodec {
         Optional<Capability> missing =
                 switch (frame) {
                     case Frame.Headers ignored -> missing(Optional.of(Capability.HTTP));
-                    case Frame.Register register -> missingForKinds(register.message());
-                    case Frame.Registered registered -> missingForKinds(registered.message());
+                    case Frame.GoAway ignored -> missing(Optional.of(Capability.RESUME));
+                    case Frame.Register register ->
+                        missingForKinds(register.message())
+                                .or(() -> register.message().resume() == null
+                                        ? Optional.empty()
+                                        : missing(Optional.of(Capability.RESUME)));
+                    case Frame.Registered registered ->
+                        missingForKinds(registered.message())
+                                .or(() -> registered.message().resumeToken() == null
+                                        ? Optional.empty()
+                                        : missing(Optional.of(Capability.RESUME)));
                     case Frame.Open open -> missingForKinds(open.message());
                     case Frame.Error error -> missing(error.body().code().capability());
                     case Frame.Close close -> close.reset().flatMap(code -> missing(code.capability()));
@@ -351,11 +369,13 @@ public final class FrameCodec {
         return missing(capability).isEmpty();
     }
 
+    private boolean negotiated(Capability capability) {
+        return capabilities.get().contains(capability);
+    }
+
     /** {@code capability} if the session hasn't negotiated it, otherwise empty. */
     private Optional<Capability> missing(Optional<Capability> capability) {
-        return capability.filter(needed -> switch (needed) {
-            case HTTP -> !httpEnabled.getAsBoolean();
-        });
+        return capability.filter(needed -> !negotiated(needed));
     }
 
     private void requireSentByUs(Frame frame) {

@@ -40,7 +40,10 @@ public record JBurrowProperties(
         @Valid @NotNull @DefaultValue Auth auth,
         @Valid @NotNull @DefaultValue Edge edge,
         @Valid @NotNull @DefaultValue Tcp tcp,
-        @Valid @NotNull @DefaultValue Http http) {
+        @Valid @NotNull @DefaultValue Http http,
+        @Valid @NotNull @DefaultValue Session session,
+        @Valid @NotNull @DefaultValue Drain drain,
+        @Valid @NotNull @DefaultValue Lease lease) {
 
     @AssertTrue(message = "jburrow.tcp.port-range must not contain jburrow.edge.port")
     public boolean isTcpPortRangeClearOfTheEdge() {
@@ -280,9 +283,9 @@ public record JBurrowProperties(
      * @param publicPort the port in a tunnel's {@code url}, left out when it is the scheme's default: the port the public
      *     reaches, the ingress's in production
      * @param reservedNames names no tunnel may claim, added to the built-in ones; each follows the subdomain rule
-     * @param nameHold how long a name stays held for its principal after its tunnel ends; {@code 0s} turns holds off
      * @param maxRequestBody the largest request body the edge forwards
-     * @param responseTimeout how long the edge waits for the final response head; below the ingress's read timeout
+     * @param responseTimeout how long the edge waits for the final response head, counted from the end of the request
+     *     body; below the ingress's read timeout
      * @param keepAliveTimeout idle time between exchanges on an edge connection; above the ingress's upstream
      *     keep-alive
      * @param socketBuffer {@code SO_SNDBUF} and {@code SO_RCVBUF} of an edge connection that carries exchanges;
@@ -303,7 +306,6 @@ public record JBurrowProperties(
 
             @Min(1) @Max(65_535) @DefaultValue("443") int publicPort,
             @NotNull @DefaultValue List<String> reservedNames,
-            @NotNull @DefaultValue("60s") Duration nameHold,
             @NotNull @DefaultValue("100MB") DataSize maxRequestBody,
             @NotNull @DefaultValue("60s") Duration responseTimeout,
             @NotNull @DefaultValue("75s") Duration keepAliveTimeout,
@@ -326,11 +328,6 @@ public record JBurrowProperties(
                     || reservedNames.stream()
                             .allMatch(name ->
                                     name != null && SubdomainName.parse(name).isPresent());
-        }
-
-        @AssertTrue(message = "jburrow.http.name-hold must not be negative")
-        public boolean isNameHoldValid() {
-            return nameHold == null || !nameHold.isNegative();
         }
 
         @AssertTrue(message = "jburrow.http.max-request-body must be positive")
@@ -391,6 +388,63 @@ public record JBurrowProperties(
 
         private static boolean isPositive(Duration duration) {
             return !duration.isNegative() && !duration.isZero();
+        }
+    }
+
+    /**
+     * What outlives a session.
+     *
+     * @param resumeWindow how long a session's names and ports stay held for its principal after it ends; {@code 0s}
+     *     turns holds off
+     */
+    public record Session(@NotNull @DefaultValue("120s") Duration resumeWindow) {
+
+        @AssertTrue(message = "jburrow.session.resume-window must not be negative")
+        public boolean isResumeWindowValid() {
+            return resumeWindow == null || !resumeWindow.isNegative();
+        }
+    }
+
+    /**
+     * How the server stops ({@code docs/phase-4-staying-connected/ARCHITECTURE.md} §The drain).
+     *
+     * @param timeout the longest the drain waits for open streams, sent as {@code GOAWAY}'s {@code drainMs}; at most
+     *     10 s, so the whole stop fits the 20-second shutdown phase
+     * @param reconnectSpread each session's {@code reconnectAfterMs} is drawn from 0 to this; at most 60 s
+     */
+    public record Drain(
+            @NotNull @DefaultValue("5s") Duration timeout,
+            @NotNull @DefaultValue("2s") Duration reconnectSpread) {
+
+        static final Duration MAX_TIMEOUT = Duration.ofSeconds(10);
+        static final Duration MAX_RECONNECT_SPREAD = Duration.ofSeconds(60);
+
+        @AssertTrue(message = "jburrow.drain.timeout must be positive and at most 10s")
+        public boolean isTimeoutValid() {
+            return timeout == null
+                    || (!timeout.isNegative() && !timeout.isZero() && timeout.compareTo(MAX_TIMEOUT) <= 0);
+        }
+
+        @AssertTrue(message = "jburrow.drain.reconnect-spread must be from 0s to 60s")
+        public boolean isReconnectSpreadValid() {
+            return reconnectSpread == null
+                    || (!reconnectSpread.isNegative() && reconnectSpread.compareTo(MAX_RECONNECT_SPREAD) <= 0);
+        }
+    }
+
+    /**
+     * How this process writes its claims down for the next one.
+     *
+     * @param refresh the longest gap between lease writes while there are leases to keep; 5 s to 5 min
+     */
+    public record Lease(@NotNull @DefaultValue("30s") Duration refresh) {
+
+        static final Duration MIN_REFRESH = Duration.ofSeconds(5);
+        static final Duration MAX_REFRESH = Duration.ofMinutes(5);
+
+        @AssertTrue(message = "jburrow.lease.refresh must be between 5s and 5m")
+        public boolean isRefreshValid() {
+            return refresh == null || (refresh.compareTo(MIN_REFRESH) >= 0 && refresh.compareTo(MAX_REFRESH) <= 0);
         }
     }
 

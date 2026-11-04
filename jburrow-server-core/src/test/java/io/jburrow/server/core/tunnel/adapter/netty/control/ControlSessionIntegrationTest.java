@@ -23,7 +23,7 @@ import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
-import io.jburrow.server.core.portpool.domain.PortPool;
+import io.jburrow.server.core.portpool.application.port.PortPoolSnapshot;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
@@ -50,7 +50,6 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -99,12 +98,8 @@ class ControlSessionIntegrationTest {
             .with(CAROL_TOKEN, "carol");
     private final SlowVerifier verifier = new SlowVerifier(tokens);
     private final SessionAdmission admission = new SessionAdmission(16, 8, 3);
-    private final PortReservationService ports = new PortReservationService(new PortPool(
-            PortRange.parse(FIRST_PORT + "-" + (FIRST_PORT + POOL_SIZE - 1)),
-            Duration.ofSeconds(60),
-            Duration.ofMinutes(10),
-            new Random(1),
-            InstantSource.system()));
+    private final PortReservationService<Principal> ports =
+            RegistrationFixtures.ports(PortRange.parse(FIRST_PORT + "-" + (FIRST_PORT + POOL_SIZE - 1)), new Random(1));
     private final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
     private final ExecutorService blocking = Executors.newVirtualThreadPerTaskExecutor();
     private final SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
@@ -384,6 +379,22 @@ class ControlSessionIntegrationTest {
     }
 
     @Test
+    void anEndedSessionsPortIsHeldForItsPrincipalOnly() {
+        start();
+        ScriptedPeer first = established(connect(), tcp("default", FIRST_PORT));
+
+        first.close();
+        awaitTrue(() -> ports.snapshot().reserved() == 0 && ports.snapshot().held() == 1);
+
+        ScriptedPeer other = helloed(connect());
+        other.send(register(CAROL_TOKEN, tcp("ssh", FIRST_PORT)));
+        assertThat(other.expectError(ErrorCode.PORT_UNAVAILABLE, TIMEOUT).ref()).isEqualTo("ssh");
+        established(connect(), tcp("default", FIRST_PORT));
+        assertThat(ports.snapshot().held()).isZero();
+        assertThat(ports.snapshot().reserved()).isOne();
+    }
+
+    @Test
     void aSessionsTunnelsAreFindableUntilItEnds() {
         startWithHttp();
         ScriptedPeer peer = httpHelloed(connect());
@@ -463,7 +474,7 @@ class ControlSessionIntegrationTest {
 
         peer.expectError(ErrorCode.HANDSHAKE_TIMEOUT, TIMEOUT);
         awaitTrue(() -> verifier.calls() == 1 && verifier.inFlight() == 0);
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE);
+        awaitTrue(this::portsReleased);
         awaitTrue(() -> admission.activeSessions() == 0);
     }
 
@@ -479,7 +490,7 @@ class ControlSessionIntegrationTest {
 
         awaitTrue(() -> sessions.registry().active() == 0);
         awaitTrue(() -> verifier.calls() == 1 && verifier.inFlight() == 0);
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE);
+        awaitTrue(this::portsReleased);
         assertThat(admission.activeSessions()).isZero();
         assertThat(admission.sessionsOf(new Principal(PRINCIPAL))).isZero();
         assertThat(listeners.binds()).isZero();
@@ -497,7 +508,7 @@ class ControlSessionIntegrationTest {
         assertThat(elapsedSince(started)).isBetween(PING_INTERVAL.minusMillis(200), PING_INTERVAL.plusMillis(700));
         peer.expectError(ErrorCode.HEARTBEAT_TIMEOUT, TIMEOUT);
         assertThat(elapsedSince(started)).isBetween(IDLE_TIMEOUT.minusMillis(200), IDLE_TIMEOUT.plusSeconds(1));
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE);
+        awaitTrue(this::portsReleased);
     }
 
     @Test
@@ -552,12 +563,12 @@ class ControlSessionIntegrationTest {
         peer.close();
 
         awaitTrue(() -> metrics.events().contains("sessionEnded CLIENT_CLOSED"));
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE && admission.activeSessions() == 0);
+        awaitTrue(() -> portsReleased() && admission.activeSessions() == 0);
         assertThat(listeners.unbinds()).isOne();
     }
 
     @Test
-    void aFailedBindRefusesTheRegistrationAndGivesThePortBack() {
+    void aFailedBindRefusesTheRegistrationAndReleasesThePort() {
         listeners.failBindsWith(ProtocolException.session(ErrorCode.PORT_UNAVAILABLE, "Port in use.")
                 .forTunnel("default"));
         start();
@@ -566,7 +577,7 @@ class ControlSessionIntegrationTest {
         peer.send(register(TOKEN, tcp("default", null)));
 
         assertThat(peer.expectError(ErrorCode.PORT_UNAVAILABLE, TIMEOUT).ref()).isEqualTo("default");
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE);
+        awaitTrue(this::portsReleased);
     }
 
     @Test
@@ -578,7 +589,7 @@ class ControlSessionIntegrationTest {
 
         assertThat(peer.expect(Frame.Error.class, TIMEOUT).body().code()).isEqualTo(ErrorCode.INTERNAL_ERROR);
         assertThat(peer.expectClosed(TIMEOUT)).isEqualTo(WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE && admission.activeSessions() == 0);
+        awaitTrue(() -> portsReleased() && admission.activeSessions() == 0);
     }
 
     @Test
@@ -595,12 +606,13 @@ class ControlSessionIntegrationTest {
             assertThat(peer.expect(Frame.Error.class, TIMEOUT).body().code()).isEqualTo(ErrorCode.SERVER_SHUTTING_DOWN);
             assertThat(peer.expectClosed(TIMEOUT)).isEqualTo(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE);
         }
-        awaitTrue(() -> ports.snapshot().free() == POOL_SIZE);
+        awaitTrue(this::portsReleased);
         assertThat(admission.activeSessions()).isZero();
         assertThat(admission.handshaking()).isZero();
         assertThat(sessions.registry().active()).isZero();
         assertThat(metrics.events().stream().filter("sessionEnded SERVER_SHUTTING_DOWN"::equals))
                 .hasSize(3);
+        assertThat(ports.snapshot().held()).isEqualTo(3);
     }
 
     @Test
@@ -733,6 +745,12 @@ class ControlSessionIntegrationTest {
 
     private static Duration elapsedSince(long startedNanos) {
         return Duration.ofNanos(System.nanoTime() - startedNanos);
+    }
+
+    /** No port is reserved: each one a session took is free, or held for its principal. */
+    private boolean portsReleased() {
+        PortPoolSnapshot snapshot = ports.snapshot();
+        return snapshot.reserved() == 0 && snapshot.free() + snapshot.held() == POOL_SIZE;
     }
 
     private static void awaitTrue(BooleanSupplier condition) {

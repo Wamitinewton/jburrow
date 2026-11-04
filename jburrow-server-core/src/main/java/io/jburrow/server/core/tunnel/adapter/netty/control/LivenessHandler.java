@@ -43,6 +43,7 @@ public final class LivenessHandler extends ChannelInboundHandlerAdapter {
     private long nextPingOpaque = 1;
     private boolean pingOutstanding;
     private boolean stopped;
+    private long lastReceivedNanos;
 
     LivenessHandler(
             SessionContext session,
@@ -55,6 +56,12 @@ public final class LivenessHandler extends ChannelInboundHandlerAdapter {
         this.pingIntervalNanos = pingInterval.toNanos();
         this.idleTimeoutNanos = idleTimeout.toNanos();
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        this.lastReceivedNanos = nanoTime.getAsLong();
+    }
+
+    /** How long since the client's last frame, or since the session began if it has sent none. */
+    Duration silence() {
+        return Duration.ofNanos(nanoTime.getAsLong() - lastReceivedNanos);
     }
 
     @Override
@@ -75,6 +82,9 @@ public final class LivenessHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        if (msg instanceof Frame) {
+            lastReceivedNanos = nanoTime.getAsLong();
+        }
         if (liveness == null || !(msg instanceof Frame frame) || isClosing()) {
             ctx.fireChannelRead(msg);
             return;

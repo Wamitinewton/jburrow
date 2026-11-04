@@ -143,6 +143,7 @@ class ConformanceVectorsTest {
             case Frame.Registered registered -> node.set("payload", payload(registered.message()));
             case Frame.Open open -> node.set("payload", payload(open.message()));
             case Frame.Headers headers -> node.set("payload", payload(headers.head()));
+            case Frame.GoAway goAway -> node.set("payload", payload(goAway.message()));
             case Frame.Error error -> node.set("payload", payload(error.body()));
             case Frame.Data data -> node.put("payloadHex", ByteBufUtil.hexDump(data.payload()));
             case Frame.WindowUpdate update -> node.put("increment", update.increment());
@@ -176,15 +177,21 @@ class ConformanceVectorsTest {
     }
 
     private static FrameCodec receiver(JsonNode vector) {
-        return new FrameCodec(role(vector), JSON, () -> http(vector));
+        Set<Capability> capabilities = capabilities(vector);
+        return new FrameCodec(role(vector), JSON, () -> capabilities);
     }
 
     private static FrameCodec sender(JsonNode vector) {
-        return new FrameCodec(role(vector) == Role.SERVER ? Role.CLIENT : Role.SERVER, JSON, () -> http(vector));
+        Set<Capability> capabilities = capabilities(vector);
+        return new FrameCodec(role(vector) == Role.SERVER ? Role.CLIENT : Role.SERVER, JSON, () -> capabilities);
     }
 
-    private static boolean http(JsonNode vector) {
-        return ConformanceVectors.capabilities(vector).contains(Capability.HTTP.wireName());
+    private static Set<Capability> capabilities(JsonNode vector) {
+        Set<Capability> capabilities = EnumSet.noneOf(Capability.class);
+        for (String name : ConformanceVectors.capabilities(vector)) {
+            capabilities.add(Capability.fromWireName(name).orElseThrow());
+        }
+        return Set.copyOf(capabilities);
     }
 
     private static Role role(JsonNode vector) {

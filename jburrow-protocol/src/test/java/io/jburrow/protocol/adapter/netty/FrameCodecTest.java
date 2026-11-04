@@ -13,6 +13,7 @@ import io.jburrow.protocol.adapter.netty.FrameCodec.Role;
 import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.HttpRequestHead;
@@ -22,18 +23,21 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameFlags;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.protocol.wire.ProtocolException;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.protocol.wire.StreamIds;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -43,7 +47,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -59,8 +63,11 @@ class FrameCodecTest {
     private static final ControlJson JSON = ControlJson.create();
     private static final FrameCodec SERVER_CODEC = new FrameCodec(SERVER, JSON);
     private static final FrameCodec CLIENT_CODEC = new FrameCodec(CLIENT, JSON);
-    private static final FrameCodec SERVER_WITH_HTTP = new FrameCodec(SERVER, JSON, () -> true);
-    private static final FrameCodec CLIENT_WITH_HTTP = new FrameCodec(CLIENT, JSON, () -> true);
+    private static final FrameCodec SERVER_WITH_HTTP = new FrameCodec(SERVER, JSON, () -> Set.of(Capability.HTTP));
+    private static final FrameCodec CLIENT_WITH_HTTP = new FrameCodec(CLIENT, JSON, () -> Set.of(Capability.HTTP));
+    private static final FrameCodec SERVER_WITH_ALL = new FrameCodec(SERVER, JSON, ProtocolVersion::capabilities);
+    private static final FrameCodec CLIENT_WITH_ALL = new FrameCodec(CLIENT, JSON, ProtocolVersion::capabilities);
+    private static final ResumeToken RESUME_TOKEN = new ResumeToken("jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
 
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
     private static final String TOKEN = "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00";
@@ -121,19 +128,33 @@ class FrameCodecTest {
                 sent(CLIENT, () -> Frame.Close.reset(2, ErrorCode.LOCAL_SERVICE_ERROR)),
                 sent(
                         SERVER,
-                        () -> new Frame.Error(
-                                new ErrorBody(ErrorCode.SUBDOMAIN_FORBIDDEN, "Not allowed.", "default"))));
+                        () -> new Frame.Error(new ErrorBody(ErrorCode.SUBDOMAIN_FORBIDDEN, "Not allowed.", "default"))),
+                sent(SERVER, () -> new Frame.GoAway(new GoAway(830, 5_000))),
+                sent(
+                        CLIENT,
+                        () -> new Frame.Register(new Register(
+                                TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417)), RESUME_TOKEN))),
+                sent(
+                        SERVER,
+                        () -> new Frame.Registered(new Registered(
+                                List.of(RegisteredTunnel.of(
+                                        "default", TUNNEL_ID, TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                                RESUME_TOKEN))),
+                sent(
+                        SERVER,
+                        () -> new Frame.Error(new ErrorBody(
+                                ErrorCode.SESSION_REPLACED, "A newer session replaced this one.", null))));
     }
 
     @Test
-    void samplesCoverEveryFrameTypeExceptTheUnsupportedOne() {
+    void samplesCoverEveryFrameType() {
         Set<FrameType> covered = sentFrames()
                 .map(arguments -> sample(arguments).get())
                 .peek(Frame::release)
                 .map(Frame::type)
                 .collect(Collectors.toCollection(() -> EnumSet.noneOf(FrameType.class)));
 
-        assertThat(covered).isEqualTo(EnumSet.complementOf(EnumSet.of(FrameType.GOAWAY)));
+        assertThat(covered).isEqualTo(EnumSet.allOf(FrameType.class));
     }
 
     @ParameterizedTest(name = "{0} {1}")
@@ -287,6 +308,108 @@ class FrameCodecTest {
                 .isThrownBy(() -> SERVER_CODEC.encode(new Frame.Unsupported(0, FrameType.GOAWAY), ALLOC));
     }
 
+    // The resume capability.
+
+    @Test
+    void aClientWithoutResumeDecodesGoAwayOnlyAsFarAsItsHeader() {
+        ByteBuf message = message(0, FrameType.GOAWAY, 0, JSON.write(new GoAway(830, 5_000)));
+
+        Frame frame = CLIENT_WITH_HTTP.decode(message);
+
+        assertThat(frame).isEqualTo(new Frame.Unsupported(0, FrameType.GOAWAY));
+        message.release();
+    }
+
+    @Test
+    void aClientWithResumeParsesGoAway() {
+        ByteBuf message = message(0, FrameType.GOAWAY, 0, JSON.write(new GoAway(830, 5_000)));
+
+        assertThat(CLIENT_WITH_ALL.decode(message)).isEqualTo(new Frame.GoAway(new GoAway(830, 5_000)));
+        message.release();
+    }
+
+    @Test
+    void aClientWithResumeHoldsGoAwayToItsFieldRules() {
+        ByteBuf empty = message(0, FrameType.GOAWAY, 0, new byte[0]);
+        ByteBuf tooLate =
+                message(0, FrameType.GOAWAY, 0, "{\"reconnectAfterMs\":60001,\"drainMs\":0}".getBytes(US_ASCII));
+
+        assertThat(catchThrowableOfType(ProtocolException.class, () -> CLIENT_WITH_ALL.decode(empty))
+                        .code())
+                .isEqualTo(ErrorCode.PROTOCOL_ERROR);
+        assertThat(catchThrowableOfType(ProtocolException.class, () -> CLIENT_WITH_ALL.decode(tooLate)))
+                .returns(ErrorCode.VALIDATION_FAILED, ProtocolException::code)
+                .hasMessage("reconnectAfterMs must be between 0 and 60000");
+        empty.release();
+        tooLate.release();
+    }
+
+    @Test
+    void aServerNeverReceivesGoAwayEvenWithResume() {
+        ByteBuf message = message(0, FrameType.GOAWAY, 0, JSON.write(new GoAway(830, 5_000)));
+
+        assertThat(catchThrowableOfType(ProtocolException.class, () -> SERVER_WITH_ALL.decode(message))
+                        .code())
+                .isEqualTo(ErrorCode.PROTOCOL_ERROR);
+        message.release();
+    }
+
+    @Test
+    void withoutResumeTheTokensAreDroppedUnread() {
+        Register withToken =
+                new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417)), RESUME_TOKEN);
+        Registered replyWithToken = new Registered(
+                List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                RESUME_TOKEN);
+        ByteBuf request = CLIENT_WITH_ALL.encode(new Frame.Register(withToken), ALLOC);
+        ByteBuf reply = SERVER_WITH_ALL.encode(new Frame.Registered(replyWithToken), ALLOC);
+
+        Frame.Register decodedRequest = (Frame.Register) SERVER_WITH_HTTP.decode(request);
+        Frame.Registered decodedReply = (Frame.Registered) CLIENT_WITH_HTTP.decode(reply);
+
+        assertThat(decodedRequest.message().resume()).isNull();
+        assertThat(decodedRequest.message().tunnels()).isEqualTo(withToken.tunnels());
+        assertThat(decodedReply.message().resumeToken()).isNull();
+        assertThat(decodedReply.message().tunnels()).isEqualTo(replyWithToken.tunnels());
+        request.release();
+        reply.release();
+    }
+
+    @Test
+    void withoutResumeSessionReplacedIsAnUnknownCode() {
+        ByteBuf message =
+                message(0, FrameType.ERROR, 0, "{\"code\":\"SESSION_REPLACED\",\"message\":\"x\"}".getBytes(US_ASCII));
+
+        assertThat(catchThrowableOfType(ProtocolException.class, () -> CLIENT_WITH_HTTP.decode(message)))
+                .returns(ErrorCode.VALIDATION_FAILED, ProtocolException::code)
+                .hasMessage("code must be a known error code");
+        message.release();
+    }
+
+    @Test
+    void refusesToEncodeWhatResumeIntroducesWithoutIt() {
+        Frame goAway = new Frame.GoAway(new GoAway(830, 5_000));
+        Frame register = new Frame.Register(
+                new Register(TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, null)), RESUME_TOKEN));
+        Frame registered = new Frame.Registered(new Registered(
+                List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                RESUME_TOKEN));
+        Frame replaced = Frame.Error.of(ErrorCode.SESSION_REPLACED, "Replaced.");
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> SERVER_WITH_HTTP.encode(goAway, ALLOC))
+                .withMessageContaining("resume");
+        assertThatIllegalArgumentException().isThrownBy(() -> CLIENT_WITH_HTTP.encode(register, ALLOC));
+        assertThatIllegalArgumentException().isThrownBy(() -> SERVER_WITH_HTTP.encode(registered, ALLOC));
+        assertThatIllegalArgumentException().isThrownBy(() -> SERVER_WITH_HTTP.encode(replaced, ALLOC));
+    }
+
+    @Test
+    void aClientNeverSendsGoAway() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> CLIENT_WITH_ALL.encode(new Frame.GoAway(new GoAway(0, 0)), ALLOC));
+    }
+
     @Test
     void aServerWithoutHttpRefusesHeadersAtTheTypeCheck() {
         ByteBuf message = message(1, FrameType.HEADERS, 0, new byte[FrameLimits.MAX_CONTROL_PAYLOAD + 1]);
@@ -334,8 +457,8 @@ class FrameCodecTest {
 
     @Test
     void theCapabilityIsReadForEachFrame() {
-        AtomicBoolean http = new AtomicBoolean();
-        FrameCodec server = new FrameCodec(SERVER, JSON, http::get);
+        AtomicReference<Set<Capability>> capabilities = new AtomicReference<>(Set.of());
+        FrameCodec server = new FrameCodec(SERVER, JSON, capabilities::get);
         byte[] head = JSON.write(OK);
 
         ByteBuf before = message(1, FrameType.HEADERS, 0, head);
@@ -343,7 +466,7 @@ class FrameCodecTest {
                 .isNotNull();
         before.release();
 
-        http.set(true);
+        capabilities.set(Set.of(Capability.HTTP));
         ByteBuf after = message(1, FrameType.HEADERS, 0, head);
         assertThat(server.decode(after)).isInstanceOf(Frame.Headers.class);
         after.release();
@@ -501,8 +624,9 @@ class FrameCodecTest {
     }
 
     /** The sample frames include HTTP ones, so they round-trip in a session with {@code http}. */
+    /** A codec of a session with every capability, which every sample needs one of. */
     private static FrameCodec codec(Role role) {
-        return codec(role, true);
+        return role == SERVER ? SERVER_WITH_ALL : CLIENT_WITH_ALL;
     }
 
     private static FrameCodec codec(Role role, boolean http) {

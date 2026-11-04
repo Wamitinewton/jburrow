@@ -44,7 +44,8 @@ class JBurrowArchitectureTest {
                 arguments("FEATURES_TALK_VIA_PORTS", JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS),
                 arguments("NO_FEATURE_CYCLES", JBurrowArchitectureRules.NO_FEATURE_CYCLES),
                 arguments("NO_SPRING_IN_CORE_LAYERS", JBurrowArchitectureRules.NO_SPRING_IN_CORE_LAYERS),
-                arguments("SERVER_NEVER_SEES_CLIENT", JBurrowArchitectureRules.SERVER_NEVER_SEES_CLIENT));
+                arguments("SERVER_NEVER_SEES_CLIENT", JBurrowArchitectureRules.SERVER_NEVER_SEES_CLIENT),
+                arguments("TUNNEL_NEVER_SEES_LEASES", JBurrowArchitectureRules.TUNNEL_NEVER_SEES_LEASES));
     }
 
     static Stream<Arguments> violations() {
@@ -71,6 +72,10 @@ class JBurrowArchitectureTest {
                         "FEATURES_TALK_VIA_PORTS",
                         JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS,
                         "routing.intodomain"),
+                arguments(
+                        "FEATURES_TALK_VIA_PORTS",
+                        JBurrowArchitectureRules.FEATURES_TALK_VIA_PORTS,
+                        "lease.intotunnel"),
                 arguments("NO_FEATURE_CYCLES", JBurrowArchitectureRules.NO_FEATURE_CYCLES, "cycle"),
                 arguments(
                         "NO_SPRING_IN_CORE_LAYERS",
@@ -88,7 +93,11 @@ class JBurrowArchitectureTest {
                         "NO_SPRING_IN_CORE_LAYERS",
                         JBurrowArchitectureRules.NO_SPRING_IN_CORE_LAYERS,
                         "springincore.autowired"),
-                arguments("SERVER_NEVER_SEES_CLIENT", JBurrowArchitectureRules.SERVER_NEVER_SEES_CLIENT, "seesclient"));
+                arguments("SERVER_NEVER_SEES_CLIENT", JBurrowArchitectureRules.SERVER_NEVER_SEES_CLIENT, "seesclient"),
+                arguments(
+                        "TUNNEL_NEVER_SEES_LEASES",
+                        JBurrowArchitectureRules.TUNNEL_NEVER_SEES_LEASES,
+                        "lease.fromtunnel"));
     }
 
     @ParameterizedTest(name = "{0} holds for the server and protocol modules")

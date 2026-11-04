@@ -28,6 +28,10 @@ spring:
     properties:
       hibernate:
         default_schema: jburrow
+        # A lease write inserts one row per claim; batching sends them in a few statements.
+        jdbc:
+          batch_size: 64
+        order_inserts: true
 
 server:
   port: 7090

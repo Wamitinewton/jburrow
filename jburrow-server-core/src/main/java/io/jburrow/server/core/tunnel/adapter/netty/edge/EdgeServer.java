@@ -35,6 +35,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,11 +51,25 @@ public final class EdgeServer {
 
     private static final Logger log = LoggerFactory.getLogger(EdgeServer.class);
 
-    private static final int BACKLOG = 1_024;
-    /** How long connections still open after the listener closes get to finish, before they are closed. */
-    private static final Duration DRAIN_TIMEOUT = Duration.ofSeconds(5);
+    /**
+     * How long connections still open once every session was told to end get to close, before they are closed: a
+     * client's time to complete the close, as the session closer gives it.
+     */
+    public static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(2);
+
+    /**
+     * How long sessions whose connections were closed at the end of {@link #CLOSE_TIMEOUT} get to give back their names
+     * and ports: their listeners only have to close.
+     */
+    public static final Duration RELEASE_GRACE = Duration.ofMillis(500);
+
     /** How long the event loop groups get to finish their queued work; there is no quiet period. */
-    private static final Duration GROUP_SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
+    public static final Duration GROUP_SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
+
+    private static final int BACKLOG = 1_024;
+
+    /** The streams cut, while the sessions haven't all given back what they took. */
+    private static final int UNKNOWN = -1;
 
     private final EdgeSettings settings;
     private final EngineDependencies deps;
@@ -67,6 +82,7 @@ public final class EdgeServer {
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private volatile Channel serverChannel;
+    private CompletableFuture<Void> drained;
     private CompletableFuture<Void> stopped;
 
     /** The event loop and server channel types of one transport. */
@@ -123,7 +139,7 @@ public final class EdgeServer {
      * @throws IllegalStateException if the bind fails, or the server was stopped
      */
     public synchronized void start() {
-        if (stopped != null) {
+        if (drained != null || stopped != null) {
             throw new IllegalStateException("The edge was stopped and can't be started again");
         }
         if (serverChannel != null) {
@@ -153,12 +169,14 @@ public final class EdgeServer {
         }
         serverChannel = bind.channel();
         log.info(
-                "edge listening on {}:{} ({}, {} io threads), connect host {}",
+                "edge listening on {}:{} ({}, {} io threads), connect host {}, drain {} ms, reconnect spread {} ms",
                 address(settings.bind()),
                 boundPort(),
                 transport.name(),
                 settings.ioThreads(),
-                settings.connectHost());
+                settings.connectHost(),
+                settings.drain().timeout().toMillis(),
+                settings.drain().reconnectSpread().toMillis());
     }
 
     private EdgeChannelInitializer channelInitializer() {
@@ -219,36 +237,85 @@ public final class EdgeServer {
     }
 
     /**
-     * Stops the edge, steps 1 to 4 of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Lifecycle and shutdown: close
-     * the listener, end every session with {@code SERVER_SHUTTING_DOWN}, give open connections up to 5 seconds to
-     * close, close the rest, then shut down the event loops.
-     * Never blocks. Calling it again returns the same future.
+     * Drains the edge, steps 2 to 7 of {@code docs/phase-4-staying-connected/ARCHITECTURE.md} §The drain: close the
+     * listener, drain every session for up to {@code jburrow.drain.timeout}, end every session with
+     * {@code SERVER_SHUTTING_DOWN}, give them {@link #CLOSE_TIMEOUT} to close and give back what they took, then close
+     * every connection still open, visitors' included, giving sessions cut off that way {@link #RELEASE_GRACE}. Logs one line when it is over. The event loops
+     * keep running, for {@link #stop}. Never blocks. Calling it again returns the same future.
+     *
+     * @return completes, never exceptionally, once every session has given back what it took, its names and ports on
+     *     hold, or once the waits above have passed
+     */
+    public CompletableFuture<Void> drain() {
+        Channel channel;
+        synchronized (this) {
+            if (drained != null) {
+                return drained;
+            }
+            drained = new CompletableFuture<>();
+            channel = serverChannel;
+            if (channel == null) {
+                drained.complete(null);
+                return drained;
+            }
+        }
+        beginShutdown();
+        long startedNanos = System.nanoTime();
+        Duration timeout = settings.drain().timeout();
+        CompletableFuture<Void> result = drained;
+        completion(channel.closeFuture())
+                .thenCompose(closed ->
+                        guarded("drain the sessions", () -> sessions.drain(timeout), SessionInitializer.Drained.NONE))
+                .thenCompose(started -> {
+                    CompletableFuture<Integer> ended = guarded("end the sessions", sessions::end, UNKNOWN);
+                    return within(ended, CLOSE_TIMEOUT)
+                            .thenCompose(cut -> completion(connections.close())
+                                    .thenCompose(rest -> cut != UNKNOWN
+                                            ? CompletableFuture.completedFuture(cut)
+                                            : within(ended, RELEASE_GRACE)))
+                            .thenAccept(cut -> log.info(
+                                    "drain: sessions={} streams={} cut={} ms={}",
+                                    started.sessions(),
+                                    started.openStreams(),
+                                    cut == UNKNOWN ? "unknown" : cut,
+                                    Duration.ofNanos(System.nanoTime() - startedNanos)
+                                            .toMillis()));
+                })
+                .whenComplete((done, failure) -> {
+                    if (failure != null) {
+                        log.error("The drain failed; the event loops close what is left", failure);
+                    }
+                    result.complete(null);
+                });
+        return result;
+    }
+
+    /** {@code step}'s result, or {@link #UNKNOWN} once {@code timeout} has passed; {@code step} itself is untouched. */
+    private static CompletableFuture<Integer> within(CompletableFuture<Integer> step, Duration timeout) {
+        return step.copy().completeOnTimeout(UNKNOWN, timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    /**
+     * Stops the edge: {@link #drain} if it hasn't been, then step 9, shutting down the event loops. Never blocks.
+     * Calling it again returns the same future.
      *
      * @return completes when the event loops have terminated, or exceptionally after {@code timeout}
      */
     public CompletableFuture<Void> stop(Duration timeout) {
         Objects.requireNonNull(timeout, "timeout");
-        Channel channel;
         synchronized (this) {
             if (stopped != null) {
                 return stopped;
             }
             stopped = new CompletableFuture<>();
-            channel = serverChannel;
-            if (channel == null) {
+            if (serverChannel == null) {
                 stopped.complete(null);
                 return stopped;
             }
         }
-        beginShutdown();
         long startedNanos = System.nanoTime();
         CompletableFuture<Void> result = stopped;
-        completion(channel.closeFuture())
-                .thenRun(this::endSessions)
-                .thenCompose(closed -> completion(connections.newCloseFuture())
-                        .completeOnTimeout(null, DRAIN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
-                .thenCompose(drained -> completion(connections.close()))
-                .thenCompose(closed -> CompletableFuture.allOf(shutDown(bossGroup), shutDown(workerGroup)))
+        drain().thenCompose(done -> CompletableFuture.allOf(shutDown(bossGroup), shutDown(workerGroup)))
                 .whenComplete((done, failure) -> {
                     if (failure != null) {
                         result.completeExceptionally(failure);
@@ -263,12 +330,19 @@ public final class EdgeServer {
         return result.orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    /** A failure to end the sessions must not stop the rest of the shutdown, which closes them anyway. */
-    private void endSessions() {
+    /**
+     * A failure to drain or end the sessions must not stop the rest of the shutdown, which closes their connections
+     * anyway.
+     */
+    private static <T> CompletableFuture<T> guarded(String what, Supplier<CompletableFuture<T>> step, T otherwise) {
         try {
-            sessions.shutDown();
+            return step.get().exceptionally(failure -> {
+                log.error("Could not {}; their connections will be closed", what, failure);
+                return otherwise;
+            });
         } catch (RuntimeException e) {
-            log.error("Could not end the sessions for shutdown; their connections will be closed", e);
+            log.error("Could not {}; their connections will be closed", what, e);
+            return CompletableFuture.completedFuture(otherwise);
         }
     }
 

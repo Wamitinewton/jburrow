@@ -50,6 +50,7 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
                     Close,
                     Ping,
                     Pong,
+                    GoAway,
                     Error,
                     Unsupported {
 
@@ -329,6 +330,24 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
         }
     }
 
+    /** {@code GOAWAY}, server to client, in a session with {@code resume}: the server is draining. */
+    record GoAway(io.jburrow.protocol.control.GoAway message) implements NoBuffer {
+
+        public GoAway {
+            Objects.requireNonNull(message, "message");
+        }
+
+        @Override
+        public int streamId() {
+            return StreamIds.CONTROL;
+        }
+
+        @Override
+        public FrameType type() {
+            return FrameType.GOAWAY;
+        }
+    }
+
     /** {@code ERROR}: a session error. The sender closes the connection right after it. */
     record Error(ErrorBody body) implements NoBuffer {
 
@@ -352,8 +371,9 @@ public sealed interface Frame extends ReferenceCounted permits Frame.Data, Frame
     }
 
     /**
-     * A {@code GOAWAY} frame, decoded only as far as its header: its payload belongs to phase 4. No peer of
-     * {@code jburrow.v1-draft.2} may send it, so a session treats this as {@code PROTOCOL_ERROR}. It is never encoded.
+     * A {@code GOAWAY} frame in a session without {@code resume}, decoded only as far as its header: without the
+     * capability its payload means nothing, and the session treats the frame as {@code PROTOCOL_ERROR} at step 9 of
+     * §13. It is never encoded.
      */
     record Unsupported(int streamId, FrameType type) implements NoBuffer {
 

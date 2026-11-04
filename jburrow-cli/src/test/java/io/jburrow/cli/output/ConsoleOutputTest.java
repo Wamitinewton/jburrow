@@ -15,6 +15,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -29,6 +30,19 @@ class ConsoleOutputTest {
 
     private static final RegisteredTunnel TUNNEL =
             RegisteredTunnel.of("default", UUID.randomUUID(), TunnelKind.TCP, "tcp.cloudnativehub.app", 20_417);
+    private static final RegisteredTunnel OTTER =
+            RegisteredTunnel.http("default", UUID.randomUUID(), "https", "quiet-otter-4f2a.example.dev", 443);
+    private static final RegisteredTunnel HERON =
+            RegisteredTunnel.http("default", UUID.randomUUID(), "https", "brave-heron-91c0.example.dev", 443);
+    /** What the client says for each kind of failed attempt and lost session. */
+    private static final String REFUSED_TEXT =
+            "Couldn't connect to the server: Connection refused: localhost/127.0.0.1:7080";
+
+    private static final String REFUSED = REFUSED_TEXT + ".";
+
+    private static final String NO_CODE_503 = "The upgrade was refused with HTTP 503 Service Unavailable and no"
+            + " JBurrow error code; something between this client and the server may have answered.";
+    private static final String DROPPED = "The connection to the server was lost.";
 
     private final StringWriter out = new StringWriter();
     private final StringWriter err = new StringWriter();
@@ -39,7 +53,8 @@ class ConsoleOutputTest {
             new PrintWriter(err),
             clock,
             "0.2.0",
-            List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))));
+            List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))),
+            true);
     private final ConsoleOutput httpOutput = http(TunnelSpec.http("default", LocalTarget.of("localhost", 3000)));
 
     @ParameterizedTest(name = "{0} bytes is {1}")
@@ -148,12 +163,28 @@ class ConsoleOutputTest {
     }
 
     @Test
-    void aLostConnectionSaysToRunTheCommandAgain() {
-        output.onClosed(TunnelClosed.connectionLost("The connection to the server was lost."));
+    void aLostConnectionWithoutReconnectSaysHowToGetIt() {
+        ConsoleOutput once = new ConsoleOutput(
+                new PrintWriter(out),
+                new PrintWriter(err),
+                clock,
+                "0.2.0",
+                List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))),
+                false);
+
+        once.onClosed(TunnelClosed.connectionLost("The connection to the server was lost."));
 
         assertThat(err.toString().strip())
                 .isEqualTo("Error CONNECTION_LOST: The connection to the server was lost."
-                        + " Run the command again; automatic reconnect arrives in a later release.");
+                        + " Run the command again, or leave out --no-reconnect to have it reconnect by itself.");
+    }
+
+    @Test
+    void aFirstSessionThatNeverCameUpDuringADeploySaysToRunTheCommandAgain() {
+        output.onStartFailed(refusal(ErrorCode.SERVER_SHUTTING_DOWN, "The server is shutting down."));
+
+        assertThat(err.toString().strip())
+                .isEqualTo("Error SERVER_SHUTTING_DOWN: The server is shutting down. Run the command again.");
     }
 
     @Test
@@ -177,6 +208,128 @@ class ConsoleOutputTest {
         output.onClosed(TunnelClosed.serverError(ErrorCode.INTERNAL_ERROR, "café ☃ done"));
 
         assertThat(err.toString().strip()).isEqualTo("Error INTERNAL_ERROR: caf? ? done.");
+    }
+
+    // Reconnecting.
+
+    @Test
+    void aLostSessionAndItsReconnectAreOneLineEach() {
+        httpOutput.onEstablished("first", List.of(OTTER));
+        out.getBuffer().setLength(0);
+
+        httpOutput.onDisconnected(shuttingDown(), Duration.ofMillis(830));
+        httpOutput.onReconnected("second", List.of(OTTER), true);
+
+        assertThat(out.toString().lines())
+                .containsExactly(
+                        "12:01:07  connection lost: the server is restarting; reconnecting in 0.8 s",
+                        "12:01:07  reconnected   https://quiet-otter-4f2a.example.dev");
+        assertThat(err.toString()).isEmpty();
+    }
+
+    @Test
+    void aRunOfIdenticalFailuresPrintsOnlyItsFirst() {
+        httpOutput.onEstablished("first", List.of(OTTER));
+        out.getBuffer().setLength(0);
+
+        httpOutput.onDisconnected(shuttingDown(), Duration.ofMillis(830));
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(REFUSED), Duration.ofMillis(1_040));
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(REFUSED), Duration.ofMillis(960));
+        httpOutput.onDisconnected(refused503(), Duration.ofMillis(1_000));
+        httpOutput.onDisconnected(refused503(), Duration.ofMillis(1_100));
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(REFUSED), Duration.ofMillis(900));
+        httpOutput.onReconnected("second", List.of(OTTER), true);
+
+        assertThat(out.toString().lines())
+                .containsExactly(
+                        "12:01:07  connection lost: the server is restarting; reconnecting in 0.8 s",
+                        "12:01:07  still reconnecting: the server isn't reachable (" + REFUSED_TEXT
+                                + "); next try in 1.0 s",
+                        "12:01:07  still reconnecting: the server isn't reachable (503); next try in 1.0 s",
+                        "12:01:07  still reconnecting: the server isn't reachable (" + REFUSED_TEXT
+                                + "); next try in 0.9 s",
+                        "12:01:07  reconnected   https://quiet-otter-4f2a.example.dev");
+    }
+
+    @Test
+    void theStatusComesFromTheRefusalNotFromTheWordsOfItsMessage() {
+        output.onEstablished("first", List.of(TUNNEL));
+        output.onDisconnected(TunnelClosed.connectionLost(DROPPED), Duration.ZERO);
+        out.getBuffer().setLength(0);
+
+        output.onDisconnected(TunnelClosed.connectionLost("Proxy said HTTP 502 earlier."), Duration.ofSeconds(1));
+        output.onDisconnected(
+                TunnelClosed.connectionLost("Refused.").withUpgradeStatus(OptionalInt.of(504)), Duration.ofSeconds(1));
+
+        assertThat(out.toString().lines())
+                .containsExactly(
+                        "12:01:07  still reconnecting: the server isn't reachable (Proxy said HTTP 502 earlier);"
+                                + " next try in 1.0 s",
+                        "12:01:07  still reconnecting: the server isn't reachable (504); next try in 1.0 s");
+    }
+
+    @Test
+    void theNextLossAfterAReconnectIsALostLineAgain() {
+        httpOutput.onEstablished("first", List.of(OTTER));
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(DROPPED), Duration.ofMillis(240));
+        httpOutput.onReconnected("second", List.of(OTTER), true);
+        out.getBuffer().setLength(0);
+
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(DROPPED), Duration.ofMillis(310));
+
+        assertThat(out.toString().lines())
+                .containsExactly("12:01:07  connection lost: the connection dropped; reconnecting in 0.3 s");
+    }
+
+    @ParameterizedTest(name = "{0} reads as \"{1}\"")
+    @CsvSource({
+        "SERVER_SHUTTING_DOWN, the server is restarting",
+        "SERVER_AT_CAPACITY, the server is busy",
+        "INTERNAL_ERROR, internal error",
+        "HEARTBEAT_TIMEOUT, the server stopped answering"
+    })
+    void aLostSessionSaysWhyInPlainWords(ErrorCode code, String words) {
+        output.onDisconnected(TunnelClosed.serverError(code, "The server says so."), Duration.ofSeconds(1));
+
+        assertThat(out.toString().strip()).isEqualTo("12:01:07  connection lost: " + words + "; reconnecting in 1.0 s");
+    }
+
+    @Test
+    void aSilentServerSeenByThisClientStoppedAnswering() {
+        output.onDisconnected(
+                TunnelClosed.localError(ErrorCode.HEARTBEAT_TIMEOUT, "No PONG within 45 s."), Duration.ofSeconds(2));
+
+        assertThat(out.toString().strip())
+                .isEqualTo("12:01:07  connection lost: the server stopped answering; reconnecting in 2.0 s");
+    }
+
+    @Test
+    void aNewUrlSaysTheOldOneWasTaken() {
+        httpOutput.onEstablished("first", List.of(OTTER));
+        httpOutput.onDisconnected(TunnelClosed.connectionLost(DROPPED), Duration.ofSeconds(30));
+        out.getBuffer().setLength(0);
+
+        httpOutput.onDisconnected(
+                TunnelClosed.serverError(ErrorCode.SUBDOMAIN_UNAVAILABLE, "The subdomain is in use."), Duration.ZERO);
+        httpOutput.onReconnected("second", List.of(HERON), false);
+
+        assertThat(out.toString().lines())
+                .containsExactly(
+                        "12:01:07  still reconnecting: the old URL is taken, asking for a new one; next try in 0.0 s",
+                        "12:01:07  reconnected with a new URL  https://brave-heron-91c0.example.dev"
+                                + "  (the old one was taken)");
+    }
+
+    @Test
+    void aClientThatGivesUpWhileReconnectingEndsWithTheError() {
+        output.onEstablished("first", List.of(TUNNEL));
+        output.onDisconnected(TunnelClosed.connectionLost(DROPPED), Duration.ofMillis(200));
+
+        output.onClosed(TunnelClosed.serverError(ErrorCode.AUTHTOKEN_INVALID, "The authtoken is not valid."));
+
+        assertThat(err.toString().strip())
+                .isEqualTo("Error AUTHTOKEN_INVALID: The authtoken is not valid."
+                        + " Check the token; tokens are shown once when created.");
     }
 
     // HTTP tunnels.
@@ -281,7 +434,15 @@ class ConsoleOutputTest {
     }
 
     private ConsoleOutput http(TunnelSpec tunnel) {
-        return new ConsoleOutput(new PrintWriter(out), new PrintWriter(err), clock, "0.2.0", List.of(tunnel));
+        return new ConsoleOutput(new PrintWriter(out), new PrintWriter(err), clock, "0.2.0", List.of(tunnel), true);
+    }
+
+    private static TunnelClosed refused503() {
+        return TunnelClosed.connectionLost(NO_CODE_503).withUpgradeStatus(OptionalInt.of(503));
+    }
+
+    private static TunnelClosed shuttingDown() {
+        return TunnelClosed.serverError(ErrorCode.SERVER_SHUTTING_DOWN, "The server is shutting down.");
     }
 
     private static ExchangeSummary exchange(

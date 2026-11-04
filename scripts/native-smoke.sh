@@ -2,7 +2,15 @@
 # Runs real tunnels through the native jburrow binary and checks the bytes that come back. A TCP
 # tunnel: 50 concurrent streams on one session, then one 4 MiB stream. An HTTP tunnel: 50
 # concurrent requests (25 uploads echoed back, every other one chunked, and 25 1 MiB downloads),
-# then a server-sent event stream, then a short StreamLoad --http run so the load driver keeps working.
+# then a server-sent event stream, then a short StreamLoad --http run so the load driver keeps working,
+# then a server restart under the open HTTP tunnel: the CLI must reconnect by itself, on the same URL,
+# as soon as its reconnect schedule allows once the new server is ready.
+#
+# The restart checks what the CLI is responsible for, not how fast a JVM starts on this machine
+# (checkpoint 10 measures the restart budget on production). The new server gets SERVER_RESTART_TIMEOUT
+# seconds to become ready (default 180); from then, the URL must answer within the client's schedule:
+# 5 s while the client is still trying about once a second (within 60 s of the GOAWAY), 35 s once it
+# has fallen back to its backoff, which is capped at 30 s.
 #
 # Needs: Docker, a JDK 21 on the PATH, python3, jq, curl, and both builds already in target/:
 #   ./mvnw -pl jburrow-server,jburrow-cli -am package -DskipTests
@@ -38,6 +46,11 @@ HTTP_DOWNLOADS=25
 UPLOAD_BYTES=$((256 * 1024))
 DOWNLOAD_BYTES=$((1024 * 1024))
 SSE_EVENTS=5
+SERVER_RESTART_TIMEOUT="${SERVER_RESTART_TIMEOUT:-180}"
+# ARCHITECTURE.md §Reconnecting: after GOAWAY, about every second for 60 s, then backoff capped at 30 s.
+GOAWAY_RETRY_PERIOD_MS=60000
+RECONNECT_WITHIN_FAST_MS=5000
+RECONNECT_WITHIN_BACKOFF_MS=35000
 
 WORK="target/native-smoke"
 SERVER_LOG="$WORK/server.log"
@@ -109,6 +122,22 @@ exited() {
 
 port_free() {
   ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# start_server: the JVM server on the smoke test's ports, appending to its log, in the background.
+start_server() {
+  java -jar "${server_jars[0]}" \
+    --server.port="$API_PORT" \
+    --management.server.port="$MANAGEMENT_PORT" \
+    --jburrow.edge.port="$EDGE_PORT" \
+    --jburrow.tcp.port-range="$TUNNEL_PORTS" \
+    --jburrow.http.public-port="$EDGE_PORT" \
+    >>"$SERVER_LOG" 2>&1 &
+  SERVER_PID=$!
+}
+
+millis() {
+  date +%s%3N
 }
 
 server_ready() {
@@ -306,14 +335,7 @@ log "Starting Postgres"
 docker compose up -d --wait postgres
 
 log "Starting the server (${server_jars[0]})"
-java -jar "${server_jars[0]}" \
-  --server.port="$API_PORT" \
-  --management.server.port="$MANAGEMENT_PORT" \
-  --jburrow.edge.port="$EDGE_PORT" \
-  --jburrow.tcp.port-range="$TUNNEL_PORTS" \
-  --jburrow.http.public-port="$EDGE_PORT" \
-  >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
+start_server
 wait_until 60 "server readiness" server_ready
 
 log "Starting the echo service on :$ECHO_PORT"
@@ -385,6 +407,46 @@ not_ok="$(jq -r 'select(.type == "request" and (.status != 200 or .reset != null
 log "Running the load driver through the HTTP tunnel: 10 echoes of 64 KiB"
 java scripts/load/StreamLoad.java --http --url "$public_url" --streams 10 --bytes 64KiB >"$WORK/stream-load.txt" 2>&1 ||
   fail "$(printf '%s\n' "StreamLoad --http failed:" "$(cat "$WORK/stream-load.txt")")"
+
+log "Restarting the server under the HTTP tunnel"
+stopped_at="$(millis)"
+stop "$SERVER_PID"
+exited_at="$(millis)"
+printf '\n----- restarted -----\n' >>"$SERVER_LOG"
+start_server
+wait_until "$SERVER_RESTART_TIMEOUT" "the new server's readiness" server_ready
+ready_at="$(millis)"
+if ((ready_at - stopped_at < GOAWAY_RETRY_PERIOD_MS)); then
+  reconnect_within_ms=$RECONNECT_WITHIN_FAST_MS
+else
+  reconnect_within_ms=$RECONNECT_WITHIN_BACKOFF_MS
+fi
+answered_at=""
+while (($(millis) - ready_at < reconnect_within_ms)); do
+  alive "$HTTP_CLI_PID" "the native CLI's HTTP tunnel"
+  if curl -fs -o /dev/null --max-time 1 --connect-to "::127.0.0.1:" "$public_url/bytes/16"; then
+    answered_at="$(millis)"
+    break
+  fi
+  sleep 0.25
+done
+[[ -n "$answered_at" ]] ||
+  fail "$public_url didn't answer within $((reconnect_within_ms / 1000)) s of the new server being ready"
+log "Restart: old server stopped in $((exited_at - stopped_at)) ms, new one ready $((ready_at - exited_at)) ms later," \
+  "tunnel serving $((answered_at - ready_at)) ms after that ($((answered_at - stopped_at)) ms in all)"
+reconnected="$(jq -c 'select(.type == "reconnected")' "$HTTP_EVENTS")"
+[[ $(grep -c . <<<"$reconnected") -eq 1 ]] || fail "expected one reconnected event, got: $reconnected"
+[[ "$(jq -r '.sameUrls' <<<"$reconnected")" == "true" && "$(jq -r '.tunnels[0].url' <<<"$reconnected")" == "$public_url" ]] ||
+  fail "the tunnel came back on another URL: $reconnected"
+# One disconnected for the session the drain ended, then one per attempt made while the server was down.
+first_disconnect="$(jq -r 'select(.type == "disconnected") | .reason + " " + .code' "$HTTP_EVENTS" | head -n 1)"
+[[ "$first_disconnect" == "SERVER_ERROR SERVER_SHUTTING_DOWN" ]] ||
+  fail "the first disconnected event is not SERVER_ERROR SERVER_SHUTTING_DOWN: $first_disconnect"
+log "The tunnel reconnected with the same URL after $(events_of disconnected "$HTTP_EVENTS") disconnected event(s)"
+tunnel_curl -o "$WORK/http/after-restart.bin" "$public_url/bytes/$DOWNLOAD_BYTES" ||
+  fail "a download through the reconnected tunnel failed"
+[[ "$(sha_of "$WORK/http/after-restart.bin")" == "$(sha_of "$WORK/http/reference.bin")" ]] ||
+  fail "a download through the reconnected tunnel differs"
 
 log "Stopping the HTTP tunnel with SIGINT"
 stop_cli "$HTTP_CLI_PID" "$HTTP_EVENTS"

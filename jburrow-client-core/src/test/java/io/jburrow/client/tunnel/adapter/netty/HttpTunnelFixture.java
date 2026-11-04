@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import io.jburrow.client.ClientSettings;
+import io.jburrow.client.ReconnectPolicy;
 import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.tunnel.domain.LocalTarget;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
@@ -81,11 +82,13 @@ final class HttpTunnelFixture implements AutoCloseable {
                         new ClientInfo("jburrow-test", "1.0.0", "linux", "amd64"),
                         Optional.empty(),
                         TIMEOUT,
-                        ClientSettings.DEFAULT_WINDOWS),
+                        ClientSettings.DEFAULT_WINDOWS,
+                        ClientSettings.IMPLEMENTED_CAPABILITIES,
+                        ReconnectPolicy.never()),
                 HostResolver.SYSTEM);
         Future<TunnelHandle> start = threads.submit(client::start);
         assertThat(peer.expect(Frame.Hello.class, TIMEOUT).message().capabilities())
-                .containsExactly("http");
+                .containsExactlyInAnyOrder("http", "resume");
         peer.send(new Frame.ServerHello(new ServerHello(
                 SESSION_ID, new ServerInfo("jburrow-server", "0.3.0"), List.of("http"), LIMITS, serverWindows)));
         assertThat(peer.expect(Frame.Register.class, TIMEOUT).message().tunnels())

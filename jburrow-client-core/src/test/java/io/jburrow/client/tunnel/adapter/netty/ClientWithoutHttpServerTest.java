@@ -68,7 +68,7 @@ class ClientWithoutHttpServerTest {
         Future<TunnelHandle> start = threads.submit(client::start);
 
         assertThat(peer.expect(Frame.Hello.class, TIMEOUT).message().capabilities())
-                .containsExactly("http");
+                .containsExactlyInAnyOrder("http", "resume");
         peer.send(new Frame.ServerHello(new ServerHello(
                 UUID.randomUUID(),
                 new ServerInfo("jburrow-server", "0.2.0"),

@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -15,6 +16,7 @@ import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.HttpRequestHead;
@@ -24,12 +26,14 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.control.Windows;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -41,9 +45,11 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -935,6 +941,118 @@ class ControlJsonTest {
         assertThat(limits.getMaxNameLength()).isEqualTo(64);
         assertThat(limits.getMaxNumberLength()).isEqualTo(20);
         assertThat(limits.getMaxDocumentLength()).isEqualTo(16_384);
+    }
+
+    // The resume capability: GOAWAY, REGISTER.resume and the reply's resumeToken.
+
+    private static final String RESUME_TOKEN = "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    private static final Set<Capability> WITH_RESUME = Set.of(Capability.RESUME);
+    private static final Set<Capability> WITHOUT_RESUME = Set.of(Capability.HTTP);
+
+    @Test
+    void goAwayRoundTrips() {
+        GoAway goAway = new GoAway(830, 5_000);
+
+        assertThat(written(goAway)).isEqualTo("{\"reconnectAfterMs\":830,\"drainMs\":5000}");
+        assertThat(read(written(goAway), GoAway.class)).isEqualTo(goAway);
+    }
+
+    @Test
+    void goAwayFieldsAreRequiredAndInRange() {
+        assertValidationFailed("{\"drainMs\":5000}", GoAway.class, "reconnectAfterMs is required");
+        assertValidationFailed("{\"reconnectAfterMs\":830}", GoAway.class, "drainMs is required");
+        assertValidationFailed(
+                "{\"reconnectAfterMs\":60001,\"drainMs\":5000}",
+                GoAway.class,
+                "reconnectAfterMs must be between 0 and 60000");
+        assertValidationFailed(
+                "{\"reconnectAfterMs\":830,\"drainMs\":-1}", GoAway.class, "drainMs must be between 0 and 300000");
+        assertProtocolError("{\"reconnectAfterMs\":\"830\",\"drainMs\":5000}", GoAway.class);
+        assertProtocolError("{\"reconnectAfterMs\":830.0,\"drainMs\":5000}", GoAway.class);
+        assertProtocolError("{\"reconnectAfterMs\":null,\"drainMs\":5000}", GoAway.class);
+    }
+
+    @Test
+    void theResumeTokenIsAStringInBothDirections() {
+        Register register = new Register(
+                TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417)), new ResumeToken(RESUME_TOKEN));
+        Registered registered = new Registered(REGISTERED_RECORD.tunnels(), new ResumeToken(RESUME_TOKEN));
+
+        assertThat(written(register)).endsWith(",\"resume\":\"" + RESUME_TOKEN + "\"}");
+        assertThat(written(registered)).endsWith(",\"resumeToken\":\"" + RESUME_TOKEN + "\"}");
+        assertThat(JSON.read(JSON.write(register), Register.class, WITH_RESUME)).isEqualTo(register);
+        assertThat(JSON.read(JSON.write(registered), Registered.class, WITH_RESUME))
+                .isEqualTo(registered);
+    }
+
+    @Test
+    void aMissingTokenIsNotWritten() {
+        assertThat(written(REGISTER_RECORD)).doesNotContain("resume");
+        assertThat(written(REGISTERED_RECORD)).doesNotContain("resumeToken");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh",
+                "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8A",
+                "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+"
+            })
+    void aTokenOfTheWrongShapeIsAValidationFailureNamingOnlyTheField(String token) {
+        ProtocolException rejected = catchThrowableOfProtocol(() -> JSON.read(
+                utf8(REGISTER.replace("]}", "],\"resume\":\"" + token + "\"}")), Register.class, WITH_RESUME));
+
+        assertThat(rejected.code()).isEqualTo(VALIDATION_FAILED);
+        assertThat(rejected.getMessage())
+                .isEqualTo("resume must be jbr_ and 43 characters of [A-Za-z0-9_-]")
+                .doesNotContain(token.substring(4, 20));
+    }
+
+    @Test
+    void aTokenOfTheWrongTypeOrNullIsAProtocolError() {
+        assertThat(catchThrowableOfProtocol(() ->
+                                JSON.read(utf8(REGISTER.replace("]}", "],\"resume\":5}")), Register.class, WITH_RESUME))
+                        .code())
+                .isEqualTo(PROTOCOL_ERROR);
+        assertThat(catchThrowableOfProtocol(() -> JSON.read(
+                                utf8(REGISTER.replace("]}", "],\"resume\":null}")), Register.class, WITH_RESUME))
+                        .code())
+                .isEqualTo(PROTOCOL_ERROR);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"" + RESUME_TOKEN + "\"", "\"jbr_short\"", "5", "null", "{\"a\":[1]}"})
+    void withoutResumeTheTokenIsAnUnknownKeyWhateverItsValue(String value) {
+        String register = REGISTER.replace("]}", "],\"resume\":" + value + "}");
+        String registered = REGISTERED.replace("]}", "],\"resumeToken\":" + value + "}");
+
+        assertThat(JSON.read(utf8(register), Register.class, WITHOUT_RESUME)).isEqualTo(REGISTER_RECORD);
+        assertThat(JSON.read(utf8(registered), Registered.class, WITHOUT_RESUME))
+                .isEqualTo(REGISTERED_RECORD);
+    }
+
+    @Test
+    void withoutResumeTheTokenIsStillHeldToTheEncodingRules() {
+        String duplicate = REGISTER.replace("]}", "],\"resume\":\"a\",\"resume\":\"b\"}");
+        String tooLong = REGISTER.replace("]}", "],\"resume\":\"" + "a".repeat(4_097) + "\"}");
+
+        assertThat(catchThrowableOfProtocol(() -> JSON.read(utf8(duplicate), Register.class, WITHOUT_RESUME))
+                        .code())
+                .isEqualTo(PROTOCOL_ERROR);
+        assertThat(catchThrowableOfProtocol(() -> JSON.read(utf8(tooLong), Register.class, WITHOUT_RESUME))
+                        .code())
+                .isEqualTo(PROTOCOL_ERROR);
+    }
+
+    @Test
+    void aReadWithoutCapabilitiesKnowsEveryField() {
+        String register = REGISTER.replace("]}", "],\"resume\":\"" + RESUME_TOKEN + "\"}");
+
+        assertThat(read(register, Register.class).resume()).isEqualTo(new ResumeToken(RESUME_TOKEN));
+    }
+
+    private static ProtocolException catchThrowableOfProtocol(ThrowingCallable call) {
+        return catchThrowableOfType(ProtocolException.class, call);
     }
 
     private static <T extends ControlMessage> T read(String json, Class<T> type) {

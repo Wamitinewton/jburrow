@@ -14,6 +14,13 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "io.jburrow.protocol.control.GoAway",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
     "name": "io.jburrow.protocol.control.HeaderFields",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
@@ -78,6 +85,13 @@
   },
   {
     "name": "io.jburrow.protocol.control.RemoteAddress",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.protocol.control.ResumeToken",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
     "allDeclaredFields": true,

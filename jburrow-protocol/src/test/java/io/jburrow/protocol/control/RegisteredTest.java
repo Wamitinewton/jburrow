@@ -22,6 +22,22 @@ class RegisteredTest {
     }
 
     @Test
+    void resumeTokenIsOptional() {
+        ResumeToken token = new ResumeToken(ResumeTokenTest.EXAMPLE);
+
+        assertThat(new Registered(List.of(DEFAULT)).resumeToken()).isNull();
+        assertThat(new Registered(List.of(DEFAULT), token).resumeToken()).isEqualTo(token);
+        assertThat(new Registered(List.of(DEFAULT), null)).isEqualTo(new Registered(List.of(DEFAULT)));
+    }
+
+    @Test
+    void toStringMasksTheResumeToken() {
+        String text = new Registered(List.of(DEFAULT), new ResumeToken(ResumeTokenTest.EXAMPLE)).toString();
+
+        assertThat(text).contains("ResumeToken[jbr_***]").doesNotContain(ResumeTokenTest.EXAMPLE.substring(4));
+    }
+
+    @Test
     void refsAreUnique() {
         assertInvalid(() -> new Registered(List.of(DEFAULT, tunnel("default"))), "tunnels[1].ref must be unique");
     }

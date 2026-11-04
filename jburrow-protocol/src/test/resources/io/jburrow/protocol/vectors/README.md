@@ -26,8 +26,11 @@ can run the same files. Any bug found by fuzzing or in production becomes a new 
   ([§4.2](../../../../../../../../docs/protocol.md#42-capabilities)). Absent means none. It matters
   for what a capability introduces: with `["http"]` a server decodes `HEADERS`, and either side
   accepts the `"http"` tunnel kind and the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and
-  `LOCAL_SERVICE_ERROR`; without it, each is refused as anything unknown is. Many HTTP vectors come
-  in pairs, one with the capability and one without.
+  `LOCAL_SERVICE_ERROR`; without it, each is refused as anything unknown is. With `["resume"]` a
+  client parses a `GOAWAY`'s payload and accepts `SESSION_REPLACED`, and either side reads and checks
+  `resume` in a `REGISTER` and `resumeToken` in its reply; without it, the two tokens are unknown keys,
+  absent from `frame` whatever their values, and a `GOAWAY` is decoded only as far as its header. Many
+  HTTP and resume vectors come in pairs, one with the capability and one without.
 - **`error`** is the protocol error code, for example `FRAME_SIZE_ERROR`. When several rules are
   broken, the expected code is the first broken step in receiver-rule order. Several vectors exist
   only to check that order.
@@ -56,12 +59,15 @@ A neutral description of the decoded frame. Every frame has `type` (the registry
 
 | Type | Fields |
 |---|---|
-| `HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR` | `payload`: the control payload as the receiver understands it, a JSON object. Compare it as JSON, not as text: key order and whitespace don't matter, and keys the receiver must ignore are absent. Header fields are arrays of `[name, value]` pairs, and their order matters. |
+| `HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR`, and `GOAWAY` with `resume` | `payload`: the control payload as the receiver understands it, a JSON object. Compare it as JSON, not as text: key order and whitespace don't matter, and keys the receiver must ignore are absent. Header fields are arrays of `[name, value]` pairs, and their order matters. |
 | `DATA` | `payloadHex`: the payload, in the same `hex` format |
 | `WINDOW_UPDATE` | `increment`: the credit, a number |
 | `CLOSE` | `reset`: the error code, present only for a reset (`RST` flag). Absent means a half-close. |
 | `PING`, `PONG` | `opaqueHex`: the 8 opaque bytes |
-| `GOAWAY` | nothing else. Its payload belongs to a later draft; a receiver of this draft decodes the header and then treats the frame as a session error. |
+| `GOAWAY` without `resume` | nothing else. Without the capability its payload means nothing: a receiver decodes the header and then treats the frame as a session error at step 9. |
+
+Where a `GOAWAY` may come (not before the session is established, not twice, no `OPEN` after it) is
+step 9, so no vector tests it; JBurrow's client tests it against its session state, and fuzzes it.
 
 A vector holds for one draft only: drafts are not compatible, and a `HELLO` of one is not a `HELLO`
 of another. These files change with the draft, and `docs/protocol.md` §1 lists what each draft

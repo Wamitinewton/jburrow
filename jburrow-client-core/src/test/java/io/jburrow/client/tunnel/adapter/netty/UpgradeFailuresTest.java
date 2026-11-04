@@ -7,6 +7,7 @@ import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.TunnelStartException.Kind;
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.LocalTarget;
+import io.jburrow.client.tunnel.domain.Resumption;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.control.ClientInfo;
@@ -17,8 +18,11 @@ import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
+import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
@@ -26,6 +30,7 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -34,17 +39,22 @@ import org.junit.jupiter.api.Test;
 
 class UpgradeFailuresTest {
 
+    private final RecordingSupervision supervision = new RecordingSupervision();
+
     private static final ControlJson JSON = ControlJson.create();
 
-    private final ControlConnection connection = new ControlConnection(new ClientSettings(
-            URI.create("ws://localhost:7080/v1/connect"),
-            "jb_" + "t".repeat(43),
-            List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))),
-            new TunnelEvents() {},
-            new ClientInfo("jburrow-test", "1.0.0", null, null),
-            Optional.empty(),
-            ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
-            ClientSettings.DEFAULT_WINDOWS));
+    private final ControlConnection connection = new ControlConnection(
+            new ClientSettings(
+                    URI.create("ws://localhost:7080/v1/connect"),
+                    "jb_" + "t".repeat(43),
+                    List.of(TunnelSpec.tcp("default", LocalTarget.of("localhost", 22))),
+                    new TunnelEvents() {},
+                    new ClientInfo("jburrow-test", "1.0.0", null, null),
+                    Optional.empty(),
+                    ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+                    ClientSettings.DEFAULT_WINDOWS),
+            Resumption.none(),
+            supervision);
     private final EmbeddedChannel channel = new EmbeddedChannel(new UpgradeFailures(connection, JSON));
 
     @Test
@@ -99,12 +109,38 @@ class UpgradeFailuresTest {
         String body = "{\"success\":false,\"code\":\"SOMETHING_NEW\",\"message\":\"x\","
                 + "\"timestamp\":\"2026-10-19T10:15:30Z\",\"path\":\"/v1/connect\"}";
 
-        TunnelStartException failure =
-                UpgradeFailures.refusal(HttpResponseStatus.BAD_GATEWAY, body.getBytes(StandardCharsets.UTF_8), JSON);
+        TunnelStartException failure = UpgradeFailures.refusal(
+                HttpResponseStatus.BAD_GATEWAY, EmptyHttpHeaders.INSTANCE, body.getBytes(StandardCharsets.UTF_8), JSON);
 
         assertThat(failure.kind()).isEqualTo(Kind.UPGRADE_REFUSED);
         assertThat(failure.code()).isEmpty();
+        assertThat(failure.status()).hasValue(502);
         assertThat(failure).hasMessageContaining("HTTP 502 Bad Gateway");
+    }
+
+    @Test
+    void aRefusalKeepsItsStatusAndRetryAfter() {
+        String body = "{\"success\":false,\"code\":\"SERVER_AT_CAPACITY\",\"message\":\"full\","
+                + "\"timestamp\":\"2026-10-19T10:15:30Z\",\"path\":\"/v1/connect\"}";
+        HttpHeaders headers = new DefaultHttpHeaders().set(HttpHeaderNames.RETRY_AFTER, "5");
+
+        TunnelStartException failure = UpgradeFailures.refusal(
+                HttpResponseStatus.SERVICE_UNAVAILABLE, headers, body.getBytes(StandardCharsets.UTF_8), JSON);
+
+        assertThat(failure.code()).contains(ErrorCode.SERVER_AT_CAPACITY);
+        assertThat(failure.status()).hasValue(503);
+        assertThat(failure.retryAfter()).contains(Duration.ofSeconds(5));
+    }
+
+    @Test
+    void onlyARetryAfterInSecondsCounts() {
+        assertThat(UpgradeFailures.retryAfter("0")).contains(Duration.ZERO);
+        assertThat(UpgradeFailures.retryAfter(" 10 ")).contains(Duration.ofSeconds(10));
+        assertThat(UpgradeFailures.retryAfter(null)).isEmpty();
+        assertThat(UpgradeFailures.retryAfter("-1")).isEmpty();
+        assertThat(UpgradeFailures.retryAfter("1.5")).isEmpty();
+        assertThat(UpgradeFailures.retryAfter("Wed, 21 Oct 2026 07:28:00 GMT")).isEmpty();
+        assertThat(UpgradeFailures.retryAfter("9999999999")).isEmpty();
     }
 
     @Test
@@ -130,12 +166,7 @@ class UpgradeFailuresTest {
     }
 
     private TunnelStartException startFailure() {
-        try {
-            connection.awaitStart();
-        } catch (TunnelStartException e) {
-            return e;
-        }
-        throw new AssertionError("start() succeeded");
+        return supervision.startFailure();
     }
 
     private static FullHttpResponse response(HttpResponseStatus status, String body) {

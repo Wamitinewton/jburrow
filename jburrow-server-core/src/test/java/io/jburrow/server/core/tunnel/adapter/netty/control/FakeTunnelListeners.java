@@ -46,6 +46,9 @@ final class FakeTunnelListeners implements TunnelListeners {
         return session.channel().eventLoop().newSucceededFuture(null);
     }
 
+    @Override
+    public void stopAccepting(SessionContext session) {}
+
     int binds() {
         return binds.get();
     }

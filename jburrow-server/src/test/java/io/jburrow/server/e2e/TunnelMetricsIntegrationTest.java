@@ -1,7 +1,5 @@
 package io.jburrow.server.e2e;
 
-import static io.jburrow.server.e2e.TunnelTestSupport.KERNEL_SOCKET_BUFFERS;
-import static io.jburrow.server.e2e.TunnelTestSupport.LOOPBACK_IS_THE_INGRESS;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -182,6 +180,7 @@ class TunnelMetricsIntegrationTest extends TunnelTestSupport {
         assertThat(reserved).isEqualTo(before.value("jburrow_tcp_ports", "state", "reserved"));
         assertThat(after.value("jburrow_tcp_ports", "state", "free")
                         + reserved
+                        + after.value("jburrow_tcp_ports", "state", "held")
                         + after.value("jburrow_tcp_ports", "state", "quarantined"))
                 .isEqualTo(PORT_RANGE_SIZE);
 

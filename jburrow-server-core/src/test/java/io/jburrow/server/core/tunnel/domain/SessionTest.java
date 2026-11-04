@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
@@ -67,6 +68,7 @@ class SessionTest {
             SessionState.AWAITING_REGISTER, EnumSet.of(REGISTER, PING, PONG, ERROR),
             SessionState.REGISTERING, EnumSet.of(PING, PONG, ERROR),
             SessionState.ESTABLISHED, EnumSet.of(DATA, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR),
+            SessionState.DRAINING, EnumSet.of(DATA, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR),
             SessionState.CLOSING, EnumSet.allOf(FrameType.class));
 
     static Stream<Arguments> orderingTable() {
@@ -185,6 +187,19 @@ class SessionTest {
                 .isThrownBy(() -> sessionIn(SessionState.REGISTERING, 1).onEstablished(ALICE, List.of(TUNNEL, TUNNEL)));
     }
 
+    @Test
+    void anEstablishedSessionKeepsTheHashOfItsResumeTokenOnly() {
+        ResumeTokenHash hash = ResumeTokenHash.of(new byte[32]);
+        Session withToken = sessionIn(SessionState.REGISTERING, 1);
+        Session without = sessionIn(SessionState.REGISTERING, 1);
+
+        withToken.onEstablished(ALICE, List.of(TUNNEL), Optional.of(hash));
+        without.onEstablished(ALICE, List.of(TUNNEL));
+
+        assertThat(withToken.resumeTokenHash()).contains(hash);
+        assertThat(without.resumeTokenHash()).isEmpty();
+    }
+
     @ParameterizedTest
     @EnumSource(SessionState.class)
     void closingIsReachableFromEveryState(SessionState state) {
@@ -234,7 +249,8 @@ class SessionTest {
     void refusesStreamsUnlessEstablished(SessionState state) {
         Session session = sessionIn(state, 1);
 
-        assertThat(session.checkAdmission(TUNNEL.id())).contains(Refusal.NOT_ESTABLISHED);
+        assertThat(session.checkAdmission(TUNNEL.id()))
+                .contains(state == SessionState.DRAINING ? Refusal.DRAINING : Refusal.NOT_ESTABLISHED);
         assertThatIllegalStateException().isThrownBy(() -> session.openStream(TUNNEL.id()));
         assertThat(session.openStreamIds()).isEmpty();
     }
@@ -389,6 +405,97 @@ class SessionTest {
         assertThat(session.openStreamIds()).containsExactly(1, 2);
         session.onStreamSent(1, RST_SENT);
         assertThat(session.openStreamIds()).containsExactly(2);
+    }
+
+    @Test
+    void aDrainingSessionRefusesNewStreamsAndCarriesOnWithOpenOnes() {
+        Session session = sessionIn(SessionState.ESTABLISHED, 2);
+        int id = open(session);
+
+        session.onDraining(() -> {});
+
+        assertThat(session.state()).isEqualTo(SessionState.DRAINING);
+        assertThat(session.isServing()).isTrue();
+        assertThat(session.checkAdmission(TUNNEL.id())).contains(Refusal.DRAINING);
+        assertThatIllegalStateException().isThrownBy(() -> session.openStream(TUNNEL.id()));
+        assertThat(session.onDataReceived(id, 10)).isEqualTo(DataOutcome.DELIVER);
+        session.onDataSent(id, 10);
+        assertThat(session.onWindowUpdate(id, 1)).isEqualTo(UpdateTarget.STREAM);
+        assertThat(session.onStreamFrame(id, CLOSE_RECEIVED))
+                .isEqualTo(new StreamOutcome.Accept(StreamState.HALF_CLOSED_REMOTE));
+        assertThat(session.openStreamIds()).containsExactly(id);
+    }
+
+    @Test
+    void aDrainedSessionSaysSoWhenItsLastStreamCloses() {
+        Session session = sessionIn(SessionState.ESTABLISHED, 2);
+        int first = open(session);
+        int second = open(session);
+        List<String> drained = new ArrayList<>();
+
+        session.onDraining(() -> drained.add("drained"));
+        session.onStreamFrame(first, RST_RECEIVED);
+        assertThat(drained).isEmpty();
+        session.onStreamFrame(second, CLOSE_RECEIVED);
+        assertThat(drained).isEmpty();
+        session.onStreamSent(second, CLOSE_SENT);
+
+        assertThat(drained).containsExactly("drained");
+        session.onClosing(ErrorCode.SERVER_SHUTTING_DOWN);
+        assertThat(drained).containsExactly("drained");
+    }
+
+    @Test
+    void anIdleSessionIsDrainedAtOnce() {
+        Session session = sessionIn(SessionState.ESTABLISHED, 1);
+        List<String> drained = new ArrayList<>();
+
+        session.onDraining(() -> drained.add("drained"));
+
+        assertThat(drained).containsExactly("drained");
+    }
+
+    @Test
+    void aDrainingSessionThatStartsClosingIsDrainedWhateverItHasOpen() {
+        Session lost = sessionIn(SessionState.ESTABLISHED, 1);
+        Session failed = sessionIn(SessionState.ESTABLISHED, 1);
+        open(lost);
+        open(failed);
+        List<String> drained = new ArrayList<>();
+
+        lost.onDraining(() -> drained.add("lost"));
+        failed.onDraining(() -> drained.add("failed"));
+        lost.onClosing();
+        failed.onClosing(ErrorCode.PROTOCOL_ERROR);
+
+        assertThat(drained).containsExactly("lost", "failed");
+        assertThat(lost.isServing()).isFalse();
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = SessionState.class,
+            names = {"ESTABLISHED"},
+            mode = EnumSource.Mode.EXCLUDE)
+    void onlyAnEstablishedSessionDrains(SessionState state) {
+        Session session = sessionIn(state, 1);
+
+        assertThatIllegalStateException().isThrownBy(() -> session.onDraining(() -> {}));
+        assertThat(session.state()).isEqualTo(state);
+    }
+
+    @Test
+    void resumeIsTheSessionsOnlyWhenBothSidesHaveIt() {
+        Session both = new Session(SessionId.random(), 1, SERVER_WINDOWS, Set.of(Capability.RESUME));
+        both.onHello(hello(List.of("resume")));
+        Session serverOnly = new Session(SessionId.random(), 1, SERVER_WINDOWS, Set.of(Capability.RESUME));
+        serverOnly.onHello(hello(List.of("http")));
+        Session clientOnly = new Session(SessionId.random(), 1, SERVER_WINDOWS, Set.of(Capability.HTTP));
+        clientOnly.onHello(hello(List.of("resume")));
+
+        assertThat(both.resumeEnabled()).isTrue();
+        assertThat(serverOnly.resumeEnabled()).isFalse();
+        assertThat(clientOnly.resumeEnabled()).isFalse();
     }
 
     @Test
@@ -736,6 +843,9 @@ class SessionTest {
             return session;
         }
         session.onEstablished(ALICE, List.of(TUNNEL));
+        if (state == SessionState.DRAINING) {
+            session.onDraining(() -> {});
+        }
         return session;
     }
 

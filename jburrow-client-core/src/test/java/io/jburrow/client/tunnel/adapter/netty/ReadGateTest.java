@@ -6,6 +6,7 @@ import io.jburrow.client.ClientSettings;
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.ClientSession;
 import io.jburrow.client.tunnel.domain.LocalTarget;
+import io.jburrow.client.tunnel.domain.Resumption;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ClientInfo;
@@ -53,6 +54,8 @@ import org.junit.jupiter.api.Test;
  */
 class ReadGateTest {
 
+    private final RecordingSupervision supervision = new RecordingSupervision();
+
     private static final int WINDOW = 65_536;
     private static final UUID SESSION_ID = UUID.fromString("0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a");
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
@@ -76,15 +79,18 @@ class ReadGateTest {
     }
 
     private void establish(SessionLimits limits) {
-        ControlConnection connection = new ControlConnection(new ClientSettings(
-                URI.create("ws://localhost:7080/v1/connect"),
-                "jb_" + "t".repeat(43),
-                List.of(TunnelSpec.tcp("default", LocalTarget.of("127.0.0.1", 22))),
-                new TunnelEvents() {},
-                new ClientInfo("jburrow-test", "1.0.0", null, null),
-                Optional.empty(),
-                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
-                ClientSettings.DEFAULT_WINDOWS));
+        ControlConnection connection = new ControlConnection(
+                new ClientSettings(
+                        URI.create("ws://localhost:7080/v1/connect"),
+                        "jb_" + "t".repeat(43),
+                        List.of(TunnelSpec.tcp("default", LocalTarget.of("127.0.0.1", 22))),
+                        new TunnelEvents() {},
+                        new ClientInfo("jburrow-test", "1.0.0", null, null),
+                        Optional.empty(),
+                        ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+                        ClientSettings.DEFAULT_WINDOWS),
+                Resumption.none(),
+                supervision);
         session = connection.session();
         session.onUpgraded();
         session.onServerHello(new ServerHello(

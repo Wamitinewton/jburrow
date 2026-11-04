@@ -41,23 +41,37 @@ verify: ## Unit, architecture and integration tests (Docker required)
 test: ## Unit and architecture tests only, no containers
 	$(MVNW) test
 
-# Jazzer fuzzes only one @FuzzTest per JVM, so each target gets its own run.
-FUZZ_TARGETS := FrameCodecFuzzTest\#decodeAsServer FrameCodecFuzzTest\#decodeAsClient \
-	ControlJsonFuzzTest\#read StreamLifecycleFuzzTest\#events SessionFlowFuzzTest\#peers \
-	HttpExchangeFuzzTest\#exchanges
+# Jazzer fuzzes only one @FuzzTest per JVM, so each target gets its own run. Each is <module>:<class>#<method>.
+FUZZ_TARGETS := jburrow-protocol:FrameCodecFuzzTest\#decodeAsServer jburrow-protocol:FrameCodecFuzzTest\#decodeAsClient \
+	jburrow-protocol:ControlJsonFuzzTest\#read jburrow-protocol:StreamLifecycleFuzzTest\#events \
+	jburrow-protocol:SessionFlowFuzzTest\#peers jburrow-protocol:HttpExchangeFuzzTest\#exchanges \
+	jburrow-client-core:SessionResumeFuzzTest\#sessions
 
 .PHONY: fuzz
-fuzz: ## Fuzz each protocol target for its maxDuration (2 min); findings land in its inputs directory
-	@status=0; for target in $(FUZZ_TARGETS); do \
-	  echo "==> Fuzzing $$target"; \
-	  JAZZER_FUZZ=1 $(MVNW) -B --no-transfer-progress -pl jburrow-protocol test \
+fuzz: ## Fuzz each target for its maxDuration (2 min); findings land in its inputs directory
+	@status=0; for entry in $(FUZZ_TARGETS); do \
+	  module=$${entry%%:*}; target=$${entry#*:}; \
+	  echo "==> Fuzzing $$module $$target"; \
+	  JAZZER_FUZZ=1 $(MVNW) -B --no-transfer-progress -pl $$module -am test \
 	    -Dtest="$$target" -Dsurefire.failIfNoSpecifiedTests=false -Djazzer.valueprofile=true \
 	    -DargLine="-Xmx1g -Xss1m" || status=1; \
 	done; exit $$status
 
+BINDIR ?= $(HOME)/.local/bin
+
 .PHONY: native
-native: ## Build the native CLI binary jburrow-cli/target/jburrow (GraalVM for JDK 21 as the JDK)
+native: ## Build the native CLI binary and copy it to ~/.local/bin, or BINDIR (GraalVM for JDK 21 as the JDK)
 	$(MVNW) -Pnative -pl jburrow-cli -am package -DskipTests
+	@$(MAKE) --no-print-directory install-cli
+
+# Copy, then rename over the old binary, so a running jburrow keeps its inode and a clean leaves the copy alone.
+.PHONY: install-cli
+install-cli: ## Copy the already-built native binary to ~/.local/bin, or BINDIR: make install-cli BINDIR=/usr/local/bin
+	@test -x jburrow-cli/target/jburrow || (echo "jburrow-cli/target/jburrow not found; run make native" >&2; exit 1)
+	@mkdir -p "$(BINDIR)"
+	@cp jburrow-cli/target/jburrow "$(BINDIR)/.jburrow.tmp"
+	@mv -f "$(BINDIR)/.jburrow.tmp" "$(BINDIR)/jburrow"
+	@echo "Installed $(BINDIR)/jburrow"
 
 .PHONY: native-smoke
 native-smoke: native ## Run a real tunnel through the native CLI against the JVM server (Docker required)

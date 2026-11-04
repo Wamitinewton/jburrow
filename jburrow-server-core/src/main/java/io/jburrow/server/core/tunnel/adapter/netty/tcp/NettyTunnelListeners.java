@@ -16,6 +16,7 @@ import io.jburrow.server.core.tunnel.application.Registration;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
+import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.Tunnel;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
@@ -60,7 +61,7 @@ public final class NettyTunnelListeners implements TunnelListeners {
 
     private static final Logger log = LoggerFactory.getLogger(NettyTunnelListeners.class);
 
-    private final PortReservations ports;
+    private final PortReservations<Principal> ports;
     private final InetAddress bindAddress;
     private final RegistrationPolicy policy;
     private final int visitorReceiveBuffer;
@@ -118,6 +119,15 @@ public final class NettyTunnelListeners implements TunnelListeners {
         }
         closes.finish(unbound);
         return unbound;
+    }
+
+    /** The listeners stay in the session's list, so {@link #unbindAll} still waits for each to close. */
+    @Override
+    public void stopAccepting(SessionContext session) {
+        List<TunnelListener> listeners = session.channel().attr(LISTENERS).get();
+        if (listeners != null) {
+            listeners.forEach(TunnelListener::close);
+        }
     }
 
     /** Whether a bind failed because something else holds the port. */
@@ -212,14 +222,14 @@ public final class NettyTunnelListeners implements TunnelListeners {
             }
             Reservation replacement;
             try {
-                replacement = ports.reserve(OptionalInt.empty());
+                replacement = ports.reserve(OptionalInt.empty(), registration.principal());
             } catch (ProtocolException refused) {
                 bound.tryFailure(refused.forTunnel(tunnel.request().ref()));
                 return;
             }
             attempt++;
             planned.set(tunnels.size(), new PlannedTunnel.Tcp(tunnel.request(), replacement, tunnel.id()));
-            session.registration(new Registration(registration.principal(), planned));
+            session.registration(registration.withTunnels(planned));
             bindNext();
         }
 

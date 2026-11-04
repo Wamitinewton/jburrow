@@ -161,8 +161,8 @@ class TcpCommandTest {
     }
 
     @Test
-    void aDroppedConnectionExitsFourWithAdvice() throws Exception {
-        Future<Integer> command = establish("tcp", "22");
+    void withNoReconnectADroppedConnectionExitsFourWithAdvice() throws Exception {
+        Future<Integer> command = establish("tcp", "22", "--no-reconnect");
         cli.awaitOutput("Forwarding");
 
         peer.dropConnection();
@@ -170,7 +170,34 @@ class TcpCommandTest {
         assertThat(cli.exitCode(command)).isEqualTo(ExitCodes.CONNECTION_FAILED);
         assertThat(cli.err())
                 .startsWith("Error CONNECTION_LOST: ")
-                .endsWith(" Run the command again; automatic reconnect arrives in a later release." + NL);
+                .endsWith(" Run the command again, or leave out --no-reconnect to have it reconnect by itself." + NL);
+        assertThat(cli.out()).doesNotContain("reconnect");
+    }
+
+    @Test
+    void byDefaultADroppedConnectionIsFollowedByAReconnectToTheSamePort() throws Exception {
+        Future<Integer> command = establish("tcp", "22");
+        cli.awaitOutput(NL + NL);
+        ScriptedPeer first = peer;
+        first.stopListening();
+        peer = ScriptedPeer.listen(first.port(), ProtocolVersion.CURRENT);
+
+        first.dropConnection();
+        first.close();
+        peer.expect(Frame.Hello.class, TIMEOUT);
+        Frame.Register register = peer.expect(Frame.Register.class, TIMEOUT);
+        assertThat(register.message().tunnels().getFirst().remotePort()).isEqualTo(21_000);
+        replyRegistered();
+
+        cli.awaitOutput("reconnected");
+        List<String> lines = cli.lines();
+        assertThat(lines.get(lines.size() - 2))
+                .matches("12:01:07  connection lost: the connection dropped; reconnecting in 0\\.[0-5] s");
+        assertThat(lines.getLast()).isEqualTo("12:01:07  reconnected   tcp://localhost:21000");
+        assertThat(command).isNotDone();
+        stop.request();
+        assertThat(cli.exitCode(command)).isEqualTo(ExitCodes.USER_CLOSED);
+        assertThat(cli.err()).isEmpty();
     }
 
     @Test

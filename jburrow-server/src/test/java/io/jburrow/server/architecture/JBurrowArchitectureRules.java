@@ -138,6 +138,17 @@ public final class JBurrowArchitectureRules {
             .as("SERVER_NEVER_SEES_CLIENT: server and protocol classes never depend on client classes")
             .allowEmptyShould(true);
 
+    /**
+     * The lease keeper reads the route table's and the port pool's change counters rather than being told about claims,
+     * so the tunnel engine never depends on the {@code lease} feature, not even on its ports (phase 4 §Layer rules).
+     */
+    public static final ArchRule TUNNEL_NEVER_SEES_LEASES = classes()
+            .that()
+            .resideInAPackage("io.jburrow..")
+            .should(neverReachFeature("tunnel", "lease"))
+            .as("TUNNEL_NEVER_SEES_LEASES: the tunnel feature never depends on the lease feature")
+            .allowEmptyShould(true);
+
     private JBurrowArchitectureRules() {}
 
     /** The classes under {@code root}, outside any {@code adapter} package below it. */
@@ -199,6 +210,31 @@ public final class JBurrowArchitectureRules {
                 }
             }
         };
+    }
+
+    /** Classes of a feature named {@code origin} never depend on a feature named {@code target}, ports included. */
+    private static ArchCondition<JavaClass> neverReachFeature(String origin, String target) {
+        return new ArchCondition<>("never depend on a " + target + " feature from a " + origin + " feature") {
+            @Override
+            public void check(JavaClass javaClass, ConditionEvents events) {
+                if (!featureOf(javaClass.getPackageName())
+                        .map(f -> isNamed(f, origin))
+                        .orElse(false)) {
+                    return;
+                }
+                for (Dependency dependency : javaClass.getDirectDependenciesFromSelf()) {
+                    String targetPackage =
+                            dependency.getTargetClass().getBaseComponentType().getPackageName();
+                    if (featureOf(targetPackage).map(f -> isNamed(f, target)).orElse(false)) {
+                        events.add(SimpleConditionEvent.violated(dependency, dependency.getDescription()));
+                    }
+                }
+            }
+        };
+    }
+
+    private static boolean isNamed(String feature, String name) {
+        return feature.equals(name) || feature.endsWith("." + name);
     }
 
     private static SliceAssignment features() {

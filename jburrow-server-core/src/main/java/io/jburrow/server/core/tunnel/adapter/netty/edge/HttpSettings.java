@@ -8,7 +8,8 @@ import java.util.Objects;
  *
  * @param domain tunnels are {@code <name>.<domain>}; lower-case
  * @param maxRequestBody the largest request body the edge forwards, in bytes
- * @param responseTimeout how long the edge waits from {@code OPEN} to the final response head
+ * @param responseTimeout how long the edge waits for the final response head once the request body has been sent to
+ *     the client
  * @param keepAliveTimeout how long an edge connection may sit idle between exchanges
  * @param socketBuffer {@code SO_SNDBUF} and {@code SO_RCVBUF} of an edge connection that carries exchanges, in bytes,
  *     or {@link #KERNEL_SIZED}

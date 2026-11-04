@@ -34,6 +34,13 @@ public interface TunnelListeners {
      */
     Future<?> unbindAll(SessionContext session);
 
+    /**
+     * Closes every listener of the session, so the kernel refuses new visitors, and leaves the visitors they accepted
+     * connected. Called when the session drains. The ports stay reserved: {@link #unbindAll} still runs when the
+     * session's connection closes.
+     */
+    void stopAccepting(SessionContext session);
+
     /** Refuses every registration with {@code INTERNAL_ERROR}, for a server that has no TCP tunnel listeners. */
     static TunnelListeners unavailable() {
         return new TunnelListeners() {
@@ -49,6 +56,9 @@ public interface TunnelListeners {
             public Future<?> unbindAll(SessionContext session) {
                 return session.channel().eventLoop().newSucceededFuture(null);
             }
+
+            @Override
+            public void stopAccepting(SessionContext session) {}
         };
     }
 }

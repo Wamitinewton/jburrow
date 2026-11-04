@@ -202,11 +202,12 @@ class MicrometerTunnelMetricsTest {
 
     @Test
     void gaugesReadThePortPoolAndDirectMemory() {
-        metrics.bindPortPool(() -> new PortPoolSnapshot(90, 7, 3));
+        metrics.bindPortPool(() -> new PortPoolSnapshot(90, 7, 5, 3));
         metrics.bindDirectMemory(() -> 4_096);
 
         assertThat(gauge("jburrow.tcp.ports", "state", "free")).isEqualTo(90);
         assertThat(gauge("jburrow.tcp.ports", "state", "reserved")).isEqualTo(7);
+        assertThat(gauge("jburrow.tcp.ports", "state", "held")).isEqualTo(5);
         assertThat(gauge("jburrow.tcp.ports", "state", "quarantined")).isEqualTo(3);
         assertThat(gauge("jburrow.netty.direct.memory")).isEqualTo(4_096);
     }

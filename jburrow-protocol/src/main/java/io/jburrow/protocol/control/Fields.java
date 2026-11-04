@@ -27,12 +27,17 @@ final class Fields {
     static final int MAX_PORT = 65_535;
     static final int MAX_FRAME_PAYLOAD = FrameLimits.MAX_DATA_PAYLOAD;
     static final long MIN_PING_INTERVAL_MS = 1_000;
+    static final long MAX_RECONNECT_AFTER_MS = 60_000;
+    static final long MAX_DRAIN_MS = 300_000;
 
     static final Pattern PEER_NAME = Pattern.compile("[A-Za-z0-9._-]{1,64}");
     static final Pattern PEER_VERSION = Pattern.compile("[A-Za-z0-9.+_-]{1,64}");
     static final Pattern PLATFORM = Pattern.compile("[a-z0-9_]{1,32}");
     static final Pattern CAPABILITY = Pattern.compile("[a-z0-9.-]{1,64}");
     static final Pattern TUNNEL_REF = Pattern.compile("[a-z0-9][a-z0-9-]{0,31}");
+
+    /** {@code jbr_} and 43 characters of unpadded base64url: 32 random bytes. */
+    static final Pattern RESUME_TOKEN = Pattern.compile("jbr_[A-Za-z0-9_-]{43}");
 
     /** A label under the server's HTTP domain: 3 to 63 characters, no leading, trailing or doubled hyphen. */
     static final Pattern SUBDOMAIN = Pattern.compile("(?!.*--)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]");
@@ -91,6 +96,13 @@ final class Fields {
     }
 
     static int range(int value, int min, int max, String field) {
+        if (value < min || value > max) {
+            throw invalid(field, "must be between " + min + " and " + max);
+        }
+        return value;
+    }
+
+    static long range(long value, long min, long max, String field) {
         if (value < min || value > max) {
             throw invalid(field, "must be between " + min + " and " + max);
         }

@@ -13,13 +13,17 @@ import io.netty.channel.ConnectTimeoutException;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
 import java.io.IOException;
 import java.net.UnknownHostException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.regex.Pattern;
 import javax.net.ssl.SSLException;
 
 /**
@@ -32,6 +36,9 @@ import javax.net.ssl.SSLException;
  * fail on (§3.4) and Netty doesn't, and passed on; the handler then removes itself.
  */
 final class UpgradeFailures extends ChannelInboundHandlerAdapter {
+
+    /** {@code Retry-After} as delta-seconds (RFC 9110 §10.2.3); the HTTP-date form isn't used by any JBurrow server. */
+    private static final Pattern DELTA_SECONDS = Pattern.compile("[0-9]{1,9}");
 
     private final ControlConnection connection;
     private final ControlJson json;
@@ -60,7 +67,7 @@ final class UpgradeFailures extends ChannelInboundHandlerAdapter {
         }
         TunnelStartException refused;
         try {
-            refused = refusal(response.status(), ByteBufUtil.getBytes(response.content()), json);
+            refused = refusal(response.status(), response.headers(), ByteBufUtil.getBytes(response.content()), json);
         } finally {
             response.release();
         }
@@ -68,10 +75,13 @@ final class UpgradeFailures extends ChannelInboundHandlerAdapter {
     }
 
     /**
-     * A refused upgrade. The client decides on the body's {@code code} alone; a body it can't read a known code from is
-     * a failure to connect, since it usually comes from something between the client and the server (§3.5).
+     * A refused upgrade, with its status and {@code Retry-After}. The client decides on the body's {@code code} alone; a
+     * body it can't read a known code from is a failure to connect, since it usually comes from something between the
+     * client and the server (§3.5).
      */
-    static TunnelStartException refusal(HttpResponseStatus status, byte[] body, ControlJson json) {
+    static TunnelStartException refusal(HttpResponseStatus status, HttpHeaders headers, byte[] body, ControlJson json) {
+        OptionalInt httpStatus = OptionalInt.of(status.code());
+        Optional<Duration> retryAfter = retryAfter(headers.get(HttpHeaderNames.RETRY_AFTER));
         UpgradeRefusal refusal;
         try {
             refusal = json.readRefusal(body);
@@ -81,14 +91,29 @@ final class UpgradeFailures extends ChannelInboundHandlerAdapter {
                     "The upgrade was refused with HTTP " + status.code() + " "
                             + PeerText.sanitize(status.reasonPhrase())
                             + " and no JBurrow error code; something between this client and the server may have"
-                            + " answered.");
+                            + " answered.",
+                    Optional.empty(),
+                    List.of(),
+                    httpStatus,
+                    retryAfter,
+                    null);
         }
         return new TunnelStartException(
                 Kind.UPGRADE_REFUSED,
                 PeerText.sanitize(refusal.message()),
                 Optional.of(refusal.code()),
                 refusal.supported() == null ? List.of() : refusal.supported(),
+                httpStatus,
+                retryAfter,
                 null);
+    }
+
+    /** A {@code Retry-After} of delta-seconds; anything else is ignored. */
+    static Optional<Duration> retryAfter(String value) {
+        if (value == null || !DELTA_SECONDS.matcher(value.strip()).matches()) {
+            return Optional.empty();
+        }
+        return Optional.of(Duration.ofSeconds(Long.parseLong(value.strip())));
     }
 
     /** What a failure before the upgrade completed means for {@code start()}. */

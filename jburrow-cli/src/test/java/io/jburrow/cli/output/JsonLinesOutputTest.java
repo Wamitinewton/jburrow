@@ -14,6 +14,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -91,6 +92,61 @@ class JsonLinesOutputTest {
                 5, "GET", "/missing", OptionalInt.empty(), Optional.of(ErrorCode.LOCAL_SERVICE_UNREACHABLE), 0, 0, 3));
 
         assertThat(onlyLine()).contains("\"status\":null,\"reset\":\"LOCAL_SERVICE_UNREACHABLE\"");
+    }
+
+    @Test
+    void disconnected() {
+        output.onDisconnected(
+                TunnelClosed.serverError(ErrorCode.SERVER_SHUTTING_DOWN, "The server is shutting down."),
+                Duration.ofMillis(830));
+
+        assertThat(onlyLine())
+                .isEqualTo("{\"type\":\"disconnected\",\"time\":\"" + TIME + "\",\"reason\":\"SERVER_ERROR\","
+                        + "\"code\":\"SERVER_SHUTTING_DOWN\",\"retryInMs\":830}");
+    }
+
+    @Test
+    void disconnectedWithoutACode() {
+        output.onDisconnected(TunnelClosed.connectionLost("The connection to the server was lost."), Duration.ZERO);
+
+        assertThat(onlyLine()).endsWith("\"reason\":\"CONNECTION_LOST\",\"code\":null,\"retryInMs\":0}");
+    }
+
+    @Test
+    void reconnected() {
+        output.onReconnected(
+                "1c9f6d2f-8d66-4d57-ab4f-3a2e1dafb58b",
+                List.of(RegisteredTunnel.of("default", UUID.randomUUID(), TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                true);
+
+        assertThat(onlyLine())
+                .isEqualTo("{\"type\":\"reconnected\",\"time\":\"" + TIME + "\","
+                        + "\"sessionId\":\"1c9f6d2f-8d66-4d57-ab4f-3a2e1dafb58b\","
+                        + "\"tunnels\":[{\"ref\":\"default\",\"url\":\"tcp://tcp.example.dev:20417\","
+                        + "\"publicHost\":\"tcp.example.dev\",\"publicPort\":20417,"
+                        + "\"local\":\"localhost:22\"}],\"sameUrls\":true}");
+    }
+
+    @Test
+    void aReconnectingRunStillEndsWithOneClosedEvent() {
+        output.onEstablished(
+                "first",
+                List.of(RegisteredTunnel.of("default", UUID.randomUUID(), TunnelKind.TCP, "tcp.example.dev", 20_417)));
+        output.onDisconnected(TunnelClosed.connectionLost("The connection to the server was lost."), Duration.ZERO);
+        output.onDisconnected(TunnelClosed.connectionLost("Connection refused"), Duration.ofSeconds(1));
+        output.onReconnected(
+                "second",
+                List.of(RegisteredTunnel.of("default", UUID.randomUUID(), TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                true);
+        output.onClosed(TunnelClosed.userClosed());
+
+        assertThat(out.toString().lines().map(line -> line.substring(0, line.indexOf("\",\"time\""))))
+                .containsExactly(
+                        "{\"type\":\"registered",
+                        "{\"type\":\"disconnected",
+                        "{\"type\":\"disconnected",
+                        "{\"type\":\"reconnected",
+                        "{\"type\":\"closed");
     }
 
     @Test

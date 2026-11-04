@@ -8,7 +8,8 @@ import picocli.CommandLine.ParameterException;
 
 /**
  * The process exit codes, as phase 1's ARCHITECTURE.md §The CLI lists them, with {@code FLOW_CONTROL_ERROR} added to
- * 6 by phase 2's §Failure modes and the subdomain refusals added to 5 by phase 3's §The CLI. A script decides on these, so a code's meaning never changes once released.
+ * 6 by phase 2's §Failure modes, the subdomain refusals added to 5 by phase 3's §The CLI, and {@code SESSION_REPLACED}
+ * added to 4 by phase 4's §The CLI. A script decides on these, so a code's meaning never changes once released.
  */
 final class ExitCodes {
 
@@ -54,6 +55,7 @@ final class ExitCodes {
                     SERVER_SHUTTING_DOWN,
                     HANDSHAKE_TIMEOUT,
                     HEARTBEAT_TIMEOUT,
+                    SESSION_REPLACED,
                     INTERNAL_ERROR -> CONNECTION_FAILED;
             case VALIDATION_FAILED,
                     TUNNEL_LIMIT_EXCEEDED,

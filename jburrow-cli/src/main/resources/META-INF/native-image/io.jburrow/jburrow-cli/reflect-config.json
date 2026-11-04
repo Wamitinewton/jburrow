@@ -7,6 +7,20 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$Disconnected",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "io.jburrow.cli.output.JsonLinesOutput$Reconnected",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
     "name": "io.jburrow.cli.output.JsonLinesOutput$Registered",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,

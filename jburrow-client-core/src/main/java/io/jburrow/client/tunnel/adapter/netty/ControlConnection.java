@@ -1,15 +1,16 @@
 package io.jburrow.client.tunnel.adapter.netty;
 
 import io.jburrow.client.ClientSettings;
-import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.TunnelStartException.Kind;
 import io.jburrow.client.tunnel.application.port.TunnelEvents;
 import io.jburrow.client.tunnel.domain.ActiveTunnel;
 import io.jburrow.client.tunnel.domain.ClientSession;
+import io.jburrow.client.tunnel.domain.Resumption;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -24,21 +25,14 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * One session's connection to the server, from the TCP connect to the close. It owns the {@link ClientSession},
- * completes {@code start()} and {@link #closed()}, and is the one place a session ends, so every path ends it the same
- * way ({@code docs/protocol.md} §8.6):
+ * One session's connection to the server, from the TCP connect to the close. It owns the {@link ClientSession} and is
+ * the one place a session ends, so every path ends it the same way ({@code docs/protocol.md} §8.6):
  *
  * <ul>
  *   <li>this client finds a session error: streams reset with {@code CANCELLED}, {@code ERROR}, then a close frame with
@@ -50,12 +44,15 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>Whoever starts the WebSocket close waits at most {@link #CLOSE_TIMEOUT} for the other side's close frame. The first
- * reason recorded is the one reported. A session that never establishes fails {@code start()} at once; one that did
- * completes {@link #closed()} when its connection has closed and its streams are gone.
+ * reason recorded is the one reported. A {@code GOAWAY} changes nothing here but the report: the server ends the
+ * session after it as after any {@code ERROR}.
  *
- * <p>Everything except the {@link TunnelHandle} methods and {@link #awaitStart()} runs on the session's event loop.
+ * <p>It tells its {@link Supervision} that the session was established, and how it ended, exactly once, and only once
+ * its channel has closed and its streams are reported closed, so the next session never overlaps it.
+ *
+ * <p>Everything runs on the session's event loop.
  */
-final class ControlConnection implements TunnelHandle {
+final class ControlConnection {
 
     /** How long the side that sent a close frame waits for the other side's before cutting the connection. */
     static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(2);
@@ -65,11 +62,26 @@ final class ControlConnection implements TunnelHandle {
     private static final String INTERNAL_ERROR_MESSAGE = "The client failed unexpectedly.";
     private static final int MAX_ERROR_MESSAGE_LENGTH = 512;
 
+    /** Hears how one connection's session went. Called on the event loop. */
+    interface Supervision {
+
+        /** The {@code REGISTER} reply arrived. */
+        void onEstablished(ControlConnection connection, List<RegisteredTunnel> tunnels);
+
+        /** The session was never established, and its connection, if it had one, has closed. */
+        void onStartFailed(ControlConnection connection, TunnelStartException failure);
+
+        /**
+         * The established session ended: its streams are reported closed and its connection has closed.
+         *
+         * @param goAway the server's {@code GOAWAY}, if the session received one
+         */
+        void onEnded(ControlConnection connection, TunnelClosed closed, Optional<GoAway> goAway);
+    }
+
     private final ClientSettings settings;
     private final ClientSession session;
-    private final CompletableFuture<TunnelHandle> started = new CompletableFuture<>();
-    private final CompletableFuture<TunnelClosed> closed = new CompletableFuture<>();
-    private final AtomicBoolean endReported = new AtomicBoolean();
+    private final Supervision supervision;
 
     private Channel channel;
     private LocalConnector streams;
@@ -78,104 +90,39 @@ final class ControlConnection implements TunnelHandle {
     private boolean upgraded;
     private boolean closeFrameSent;
     private boolean tornDown;
+    private boolean reported;
+    /** Why an established session ended. */
     private TunnelClosed closeReason;
+    /** Why a session that was never established failed. */
+    private TunnelStartException startFailure;
 
-    private volatile Channel published;
-    private volatile String sessionId;
-    private volatile List<RegisteredTunnel> tunnels = List.of();
+    private GoAway goAway;
+    /** The tunnel the server's {@code ERROR} named, if it named one. */
+    private String refusedRef;
 
-    ControlConnection(ClientSettings settings) {
+    ControlConnection(ClientSettings settings, Resumption resumption, Supervision supervision) {
         this.settings = Objects.requireNonNull(settings, "settings");
-        this.session = new ClientSession(settings.tunnels(), settings.windows(), settings.capabilities());
+        this.supervision = Objects.requireNonNull(supervision, "supervision");
+        this.session = new ClientSession(settings.tunnels(), settings.windows(), settings.capabilities(), resumption);
     }
 
     ClientSession session() {
         return session;
     }
 
-    // The handle, from any thread.
-
-    @Override
-    public String sessionId() {
-        return sessionId;
+    /** The tunnel the server's {@code ERROR} named, if it named one: the one a registration refusal is about. */
+    Optional<String> refusedRef() {
+        return Optional.ofNullable(refusedRef);
     }
-
-    @Override
-    public List<RegisteredTunnel> tunnels() {
-        return tunnels;
-    }
-
-    @Override
-    public CompletionStage<TunnelClosed> closed() {
-        return closed.minimalCompletionStage();
-    }
-
-    @Override
-    public void close() {
-        Channel current = published;
-        if (current == null) {
-            return;
-        }
-        try {
-            current.eventLoop().execute(this::closeByUser);
-        } catch (RejectedExecutionException e) {
-            log.debug("close requested after the client stopped");
-        }
-    }
-
-    /**
-     * Blocks until the session is established or fails.
-     *
-     * @throws TunnelStartException why it failed
-     */
-    TunnelHandle awaitStart() throws TunnelStartException {
-        try {
-            return started.get();
-        } catch (ExecutionException e) {
-            if (e.getCause() instanceof TunnelStartException failure) {
-                throw failure;
-            }
-            throw new IllegalStateException("start() failed unexpectedly", e.getCause());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            close();
-            throw new TunnelStartException(Kind.CONNECT_FAILED, "Interrupted while the session was being set up.");
-        }
-    }
-
-    /** Waits up to {@code timeout} for an established session to finish closing. */
-    void awaitClosed(Duration timeout) {
-        if (!started.isDone() || started.isCompletedExceptionally()) {
-            return;
-        }
-        try {
-            closed.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException e) {
-            log.debug("the session didn't finish closing within {}", timeout);
-        }
-    }
-
-    /**
-     * Completes whatever is still pending once the event loop has stopped, so {@code start()} returns and
-     * {@link #closed()} completes even if the loop went away first.
-     */
-    void abandon() {
-        started.completeExceptionally(
-                new TunnelStartException(Kind.CONNECT_FAILED, "The client was closed before the session was set up."));
-        if (!started.isCompletedExceptionally()) {
-            reportEnd(closeReason != null ? closeReason : TunnelClosed.userClosed());
-        }
-    }
-
-    // The session's life, on its event loop.
 
     /** The TCP connection is up: the handshake deadline starts, covering TLS, the upgrade, and the handshake. */
     void onConnected(Channel channel, LocalConnector streams) {
         this.channel = channel;
         this.streams = streams;
-        this.published = channel;
+        if (session.isClosing()) {
+            channel.close();
+            return;
+        }
         Duration timeout = settings.handshakeTimeout();
         handshakeDeadline =
                 channel.eventLoop().schedule(this::onHandshakeDeadline, timeout.toNanos(), TimeUnit.NANOSECONDS);
@@ -223,23 +170,37 @@ final class ControlConnection implements TunnelHandle {
     /** The server's {@code REGISTER} reply arrived. */
     void onEstablished(List<ActiveTunnel> active) {
         cancel(handshakeDeadline);
-        sessionId = session.sessionId().orElseThrow().toString();
-        tunnels = active.stream().map(ActiveTunnel::registered).toList();
+        List<RegisteredTunnel> tunnels =
+                active.stream().map(ActiveTunnel::registered).toList();
         log.debug(
                 "session established: session={} tunnels={}",
-                sessionId,
+                describeSession(),
                 tunnels.stream().map(RegisteredTunnel::url).toList());
-        tell(events -> events.onEstablished(sessionId, tunnels));
-        started.complete(this);
+        supervision.onEstablished(this, tunnels);
     }
 
-    /** {@code start()} can't succeed: nothing is sent, and the connection is closed. */
+    /**
+     * The server's {@code GOAWAY}: the session carries on with its open streams until the server ends it, and the next
+     * one waits at least {@code reconnectAfterMs} (§6.10).
+     */
+    void onGoAway(GoAway received) {
+        goAway = received;
+        log.debug(
+                "server going away: session={} reconnectAfterMs={} drainMs={}",
+                describeSession(),
+                received.reconnectAfterMs(),
+                received.drainMs());
+    }
+
+    /** The session can't be established: nothing is sent, and the connection is closed. */
     void startFailed(TunnelStartException failure) {
         if (beginClosing(TunnelClosed.connectionLost(failure.getMessage()), failure)) {
             log.debug("session failed to start: {} {}", failure.kind(), failure.getMessage());
         }
         if (channel != null) {
             channel.close();
+        } else {
+            report();
         }
     }
 
@@ -291,6 +252,9 @@ final class ControlConnection implements TunnelHandle {
     /** The server sent {@code ERROR}: send nothing more, and wait for its close frame to answer it (§8.6). */
     void peerFailed(ErrorBody error) {
         String message = PeerText.sanitize(error.message());
+        if (!session.isClosing()) {
+            refusedRef = error.ref();
+        }
         if (!beginClosing(
                 TunnelClosed.serverError(error.code(), message),
                 new TunnelStartException(Kind.SERVER_ERROR, message, Optional.of(error.code()), List.of(), null))) {
@@ -328,12 +292,19 @@ final class ControlConnection implements TunnelHandle {
         channel.close();
     }
 
-    /** The user ends the session on purpose: no {@code ERROR}, a close frame with status {@code 1000} (§8.6). */
+    /**
+     * The user ends the session on purpose: no {@code ERROR}, a close frame with status {@code 1000} (§8.6). Before the
+     * connection is up, the attempt ends at once, and a connection that comes up later is closed.
+     */
     void closeByUser() {
         if (!beginClosing(
                 TunnelClosed.userClosed(),
                 new TunnelStartException(
                         Kind.CONNECT_FAILED, "The client was closed before the session was set up."))) {
+            return;
+        }
+        if (channel == null) {
+            report();
             return;
         }
         if (!upgraded || !channel.isActive()) {
@@ -349,6 +320,7 @@ final class ControlConnection implements TunnelHandle {
         String message =
                 switch (missing) {
                     case HTTP -> "This server doesn't support HTTP tunnels.";
+                    case RESUME -> "This server doesn't support resuming sessions.";
                 };
         if (!beginClosing(TunnelClosed.userClosed(), new TunnelStartException(Kind.UNSUPPORTED_BY_SERVER, message))) {
             return;
@@ -378,8 +350,8 @@ final class ControlConnection implements TunnelHandle {
         }
         if (closeReason != null) {
             log.debug("session closed: session={} reason={}", describeSession(), closeReason.reason());
-            reportEnd(closeReason);
         }
+        report();
     }
 
     /** Whether reading the connection is paused, which flow control never does. */
@@ -406,8 +378,8 @@ final class ControlConnection implements TunnelHandle {
     }
 
     /**
-     * Moves the session to closing and records why: {@code ifEstablished} for an established session, which
-     * {@link #closed()} reports at teardown, or {@code ifNotEstablished}, which fails {@code start()} now. False if the
+     * Moves the session to closing and records why: {@code ifEstablished} for an established session, or
+     * {@code ifNotEstablished} for one that never was. Either is reported once the connection has closed. False if the
      * session was already closing, and nothing changes.
      */
     private boolean beginClosing(TunnelClosed ifEstablished, TunnelStartException ifNotEstablished) {
@@ -420,7 +392,7 @@ final class ControlConnection implements TunnelHandle {
         if (established) {
             closeReason = ifEstablished;
         } else {
-            started.completeExceptionally(ifNotEstablished);
+            startFailure = ifNotEstablished;
         }
         return true;
     }
@@ -449,10 +421,16 @@ final class ControlConnection implements TunnelHandle {
         }
     }
 
-    private void reportEnd(TunnelClosed reason) {
-        if (endReported.compareAndSet(false, true)) {
-            tell(events -> events.onClosed(reason));
-            closed.complete(reason);
+    /** Tells the supervision how the session ended, once. */
+    private void report() {
+        if (reported) {
+            return;
+        }
+        reported = true;
+        if (closeReason != null) {
+            supervision.onEnded(this, closeReason, Optional.ofNullable(goAway));
+        } else {
+            supervision.onStartFailed(this, startFailure);
         }
     }
 

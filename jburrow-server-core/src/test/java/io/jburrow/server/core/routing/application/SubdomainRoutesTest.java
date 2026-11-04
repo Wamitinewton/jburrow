@@ -8,9 +8,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.server.core.portpool.domain.MutableClock;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
+import io.jburrow.server.core.routing.application.port.ClaimSnapshot;
 import io.jburrow.server.core.routing.domain.Blocklist;
 import io.jburrow.server.core.routing.domain.NameGenerator;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Random;
 import java.util.Set;
 import java.util.random.RandomGenerator;
@@ -227,6 +229,115 @@ class SubdomainRoutesTest {
         clock.advance(Duration.ofSeconds(1));
         routes.release(unclaimed, "t9");
         assertThat(routes.size()).isZero();
+    }
+
+    @Test
+    void aSnapshotHasEveryActiveClaimAndEveryHoldNotYetOver() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        SubdomainName other = new SubdomainName("other");
+        routes.claim(DEMO, "alice", "t1");
+        routes.claim(other, "bob", "t2");
+        routes.release(other, "t2");
+        Instant holdEnd = clock.instant().plus(HOLD);
+
+        assertThat(routes.snapshot(clock.instant()))
+                .containsExactlyInAnyOrder(
+                        new ClaimSnapshot<>(DEMO, "alice", null), new ClaimSnapshot<>(other, "bob", holdEnd));
+        assertThat(routes.snapshot(holdEnd)).containsExactly(new ClaimSnapshot<>(DEMO, "alice", null));
+    }
+
+    @Test
+    void aSeededHoldRoutesNowhereAndYieldsOnlyToItsPrincipal() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        Instant until = clock.instant().plusSeconds(45);
+
+        assertThat(routes.seedHold(DEMO, "alice", until)).isTrue();
+
+        assertThat(routes.find(DEMO)).isEmpty();
+        assertThat(routes.snapshot(clock.instant())).containsExactly(new ClaimSnapshot<>(DEMO, "alice", until));
+        assertRefused(() -> routes.claim(DEMO, "bob", "t2"), ClaimRefused.Reason.UNAVAILABLE);
+        assertThat(routes.claim(DEMO, "alice", "t1")).isEqualTo(DEMO);
+        assertThat(routes.find(DEMO)).contains("t1");
+    }
+
+    @Test
+    void aSeededHoldEndsWhenItSays() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        routes.seedHold(DEMO, "alice", clock.instant().plusSeconds(45));
+
+        clock.advance(Duration.ofSeconds(45));
+
+        assertThat(routes.snapshot(clock.instant())).isEmpty();
+        assertThat(routes.claim(DEMO, "bob", "t2")).isEqualTo(DEMO);
+    }
+
+    @Test
+    void aSeededHoldNeverReplacesAClaim() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        SubdomainName held = new SubdomainName("held");
+        routes.claim(DEMO, "alice", "t1");
+        routes.claim(held, "alice", "t2");
+        routes.release(held, "t2");
+        Instant until = clock.instant().plusSeconds(300);
+
+        assertThat(routes.seedHold(DEMO, "bob", until)).isFalse();
+        assertThat(routes.seedHold(held, "bob", until)).isFalse();
+
+        assertThat(routes.find(DEMO)).contains("t1");
+        assertThat(routes.claim(held, "alice", "t3")).isEqualTo(held);
+    }
+
+    @Test
+    void aSeededHoldReplacesAnExpiredOneAndIgnoresOneAlreadyOver() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        routes.claim(DEMO, "alice", "t1");
+        routes.release(DEMO, "t1");
+        clock.advance(HOLD);
+
+        assertThat(routes.seedHold(new SubdomainName("past"), "bob", clock.instant()))
+                .isFalse();
+        assertThat(routes.seedHold(DEMO, "bob", clock.instant().plusSeconds(10)))
+                .isTrue();
+        assertRefused(() -> routes.claim(DEMO, "alice", "t2"), ClaimRefused.Reason.UNAVAILABLE);
+    }
+
+    @Test
+    void theVersionMovesOnEveryChangeAndOnlyThen() {
+        SubdomainRoutes<String, String> routes = routes(HOLD, new Random(1));
+        long start = routes.version();
+        assertThat(routes.version()).isEqualTo(start);
+
+        routes.claim(DEMO, "alice", "t1");
+        long claimed = routes.version();
+        assertThat(claimed).isNotEqualTo(start);
+
+        routes.release(DEMO, "t1");
+        long released = routes.version();
+        assertThat(released).isNotEqualTo(claimed);
+
+        routes.claim(DEMO, "alice", "t2");
+        long reclaimed = routes.version();
+        assertThat(reclaimed).isNotEqualTo(released);
+
+        SubdomainName random = routes.claimRandom("bob", "t3");
+        long drawn = routes.version();
+        assertThat(drawn).isNotEqualTo(reclaimed);
+
+        routes.seedHold(new SubdomainName("seeded"), "carol", clock.instant().plusSeconds(10));
+        long seeded = routes.version();
+        assertThat(seeded).isNotEqualTo(drawn);
+
+        assertRefused(() -> routes.claim(DEMO, "bob", "t4"), ClaimRefused.Reason.UNAVAILABLE);
+        routes.release(DEMO, "t1");
+        routes.release(new SubdomainName("unclaimed"), "t9");
+        routes.seedHold(random, "carol", clock.instant().plusSeconds(10));
+        assertThat(routes.version()).isEqualTo(seeded);
+
+        routes.release(random, "t3");
+        clock.advance(SubdomainRoutes.SWEEP_INTERVAL);
+        long beforeSweep = routes.version();
+        routes.release(new SubdomainName("unclaimed"), "t9");
+        assertThat(routes.version()).isNotEqualTo(beforeSweep);
     }
 
     @Test

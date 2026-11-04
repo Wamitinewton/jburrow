@@ -6,6 +6,7 @@ import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
+import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.TunnelId;
 import java.util.Objects;
 import java.util.concurrent.Executor;
@@ -21,7 +22,7 @@ public record EngineDependencies(
         RegisterTunnels registerTunnels,
         SessionAdmission admission,
         StreamQuota streamQuota,
-        PortReservations ports,
+        PortReservations<Principal> ports,
         RouteLookup<TunnelId> routes,
         TunnelMetrics metrics,
         Executor blockingExecutor,

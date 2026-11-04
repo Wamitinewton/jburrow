@@ -5,12 +5,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sun.net.httpserver.HttpServer;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.BodyFraming;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.HttpRequestHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
@@ -58,6 +60,9 @@ class HttpCommandTest {
     private static final String PUBLIC_HOST = "quiet-otter-4f2a.localhost";
     private static final RemoteAddress VISITOR = new RemoteAddress("203.0.113.9", 51_234);
     private static final String NL = System.lineSeparator();
+    private static final UUID SECOND_SESSION_ID = UUID.fromString("1c9f6d2f-8d66-4d57-ab4f-3a2e1dafb58b");
+    private static final ResumeToken FIRST_TOKEN = new ResumeToken("jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
+    private static final ResumeToken SECOND_TOKEN = new ResumeToken("jbr_ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8");
 
     private final CommandHarness cli = new CommandHarness(CLOCK, TOKEN);
     private final Queue<String> localHosts = new ConcurrentLinkedQueue<>();
@@ -214,7 +219,7 @@ class HttpCommandTest {
         Future<Integer> command =
                 cli.runAsync("http", "3000", "--server", peer.uri().toString(), "--output", "json");
         assertThat(peer.expect(Frame.Hello.class, TIMEOUT).message().capabilities())
-                .containsExactly("http");
+                .containsExactlyInAnyOrder("http", "resume");
 
         peer.send(serverHello(List.of()));
 
@@ -284,6 +289,69 @@ class HttpCommandTest {
         assertThat(cli.run("http", "3000", "--remote-port", "21000")).isEqualTo(ExitCodes.USAGE);
     }
 
+    // Reconnecting.
+
+    @Test
+    void aServerRestartIsADisconnectedAndAReconnectedEventWithTheSameUrlAndNoToken() throws Exception {
+        peer = ScriptedPeer.listen(0, ProtocolVersion.CURRENT);
+        Future<Integer> command =
+                cli.runAsync("http", "3000", "--server", peer.uri().toString(), "--output", "json");
+        assertThat(peer.expect(Frame.Hello.class, TIMEOUT).message().capabilities())
+                .containsExactlyInAnyOrder("http", "resume");
+        peer.send(serverHello(SESSION_ID, List.of("http", "resume")));
+        peer.expect(Frame.Register.class, TIMEOUT);
+        peer.send(new Frame.Registered(new Registered(List.of(otter()), FIRST_TOKEN)));
+        cli.stop().awaitInstalled();
+        ScriptedPeer first = peer;
+        first.stopListening();
+        peer = ScriptedPeer.listen(first.port(), ProtocolVersion.CURRENT);
+
+        first.send(new Frame.GoAway(new GoAway(300, 5_000)));
+        first.send(Frame.Error.of(ErrorCode.SERVER_SHUTTING_DOWN, "The server is shutting down."));
+        first.close();
+        peer.expect(Frame.Hello.class, TIMEOUT);
+        peer.send(serverHello(SECOND_SESSION_ID, List.of("http", "resume")));
+        Frame.Register register = peer.expect(Frame.Register.class, TIMEOUT);
+        assertThat(register.message().resume()).isEqualTo(FIRST_TOKEN);
+        assertThat(register.message().tunnels().getFirst().subdomain()).isEqualTo("quiet-otter-4f2a");
+        peer.send(new Frame.Registered(new Registered(List.of(otter()), SECOND_TOKEN)));
+
+        cli.awaitOutput("\"type\":\"reconnected\"");
+        assertThat(command).isNotDone();
+        cli.stop().request();
+        assertThat(cli.exitCode(command)).isEqualTo(ExitCodes.USER_CLOSED);
+        List<JsonNode> events = cli.jsonLines();
+        assertThat(events)
+                .extracting(event -> event.get("type").asString())
+                .containsExactly("registered", "disconnected", "reconnected", "closed");
+        JsonNode disconnected = events.get(1);
+        assertThat(disconnected.get("reason").asString()).isEqualTo("SERVER_ERROR");
+        assertThat(disconnected.get("code").asString()).isEqualTo("SERVER_SHUTTING_DOWN");
+        assertThat(disconnected.get("retryInMs").asLong()).isEqualTo(300);
+        JsonNode reconnected = events.get(2);
+        assertThat(reconnected.get("sessionId").asString()).isEqualTo(SECOND_SESSION_ID.toString());
+        assertThat(reconnected.get("tunnels").get(0).get("url").asString())
+                .isEqualTo("http://" + PUBLIC_HOST + ":7080");
+        assertThat(reconnected.get("sameUrls").asBoolean()).isTrue();
+        assertThat(events.getLast().get("reason").asString()).isEqualTo("USER_CLOSED");
+        for (ResumeToken token : List.of(FIRST_TOKEN, SECOND_TOKEN)) {
+            assertThat(cli.out()).doesNotContain(token.value());
+            assertThat(cli.err()).doesNotContain(token.value());
+        }
+    }
+
+    @Test
+    void withNoReconnectAServerRestartExitsFour() throws Exception {
+        Future<Integer> command = establish("http", "3000", "--no-reconnect");
+        cli.awaitOutput("Forwarding");
+
+        peer.send(Frame.Error.of(ErrorCode.SERVER_SHUTTING_DOWN, "The server is shutting down."));
+
+        assertThat(cli.exitCode(command)).isEqualTo(ExitCodes.CONNECTION_FAILED);
+        assertThat(cli.out()).doesNotContain("reconnect");
+        assertThat(cli.err()).startsWith("Error SERVER_SHUTTING_DOWN: The server is shutting down.");
+    }
+
     // Helpers.
 
     private Future<Integer> establish(String... args) throws Exception {
@@ -323,12 +391,20 @@ class HttpCommandTest {
     }
 
     private static Frame.ServerHello serverHello(List<String> capabilities) {
+        return serverHello(SESSION_ID, capabilities);
+    }
+
+    private static Frame.ServerHello serverHello(UUID sessionId, List<String> capabilities) {
         return new Frame.ServerHello(new ServerHello(
-                SESSION_ID,
+                sessionId,
                 new ServerInfo("jburrow-server", "0.3.0"),
                 capabilities,
                 LIMITS,
                 ScriptedPeer.SERVER_WINDOWS));
+    }
+
+    private static RegisteredTunnel otter() {
+        return RegisteredTunnel.http("default", TUNNEL_ID, "http", PUBLIC_HOST, 7080);
     }
 
     /** One {@code GET} through the tunnel, read to its end. */

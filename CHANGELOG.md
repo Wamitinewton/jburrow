@@ -92,7 +92,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `HEADERS`, both bodies as `DATA` without their HTTP/1.1 framing, and the codes
   `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR`
   ([ADR-0011](docs/adr/0011-http-tunnels.md)). A peer that doesn't offer `http` sees draft 2
-  unchanged. `jburrow-protocol` gains the heads as
+  unchanged, so phase 2 CLIs keep running TCP tunnels against a server with HTTP tunnels.
+  `jburrow-protocol` gains the heads as
   validated records, `HttpExchangeRules` for the order and body length of an exchange, and a Jazzer
   target for them.
 - Reservations and parking in the flow model
@@ -179,3 +180,88 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a server-sent event stream
   ([ADR-0006](docs/adr/0006-cli-distribution-native-binaries.md)). `make native` builds the binary
   locally and `make native-smoke` runs the same test.
+- The `resume` capability of protocol draft 2, specified in [`docs/protocol.md`](docs/protocol.md)
+  §4.2, §6.10 and §7.11 and recorded in [ADR-0014](docs/adr/0014-reconnect-and-resume.md): `GOAWAY`
+  with `reconnectAfterMs` and `drainMs` for a server that is draining, `resume` in `REGISTER` and
+  `resumeToken` in its reply to name the client's previous session, registration step 2a that ends
+  that session, a Draining state, and the code `SESSION_REPLACED`, which `jburrow` maps to exit code
+  4. `jburrow-protocol` gains `GoAway` and `ResumeToken` (masked in every `toString`), the
+  capability-aware codec that drops the tokens as unknown keys in a session without `resume`, its
+  conformance vectors and examples, and `ScriptedPeer` support; the client's session model gains the
+  `GOAWAY` rules and a Jazzer target for them. Neither side offers or lists `resume` yet, so nothing
+  changes on the wire until the drain and the reconnecting client ship.
+- A TCP tunnel's port is held for its principal after its session ends, as an HTTP tunnel's name
+  already was: nobody else can take it, and random draws skip it, until the resume window has passed,
+  while its owner gets it back by asking for it. `jburrow_tcp_ports` gains the state `held`. The port
+  pool and the route table can each be snapshotted, seeded with holds and asked whether they changed,
+  for the durable leases that follow.
+- Durable leases ([ADR-0015](docs/adr/0015-durable-leases.md)): every server process writes a
+  snapshot of its names and ports, active and held, to the new `jburrow.tunnel_lease` table
+  (`V2__tunnel_lease.sql`) within a second of a change and every `jburrow.lease.refresh` (30 s) while
+  it has any, on a virtual thread that nothing waits for. At startup, before the edge accepts a
+  connection, the next process seeds every lease that still counts as a hold for its owner, so a
+  restart, even a crash, no longer hands a held name or port to someone else. An idle server issues no
+  lease query, so Neon can still suspend. New metrics `jburrow_lease_writes_total{outcome}` and
+  `jburrow_lease_write_seconds`, and a "leases seeded" line at startup.
+- Resume tokens on the server: in a session with `resume`, every `REGISTER` reply carries a new
+  token, of which the server keeps only the SHA-256, in the session and in an index of live sessions.
+  A later `REGISTER` of the same owner that presents it ends that session with `SESSION_REPLACED`
+  before admission, waits until its names and ports are on hold and its listeners closed, and then
+  registers with them, so a client whose old connection went silent gets its tunnel back without
+  waiting for the idle timeout. A token of another owner, of a session that has ended, or used once
+  already does nothing. The server logs "session replaced" with both session ids, never the token
+  or its hash. The server still doesn't list `resume`, so production is unchanged.
+- The drain: on stop, readiness goes down first, then the edge closes its listener, ends sessions
+  still in their handshake, sends every session with `resume` a `GOAWAY` with its own
+  `reconnectAfterMs` (spread over `jburrow.drain.reconnect-spread`, 2 s), closes every TCP tunnel
+  listener and opens no new stream, and gives the streams already open up to `jburrow.drain.timeout`
+  (5 s) to finish before it ends every session with `SERVER_SHUTTING_DOWN` as before. An idle server
+  drains at once. Once every session has put its names and ports on hold, the leases are flushed one
+  last time, so the next process seeds exactly what this one was holding. The drain logs one line:
+  sessions, streams open at `GOAWAY`, streams cut, and how long it took. A visitor refused by a
+  draining session counts under `jburrow_visitor_connections_refused_total{reason="draining"}`.
+- The server lists `resume` in its `HELLO`: a client that offers it gets a resume token in every
+  `REGISTER` reply and a `GOAWAY` when the server drains. Phase 2 and phase 3 CLIs see no change.
+- `JBurrowClient` reconnects: when a session ends, it starts another on its own, asking for the
+  names and ports the last one got, a name the server chose included, and presenting that session's
+  resume token. After `GOAWAY` it waits the server's `reconnectAfterMs`, then tries about once a
+  second for a minute; after a lost connection it tries within half a second, then backs off from 1 s
+  to 30 s with jitter; a `Retry-After` is honoured, and only lengthens the wait. A session that
+  stayed up a minute resets the backoff. It stops for good on an invalid authtoken, a protocol
+  mismatch, `SESSION_REPLACED`, any registration refusal, or a name or port the user chose that is
+  now taken; a name or port the server chose that is taken is asked for once more without it, and
+  the tunnel comes back on a new address. A first session still fails at once, except while a deploy
+  is in progress (`SERVER_SHUTTING_DOWN`, `SERVER_AT_CAPACITY`, or an upgrade refused with 502, 503
+  or 504), which is tried for up to a minute. The client offers `resume`. New:
+  `ReconnectPolicy` (`standard()`, the default, and `never()`) and `Builder.reconnect`;
+  `TunnelEvents.onDisconnected` and `onReconnected`; `TunnelStartException.status()` and
+  `retryAfter()` for a refused upgrade; `TunnelClosed.upgradeStatus()` for an attempt whose upgrade
+  was refused without a code. `TunnelHandle` describes the current session, and
+  `closed()` completes once the client stops for good.
+- `jburrow http` and `jburrow tcp` reconnect by default and keep their URL or port across a server
+  restart. The human output prints one line when the session is lost, one more only when the
+  reason a later attempt fails changes, and one when the tunnel is back, or a line naming the new
+  URL if the old one was taken. `--output json` gains `disconnected` (`reason`, `code`,
+  `retryInMs`) and `reconnected` (`sessionId`, `tunnels`, `sameUrls`) events, and still ends with
+  exactly one `closed`. Neither prints the resume token. `--no-reconnect` exits at the first lost
+  session with code 4, as before. The native smoke test restarts the server under an open HTTP
+  tunnel and requires the same URL to answer within the client's reconnect schedule once the new
+  server is ready, giving the server itself up to `SERVER_RESTART_TIMEOUT` (180 s) to start.
+
+### Fixed
+
+- An incremental build of `jburrow-cli` no longer produces a native binary that fails at startup:
+  the module recompiles all its classes on every build, so picocli-codegen's native-image
+  configuration always covers every command, and `NativeImageMetadataTest` fails if it doesn't.
+
+### Changed
+
+- `jburrow.session.resume-window` (120 s) replaces `jburrow.http.name-hold` (60 s) and covers names
+  and ports alike; `0s` still turns holds off. A configuration that still sets
+  `jburrow.http.name-hold` fails startup naming its replacement.
+- A request that reaches the edge while the server is stopping gets the `SERVER_SHUTTING_DOWN` page
+  with `Retry-After: 10`, the length of a restart, instead of 5.
+- `jburrow.http.response-timeout` counts from the end of the request body, once the edge has sent
+  the request's `CLOSE` to the client, instead of from `OPEN`. An upload that takes longer than the
+  timeout to arrive is no longer answered `504` while the local service is still reading it; a
+  local service that never answers is still cut 60 s after the request ends.

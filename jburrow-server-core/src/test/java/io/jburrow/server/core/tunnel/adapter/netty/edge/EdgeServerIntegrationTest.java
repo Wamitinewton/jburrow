@@ -11,7 +11,6 @@ import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
-import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.application.InMemoryAuthtokenVerifier;
@@ -36,7 +35,6 @@ import java.net.SocketException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -275,12 +273,8 @@ class EdgeServerIntegrationTest {
     }
 
     private EngineDependencies dependencies() {
-        PortReservationService ports = new PortReservationService(new PortPool(
-                PortRange.parse("40000-40009"),
-                Duration.ofSeconds(60),
-                Duration.ofMinutes(10),
-                new Random(1),
-                InstantSource.system()));
+        PortReservationService<Principal> ports =
+                RegistrationFixtures.ports(PortRange.parse("40000-40009"), new Random(1));
         SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
         RegisterTunnels register = new RegisterTunnels(
                 new InMemoryAuthtokenVerifier(),

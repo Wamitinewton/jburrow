@@ -4,6 +4,7 @@ import io.jburrow.cli.output.ConsoleOutput;
 import io.jburrow.cli.output.JsonLinesOutput;
 import io.jburrow.cli.output.Output;
 import io.jburrow.client.JBurrowClient;
+import io.jburrow.client.ReconnectPolicy;
 import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.tunnel.domain.LocalTarget;
@@ -24,9 +25,10 @@ import picocli.CommandLine.Parameters;
 import picocli.CommandLine.Spec;
 
 /**
- * What {@code jburrow tcp} and {@code jburrow http} share: the local target, the server, the authtoken and the output
- * format; opening one tunnel; reporting it until the session ends; and exiting with the code {@link ExitCodes} gives
- * the outcome. A subcommand only says which tunnel it asks for. Everything about the session itself is
+ * What {@code jburrow tcp} and {@code jburrow http} share: the local target, the server, the authtoken, the output
+ * format and whether to reconnect; opening one tunnel; reporting it, across reconnects, until the client stops; and
+ * exiting with the code {@link ExitCodes} gives the outcome. A subcommand only says which tunnel it asks for.
+ * Everything about the sessions themselves, including when to reconnect and when to give up, is
  * {@code jburrow-client-core}'s.
  */
 abstract class TunnelCommand implements Callable<Integer> {
@@ -78,6 +80,12 @@ abstract class TunnelCommand implements Callable<Integer> {
             defaultValue = "human",
             description = "human, or json: one JSON object per line (default: ${DEFAULT-VALUE}).")
     private Format format;
+
+    @Option(
+            names = "--no-reconnect",
+            description = "Exit when the connection to the server is lost, instead of reconnecting and asking for the"
+                    + " same URL or port; for scripts.")
+    private boolean noReconnect;
 
     private final UnaryOperator<String> environment;
     private final StopSignal stopSignal;
@@ -156,6 +164,7 @@ abstract class TunnelCommand implements Callable<Integer> {
                     .tunnel(tunnel)
                     .events(output)
                     .clientInfo(CLIENT_NAME, new BuildInfo().version())
+                    .reconnect(noReconnect ? ReconnectPolicy.never() : ReconnectPolicy.standard())
                     .build();
         } catch (IllegalArgumentException e) {
             throw usage(e.getMessage());
@@ -170,7 +179,8 @@ abstract class TunnelCommand implements Callable<Integer> {
                         spec.commandLine().getErr(),
                         clock,
                         new BuildInfo().version(),
-                        tunnels);
+                        tunnels,
+                        !noReconnect);
             case JSON -> new JsonLinesOutput(spec.commandLine().getOut(), clock, tunnels);
         };
     }

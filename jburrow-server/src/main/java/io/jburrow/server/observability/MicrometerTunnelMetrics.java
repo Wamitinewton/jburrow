@@ -352,6 +352,7 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
         Objects.requireNonNull(snapshot, "snapshot");
         portGauge("free", snapshot, PortPoolSnapshot::free);
         portGauge("reserved", snapshot, PortPoolSnapshot::reserved);
+        portGauge("held", snapshot, PortPoolSnapshot::held);
         portGauge("quarantined", snapshot, PortPoolSnapshot::quarantined);
     }
 

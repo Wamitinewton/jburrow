@@ -10,10 +10,11 @@ import org.junit.jupiter.api.Test;
 class CapabilityTest {
 
     @Test
-    void httpIsTheOnlyCapability() {
-        assertThat(Capability.values()).containsExactly(Capability.HTTP);
+    void draftTwoDefinesHttpAndResume() {
+        assertThat(Capability.values()).containsExactly(Capability.HTTP, Capability.RESUME);
         assertThat(Capability.HTTP.wireName()).isEqualTo("http");
-        assertThat(ProtocolVersion.capabilities()).containsExactly(Capability.HTTP);
+        assertThat(Capability.RESUME.wireName()).isEqualTo("resume");
+        assertThat(ProtocolVersion.capabilities()).containsExactly(Capability.HTTP, Capability.RESUME);
     }
 
     @Test
@@ -26,6 +27,8 @@ class CapabilityTest {
     @Test
     void fromWireNameIsExact() {
         assertThat(Capability.fromWireName("http")).contains(Capability.HTTP);
+        assertThat(Capability.fromWireName("resume")).contains(Capability.RESUME);
+        assertThat(Capability.fromWireName("Resume")).isEmpty();
         assertThat(Capability.fromWireName("HTTP")).isEmpty();
         assertThat(Capability.fromWireName("http ")).isEmpty();
         assertThat(Capability.fromWireName("https")).isEmpty();
@@ -37,6 +40,12 @@ class CapabilityTest {
     void negotiationAnswersWithTheOfferedCapabilitiesThatAreEnabled() {
         assertThat(ProtocolVersion.negotiate(List.of("http"), Set.of(Capability.HTTP)))
                 .containsExactly("http");
+    }
+
+    @Test
+    void negotiationAnswersInTheOrderOfTheConstantsWhateverTheOffer() {
+        assertThat(ProtocolVersion.negotiate(List.of("resume", "http"), EnumSet.of(Capability.HTTP, Capability.RESUME)))
+                .containsExactly("http", "resume");
     }
 
     @Test

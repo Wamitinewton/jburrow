@@ -190,9 +190,29 @@ class JBurrowClientBuilderTest {
     }
 
     @Test
-    void theClientOffersHttpWhateverItsTunnel() {
+    void theClientOffersHttpAndResumeWhateverItsTunnel() {
         assertThat(settings("wss://connect.example.dev/v1/connect").capabilities())
-                .containsExactly(Capability.HTTP);
+                .containsExactlyInAnyOrder(Capability.HTTP, Capability.RESUME);
+    }
+
+    @Test
+    void theClientReconnectsByDefault() {
+        assertThat(settingsOf(http()).reconnect()).isEqualTo(ReconnectPolicy.standard());
+        assertThat(settingsOf(http().reconnect(ReconnectPolicy.never())).reconnect())
+                .isEqualTo(ReconnectPolicy.never());
+    }
+
+    @Test
+    void onlyTheStandardScheduleCanBeShortenedAndOnlyForTests() {
+        assertThat(ReconnectPolicy.standard().scaled(Duration.ofMillis(20)).reconnects())
+                .isTrue();
+        assertThat(ReconnectPolicy.never().reconnects()).isFalse();
+        assertThatThrownBy(() -> ReconnectPolicy.never().scaled(Duration.ofMillis(20)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> ReconnectPolicy.standard().scaled(Duration.ofSeconds(2)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> ReconnectPolicy.standard().scaled(Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

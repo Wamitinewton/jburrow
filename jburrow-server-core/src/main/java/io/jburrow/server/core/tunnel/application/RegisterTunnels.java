@@ -12,13 +12,19 @@ import io.jburrow.server.core.portpool.application.port.Reservation;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
 import io.jburrow.server.core.routing.application.port.SubdomainClaims;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
+import io.jburrow.server.core.tunnel.application.port.LiveSessions;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ClaimOutcome;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResumeOutcome;
 import io.jburrow.server.core.tunnel.domain.Principal;
+import io.jburrow.server.core.tunnel.domain.ResumeTokenHash;
+import io.jburrow.server.core.tunnel.domain.SessionId;
 import io.jburrow.server.core.tunnel.domain.TunnelId;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 
@@ -30,24 +36,61 @@ public final class RegisterTunnels {
 
     private final AuthtokenVerifier verifier;
     private final SessionAdmission admission;
-    private final PortReservations ports;
+    private final PortReservations<Principal> ports;
     private final SubdomainClaims<Principal, TunnelId> names;
     private final RegistrationPolicy policy;
     private final TunnelMetrics metrics;
+    private final LiveSessions liveSessions;
+    private final ResumeTokens resumeTokens;
+    private final Duration replaceTimeout;
 
+    /** Registration whose resume tokens never name a live session, for a server or a test without {@code resume}. */
     public RegisterTunnels(
             AuthtokenVerifier verifier,
             SessionAdmission admission,
-            PortReservations ports,
+            PortReservations<Principal> ports,
             SubdomainClaims<Principal, TunnelId> names,
             RegistrationPolicy policy,
             TunnelMetrics metrics) {
+        this(
+                verifier,
+                admission,
+                ports,
+                names,
+                policy,
+                metrics,
+                LiveSessions.none(),
+                new ResumeTokens(),
+                Duration.ZERO);
+    }
+
+    /**
+     * @param liveSessions ends the session a resume token names (step 2a)
+     * @param resumeTokens issues the token of each reply in a session with {@code resume}
+     * @param replaceTimeout the longest step 2a waits for the session it ended to release its tunnels
+     */
+    public RegisterTunnels(
+            AuthtokenVerifier verifier,
+            SessionAdmission admission,
+            PortReservations<Principal> ports,
+            SubdomainClaims<Principal, TunnelId> names,
+            RegistrationPolicy policy,
+            TunnelMetrics metrics,
+            LiveSessions liveSessions,
+            ResumeTokens resumeTokens,
+            Duration replaceTimeout) {
         this.verifier = Objects.requireNonNull(verifier, "verifier");
         this.admission = Objects.requireNonNull(admission, "admission");
         this.ports = Objects.requireNonNull(ports, "ports");
         this.names = Objects.requireNonNull(names, "names");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.liveSessions = Objects.requireNonNull(liveSessions, "liveSessions");
+        this.resumeTokens = Objects.requireNonNull(resumeTokens, "resumeTokens");
+        this.replaceTimeout = Objects.requireNonNull(replaceTimeout, "replaceTimeout");
+        if (replaceTimeout.isNegative()) {
+            throw new IllegalArgumentException("replaceTimeout must not be negative");
+        }
     }
 
     public RegistrationPolicy policy() {
@@ -55,9 +98,13 @@ public final class RegisterTunnels {
     }
 
     /**
-     * Registers {@code request} for the connection holding {@code ticket}, in a session that has {@code capabilities}.
-     * All or nothing: if a port can't be reserved or a name claimed, every port and name taken before it is released,
-     * and the exception names the tunnel's {@code ref}. Ports are reserved before any name is claimed.
+     * Registers {@code request} for {@code session}, the connection holding {@code ticket}, in a session that has
+     * {@code capabilities}. All or nothing: if a port can't be reserved or a name claimed, every port and name taken
+     * before it is released, and the exception names the tunnel's {@code ref}. Ports are reserved before any name is
+     * claimed.
+     *
+     * <p>With {@code resume}, a resume token in the request ends the live session it names before admission (step 2a),
+     * which never refuses; and the registration carries a new token for the reply.
      *
      * <p>The admission of step 3 is not undone here when a later step fails. A refusal always closes the connection,
      * and the edge releases the ticket when the connection closes, whatever state it reached. Keeping that rule in one
@@ -68,7 +115,9 @@ public final class RegisterTunnels {
      *     {@link ErrorCode#PORT_UNAVAILABLE}, {@link ErrorCode#PORT_POOL_EXHAUSTED},
      *     {@link ErrorCode#SUBDOMAIN_FORBIDDEN} or {@link ErrorCode#SUBDOMAIN_UNAVAILABLE}, the first check that fails
      */
-    public Registration execute(HandshakeTicket ticket, Register request, Set<Capability> capabilities) {
+    public Registration execute(
+            SessionId session, HandshakeTicket ticket, Register request, Set<Capability> capabilities) {
+        Objects.requireNonNull(session, "session");
         Objects.requireNonNull(ticket, "ticket");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(capabilities, "capabilities");
@@ -82,11 +131,28 @@ public final class RegisterTunnels {
                 .map(Principal::new)
                 .orElseThrow(
                         () -> ProtocolException.session(ErrorCode.AUTHTOKEN_INVALID, "The authtoken is not valid."));
+        boolean resume = capabilities.contains(Capability.RESUME);
+        if (resume && request.resume() != null) {
+            replaceStaleSession(request, principal, session);
+        }
         admission.admit(ticket, principal);
-        return new Registration(principal, plan(request.tunnels(), principal));
+        List<PlannedTunnel> tunnels = plan(request.tunnels(), principal);
+        return new Registration(principal, tunnels, resume ? Optional.of(resumeTokens.issue()) : Optional.empty());
     }
 
-    /** Returns every port the registration reserved to the pool, and puts every name it claimed on hold. */
+    /**
+     * Step 2a: the session the token names still counts against its owner's session limit, and holds the names and
+     * ports the request asks for again, so it ends first. Its claims are then holds for the same principal, which steps
+     * 4 and 5 grant like any other. The session making the request has no token of its own until its reply, so it can't
+     * name itself.
+     */
+    private void replaceStaleSession(Register request, Principal principal, SessionId session) {
+        boolean replaced =
+                liveSessions.replace(ResumeTokenHash.of(request.resume()), principal, session, replaceTimeout);
+        metrics.resumed(replaced ? ResumeOutcome.REPLACED : ResumeOutcome.NONE);
+    }
+
+    /** Puts every port the registration reserved and every name it claimed on hold for its principal. */
     public void release(Registration registration) {
         releaseAll(registration.tunnels());
     }
@@ -121,7 +187,7 @@ public final class RegisterTunnels {
             for (int i = 0; i < requests.size(); i++) {
                 TunnelRequest request = requests.get(i);
                 if (request.kind() == TunnelKind.TCP) {
-                    planned[i] = new PlannedTunnel.Tcp(request, reservePort(request), TunnelId.random());
+                    planned[i] = new PlannedTunnel.Tcp(request, reservePort(request, principal), TunnelId.random());
                 }
             }
             for (int i = 0; i < requests.size(); i++) {
@@ -138,11 +204,11 @@ public final class RegisterTunnels {
         return List.of(planned);
     }
 
-    private Reservation reservePort(TunnelRequest request) {
+    private Reservation reservePort(TunnelRequest request, Principal principal) {
         OptionalInt requestedPort =
                 request.remotePort() == null ? OptionalInt.empty() : OptionalInt.of(request.remotePort());
         try {
-            return ports.reserve(requestedPort);
+            return ports.reserve(requestedPort, principal);
         } catch (ProtocolException refused) {
             throw refused.forTunnel(request.ref());
         }

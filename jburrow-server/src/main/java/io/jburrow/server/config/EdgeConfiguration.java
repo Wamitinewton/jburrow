@@ -11,6 +11,7 @@ import io.jburrow.server.core.routing.domain.NameGenerator;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionRegistry;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.DrainSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
@@ -20,6 +21,7 @@ import io.jburrow.server.core.tunnel.adapter.netty.http.SessionExchanges;
 import io.jburrow.server.core.tunnel.adapter.netty.tcp.NettyTunnelListeners;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
+import io.jburrow.server.core.tunnel.application.ResumeTokens;
 import io.jburrow.server.core.tunnel.application.SessionAdmission;
 import io.jburrow.server.core.tunnel.application.StreamQuota;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
@@ -40,13 +42,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 
 /**
- * Constructs the tunnel engine from {@code jburrow.edge.*}, {@code jburrow.tcp.*} and {@code jburrow.http.*}: the port
- * pool, the route table, the session and stream caps, registration, the blocking executor, the metrics adapter, the
+ * Constructs the tunnel engine from {@code jburrow.edge.*}, {@code jburrow.tcp.*}, {@code jburrow.http.*} and
+ * {@code jburrow.session.*} and {@code jburrow.drain.*}: the port pool and the route table, which hold what a session claimed for the resume window, the session and stream caps, registration, the blocking executor, the metrics adapter, the
  * TCP tunnel listeners and the {@link EdgeServer}, which routes each HTTP request to the session serving its tunnel.
  * Hands the engine plain values and an executor, so nothing here touches Netty. Logs the direct memory budget the
  * settings add up to, parked responses included, and the kernel memory streams' socket buffers can take.
@@ -62,16 +65,28 @@ class EdgeConfiguration {
     /** How long a port whose bind found it in use is held out of the pool. */
     static final Duration PORT_QUARANTINE = Duration.ofMinutes(10);
 
-    /** The capabilities the server enables: a client that offers {@code http} gets HTTP tunnels. */
-    static final Set<Capability> CAPABILITIES = Set.of(Capability.HTTP);
+    /**
+     * The capabilities the server enables: a client that offers {@code http} gets HTTP tunnels, and one that offers
+     * {@code resume} gets resume tokens and {@code GOAWAY}.
+     */
+    static final Set<Capability> CAPABILITIES = Set.of(Capability.HTTP, Capability.RESUME);
+
+    EdgeConfiguration(Environment environment) {
+        RemovedProperties.refuse(environment);
+    }
 
     @Bean
-    PortReservationService portReservations(JBurrowProperties properties, Environment environment) {
+    PortReservationService<Principal> portReservations(JBurrowProperties properties, Environment environment) {
         PortRange range = properties.tcp().parsedPortRange().orElseThrow();
         requireClear(range, environment, "server.port");
         requireClear(range, environment, "management.server.port");
-        return new PortReservationService(new PortPool(
-                range, properties.tcp().reuseDelay(), PORT_QUARANTINE, new SecureRandom(), InstantSource.system()));
+        return new PortReservationService<>(new PortPool<>(
+                range,
+                properties.tcp().reuseDelay(),
+                PORT_QUARANTINE,
+                properties.session().resumeWindow(),
+                new SecureRandom(),
+                InstantSource.system()));
     }
 
     @Bean
@@ -95,7 +110,7 @@ class EdgeConfiguration {
         return new SubdomainRoutes<>(
                 Blocklist.defaults(reserved),
                 new NameGenerator(new SecureRandom()),
-                properties.http().nameHold(),
+                properties.session().resumeWindow(),
                 InstantSource.system());
     }
 
@@ -103,9 +118,10 @@ class EdgeConfiguration {
     RegisterTunnels registerTunnels(
             AuthtokenVerifier verifier,
             SessionAdmission admission,
-            PortReservationService ports,
+            PortReservationService<Principal> ports,
             SubdomainRoutes<Principal, TunnelId> routes,
             MicrometerTunnelMetrics metrics,
+            SessionRegistry sessionRegistry,
             JBurrowProperties properties) {
         JBurrowProperties.Http http = properties.http();
         return new RegisterTunnels(
@@ -117,7 +133,10 @@ class EdgeConfiguration {
                         TUNNELS_PER_SESSION,
                         properties.tcp().publicHost(),
                         new RegistrationPolicy.HttpPublic(http.domain(), http.publicScheme(), http.publicPort())),
-                metrics);
+                metrics,
+                sessionRegistry,
+                new ResumeTokens(),
+                SessionRegistry.REPLACE_TIMEOUT);
     }
 
     /**
@@ -151,7 +170,7 @@ class EdgeConfiguration {
     }
 
     @Bean
-    MicrometerTunnelMetrics tunnelMetrics(MeterRegistry registry, PortReservationService ports) {
+    MicrometerTunnelMetrics tunnelMetrics(MeterRegistry registry, PortReservationService<Principal> ports) {
         MicrometerTunnelMetrics metrics = new MicrometerTunnelMetrics(registry);
         metrics.bindPortPool(ports::snapshot);
         return metrics;
@@ -175,7 +194,7 @@ class EdgeConfiguration {
             RegisterTunnels registerTunnels,
             SessionAdmission admission,
             StreamQuota streamQuota,
-            PortReservationService ports,
+            PortReservationService<Principal> ports,
             SubdomainRoutes<Principal, TunnelId> routes,
             MicrometerTunnelMetrics metrics,
             SessionRegistry sessionRegistry,
@@ -187,7 +206,10 @@ class EdgeConfiguration {
         EngineDependencies deps = new EngineDependencies(
                 registerTunnels, admission, streamQuota, ports, routes, metrics, blocking.executor(), tcpSettings);
         EdgeSettings settings = edgeSettings(
-                properties.edge(), properties.http(), build.current().version());
+                properties.edge(),
+                properties.http(),
+                properties.drain(),
+                build.current().version());
         EdgeServer edge = new EdgeServer(
                 settings,
                 deps,
@@ -219,11 +241,16 @@ class EdgeConfiguration {
     }
 
     @Bean
-    EdgeServerLifecycle edgeServerLifecycle(EdgeServer edge) {
-        return new EdgeServerLifecycle(edge);
+    EdgeServerLifecycle edgeServerLifecycle(
+            EdgeServer edge, LeaseSchedule leases, ApplicationEventPublisher events, JBurrowProperties properties) {
+        return new EdgeServerLifecycle(edge, leases, events, properties.drain().timeout());
     }
 
-    static EdgeSettings edgeSettings(JBurrowProperties.Edge edge, JBurrowProperties.Http http, String serverVersion) {
+    static EdgeSettings edgeSettings(
+            JBurrowProperties.Edge edge,
+            JBurrowProperties.Http http,
+            JBurrowProperties.Drain drain,
+            String serverVersion) {
         JBurrowProperties.Watermarks session = edge.sessionWatermarks();
         return new EdgeSettings(
                 new InetSocketAddress(ipLiteral(edge.bindAddress(), "jburrow.edge.bind-address"), edge.port()),
@@ -244,7 +271,8 @@ class EdgeConfiguration {
                 edge.maxStreams(),
                 serverVersion,
                 httpSettings(http),
-                CAPABILITIES);
+                CAPABILITIES,
+                new DrainSettings(drain.timeout(), drain.reconnectSpread()));
     }
 
     static HttpSettings httpSettings(JBurrowProperties.Http http) {

@@ -63,12 +63,16 @@ public enum EdgeError {
             "Try again in a moment. If this is your tunnel, it has reached its limit of requests at once.",
             OptionalInt.of(1),
             null),
-    /** {@code Retry-After} as for a refused upgrade, {@code docs/protocol.md} §3.5. */
+    /**
+     * From the moment the server starts to stop. {@code Retry-After} spans the restart budget
+     * ({@code docs/phase-4-staying-connected/ARCHITECTURE.md} §The restart budget), by when a reconnecting tunnel is
+     * back.
+     */
     SERVER_SHUTTING_DOWN(
             503,
             "The tunnel server is restarting.",
-            "Try again in a few seconds. If this is your tunnel, start jburrow again once the server is back.",
-            OptionalInt.of(5),
+            "Try again in a few seconds. If this is your tunnel and jburrow has exited, start it again once the server is back.",
+            OptionalInt.of(10),
             ErrorCode.SERVER_SHUTTING_DOWN),
     RESPONSE_TIMEOUT(
             504,

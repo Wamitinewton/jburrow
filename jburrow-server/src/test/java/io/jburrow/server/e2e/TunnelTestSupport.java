@@ -3,6 +3,7 @@ package io.jburrow.server.e2e;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.jburrow.client.JBurrowClient;
+import io.jburrow.client.ReconnectPolicy;
 import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.tunnel.domain.LocalTarget;
@@ -59,8 +60,9 @@ import org.springframework.web.client.RestClient;
  * The end-to-end harness: the full server context on real Postgres, with the real client and real sockets on loopback.
  * Nothing on the byte path is mocked.
  *
- * <p>Each subclass names its own {@code jburrow.tcp.port-range}, within 30900-31999, so each gets a context of its own
- * and no two classes share tunnel ports. The port pool quarantines and retries a port another process holds,
+ * <p>Each subclass names its own {@code jburrow.tcp.port-range}, within 30900-32767, so each gets a context of its own
+ * and no two classes share tunnel ports. Ranges must not overlap even across contexts that never run at once: every
+ * context shares one Postgres, and seeds the ports each earlier one leased as holds. The port pool quarantines and retries a port another process holds,
  * so a collision with something else on the host is harmless. The HTTP classes that need no settings of their own are
  * the exception: they name the same properties, {@link #HTTP_PORTS_ON_EPOLL} or {@link #HTTP_PORTS_ON_NIO} among
  * them, so they share one context per transport. An HTTP tunnel holds no port, so they can.
@@ -190,12 +192,14 @@ abstract class TunnelTestSupport {
         return new Tunnel(client, client.start(), events);
     }
 
+    /** A client of one session, as phases 1 to 3 had: the suites that reconnect ask for it themselves. */
     JBurrowClient.Builder client(String token, TunnelSpec spec) {
         return JBurrowClient.builder()
                 .server(connectUri())
                 .authtoken(token)
                 .tunnel(spec)
-                .clientInfo("jburrow-e2e", "1.0.0");
+                .clientInfo("jburrow-e2e", "1.0.0")
+                .reconnect(ReconnectPolicy.never());
     }
 
     /** An HTTP tunnel for {@code token} to the service on loopback {@code localPort}, on a name the server chooses. */
@@ -203,12 +207,14 @@ abstract class TunnelTestSupport {
         return openTunnel(httpClient(token, localPort));
     }
 
+    /** An HTTP client of one session, as {@link #client} is. */
     JBurrowClient.Builder httpClient(String token, int localPort) {
         return JBurrowClient.builder()
                 .server(connectUri())
                 .authtoken(token)
                 .http(LocalTarget.of("127.0.0.1", localPort))
-                .clientInfo("jburrow-e2e", "1.0.0");
+                .clientInfo("jburrow-e2e", "1.0.0")
+                .reconnect(ReconnectPolicy.never());
     }
 
     /** A connection to the edge, as a visitor with no proxy in front of it. */

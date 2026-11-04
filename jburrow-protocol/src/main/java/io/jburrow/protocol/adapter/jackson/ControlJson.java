@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.annotation.Nulls;
 import io.jburrow.protocol.control.ControlMessage;
 import io.jburrow.protocol.control.UpgradeRefusal;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
@@ -16,7 +17,9 @@ import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.EnumSet;
 import java.util.Objects;
+import java.util.Set;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.JsonParser;
 import tools.jackson.core.JsonToken;
@@ -56,6 +59,7 @@ public final class ControlJson {
     static final int MAX_DOCUMENT_LENGTH = FrameLimits.MAX_CONTROL_PAYLOAD;
 
     private static final char BYTE_ORDER_MARK = '\uFEFF';
+    private static final Set<Capability> EVERY_CAPABILITY = Set.copyOf(EnumSet.allOf(Capability.class));
 
     private final JsonMapper mapper;
 
@@ -68,13 +72,26 @@ public final class ControlJson {
     }
 
     /**
-     * Parses one payload as {@code type}.
+     * Parses one payload as {@code type}, knowing every field of every capability.
      *
      * @throws ProtocolException if the payload breaks an encoding rule or a field rule
      */
     public <T extends ControlMessage> T read(byte[] utf8, Class<T> type) {
+        return read(utf8, type, EVERY_CAPABILITY);
+    }
+
+    /**
+     * Parses one payload as {@code type} for a session with the capabilities {@code negotiated}. A field that a
+     * capability outside them introduces is an unknown key (§4.3): ignored whatever its value, and absent from the
+     * result. Only {@code resume}'s fields are such keys; what {@code http} introduces is a value of a known field, which
+     * the caller refuses.
+     *
+     * @throws ProtocolException if the payload breaks an encoding rule or a field rule
+     */
+    public <T extends ControlMessage> T read(byte[] utf8, Class<T> type, Set<Capability> negotiated) {
         Objects.requireNonNull(utf8, "utf8");
         Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(negotiated, "negotiated");
         if (utf8.length > MAX_DOCUMENT_LENGTH) {
             throw protocolError("payload is longer than " + MAX_DOCUMENT_LENGTH + " bytes");
         }
@@ -83,7 +100,9 @@ public final class ControlJson {
             requireWellFormed(utf8);
             try (JsonParser parser = mapper.createParser(utf8)) {
                 parser.nextToken();
-                return mapper.readValue(parser, type);
+                return mapper.readerFor(type)
+                        .withAttribute(WireValueModule.NEGOTIATED, Set.copyOf(negotiated))
+                        .readValue(parser);
             }
         } catch (JacksonException e) {
             throw translate(e);
@@ -97,6 +116,16 @@ public final class ControlJson {
      * @throws ProtocolException if the payload breaks an encoding rule or a field rule
      */
     public <T extends ControlMessage> T read(InputStream in, Class<T> type) {
+        return read(in, type, EVERY_CAPABILITY);
+    }
+
+    /**
+     * Parses one payload read from {@code in} for a session with the capabilities {@code negotiated}, as
+     * {@link #read(byte[], Class, Set)} does.
+     *
+     * @throws ProtocolException if the payload breaks an encoding rule or a field rule
+     */
+    public <T extends ControlMessage> T read(InputStream in, Class<T> type, Set<Capability> negotiated) {
         Objects.requireNonNull(in, "in");
         byte[] payload;
         try {
@@ -104,7 +133,7 @@ public final class ControlJson {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        return read(payload, type);
+        return read(payload, type, negotiated);
     }
 
     /**

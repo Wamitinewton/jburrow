@@ -20,6 +20,27 @@ class RegisterTest {
 
         assertThat(register.authtoken()).isEqualTo(TOKEN);
         assertThat(register.tunnels()).containsExactly(DEFAULT);
+        assertThat(register.resume()).isNull();
+    }
+
+    @Test
+    void resumeIsOptional() {
+        ResumeToken token = new ResumeToken(ResumeTokenTest.EXAMPLE);
+
+        assertThat(new Register(TOKEN, List.of(DEFAULT), token).resume()).isEqualTo(token);
+        assertThat(new Register(TOKEN, List.of(DEFAULT), null).resume()).isNull();
+        assertThat(new Register(TOKEN, List.of(DEFAULT), null)).isEqualTo(new Register(TOKEN, List.of(DEFAULT)));
+    }
+
+    @Test
+    void toStringRedactsBothSecrets() {
+        String text = new Register(TOKEN, List.of(DEFAULT), new ResumeToken(ResumeTokenTest.EXAMPLE)).toString();
+
+        assertThat(text)
+                .contains("authtoken=jb_***")
+                .contains("resume=ResumeToken[jbr_***]")
+                .doesNotContain("LOCAL-DEVELOPMENT")
+                .doesNotContain(ResumeTokenTest.EXAMPLE.substring(4));
     }
 
     @Test

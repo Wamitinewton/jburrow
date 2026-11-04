@@ -47,9 +47,9 @@ class SeedCorpusTest {
     private static final String DECODE_AS_CLIENT = "FrameCodecFuzzTestInputs/decodeAsClient";
     private static final String CONTROL_JSON_READ = "ControlJsonFuzzTestInputs/read";
 
-    /** The frame types whose payload the codec hands to {@code ControlJson}. */
-    private static final Set<FrameType> JSON_PAYLOAD_TYPES =
-            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.ERROR);
+    /** The frame types whose payload the codec hands to {@code ControlJson}, {@code GOAWAY} with {@code resume}. */
+    private static final Set<FrameType> JSON_PAYLOAD_TYPES = EnumSet.of(
+            FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.GOAWAY, FrameType.ERROR);
 
     static Stream<Arguments> corpora() {
         Map<String, Map<String, byte[]>> seeds = new TreeMap<>();

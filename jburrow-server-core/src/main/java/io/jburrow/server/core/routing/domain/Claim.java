@@ -12,6 +12,8 @@ import java.util.Objects;
  * <p>Generic in the principal and the tunnel so the routing feature never depends on the feature that owns them; only
  * their {@code equals} matters here.
  *
+ * @param tunnel required while active; {@code null} for a hold seeded from a previous server process, which had no
+ *     tunnel in this one
  * @param heldUntil {@code null} while active
  */
 public record Claim<P, T>(SubdomainName name, P principal, T tunnel, Instant heldUntil) {
@@ -19,11 +21,18 @@ public record Claim<P, T>(SubdomainName name, P principal, T tunnel, Instant hel
     public Claim {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(principal, "principal");
-        Objects.requireNonNull(tunnel, "tunnel");
+        if (heldUntil == null) {
+            Objects.requireNonNull(tunnel, "tunnel");
+        }
     }
 
     public static <P, T> Claim<P, T> active(SubdomainName name, P principal, T tunnel) {
         return new Claim<>(name, principal, tunnel, null);
+    }
+
+    /** A hold with no tunnel behind it, carried over from a previous server process. */
+    public static <P, T> Claim<P, T> seededHold(SubdomainName name, P principal, Instant until) {
+        return new Claim<>(name, principal, null, Objects.requireNonNull(until, "until"));
     }
 
     public boolean active() {

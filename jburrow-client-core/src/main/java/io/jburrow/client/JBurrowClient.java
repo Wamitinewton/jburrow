@@ -12,8 +12,8 @@ import java.util.Set;
 import javax.net.ssl.TrustManagerFactory;
 
 /**
- * A JBurrow client: one session with a server, carrying the tunnels it asked for. The embeddable entry point; the CLI
- * is one user of it, a test or another program can be another.
+ * A JBurrow client: a session with a server, carrying the tunnels it asked for, and the sessions that follow it when it
+ * is lost. The embeddable entry point; the CLI is one user of it, a test or another program can be another.
  *
  * <pre>{@code
  * try (JBurrowClient client = JBurrowClient.builder()
@@ -30,9 +30,11 @@ import javax.net.ssl.TrustManagerFactory;
  * <p>An HTTP tunnel is the same with {@code .http(LocalTarget.of("localhost", 3000))} in place of {@code .tunnel(...)},
  * and optionally {@code .subdomain("myapp")} and {@code .hostHeader(HostHeader.REWRITE)}.
  *
- * <p>A client runs one session, on one daemon I/O thread of its own, and is started once. There is no reconnect in this
- * version: when the session ends, {@link TunnelHandle#closed()} says why, and a new client is needed for a new
- * session.
+ * <p>A client runs on one daemon I/O thread of its own, and is started once. When a session ends, the client starts
+ * another as its {@link ReconnectPolicy} says, asking for the same names and ports, until it is closed or the server
+ * says retrying can't help; {@link TunnelHandle#closed()} then says why. {@link TunnelEvents#onDisconnected} and
+ * {@link TunnelEvents#onReconnected} report each gap. With {@link ReconnectPolicy#never()} the client stops with its
+ * first session.
  */
 public interface JBurrowClient extends AutoCloseable {
 
@@ -41,8 +43,9 @@ public interface JBurrowClient extends AutoCloseable {
     }
 
     /**
-     * Connects, upgrades, and runs the handshake. Blocks until the server answers {@code REGISTER}, or the session
-     * fails before that.
+     * Connects, upgrades, and runs the handshake. Blocks until the server answers {@code REGISTER}, or the first session
+     * fails before that. A first session fails at once, except when the server is restarting or full: then it is tried
+     * again, for up to a minute, unless the policy is {@link ReconnectPolicy#never()}.
      *
      * @throws TunnelStartException if the session couldn't be established, with the reason and, where the server gave
      *     one, its error code
@@ -51,8 +54,8 @@ public interface JBurrowClient extends AutoCloseable {
     TunnelHandle start() throws TunnelStartException;
 
     /**
-     * Closes the session if it is open, waiting briefly for an orderly close, then stops the I/O thread. Called from a
-     * {@link TunnelEvents} callback, it doesn't wait.
+     * Cancels a scheduled reconnect and closes the session if one is open, waiting briefly for an orderly close, then
+     * stops the I/O thread. Called from a {@link TunnelEvents} callback, it doesn't wait.
      */
     @Override
     void close();
@@ -121,6 +124,12 @@ public interface JBurrowClient extends AutoCloseable {
          * in for an older client, as a compatibility test does. A tunnel whose kind needs one left out fails the build.
          */
         Builder capabilities(Set<Capability> offered);
+
+        /**
+         * Whether a session that ends is followed by another. {@link ReconnectPolicy#standard()} by default;
+         * {@link ReconnectPolicy#never()} for a client that ends with its first session.
+         */
+        Builder reconnect(ReconnectPolicy policy);
 
         /**
          * Validates the settings and builds the client. Nothing connects until {@link JBurrowClient#start()}.

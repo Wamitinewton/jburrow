@@ -15,10 +15,25 @@ final class RecordingEvents implements TunnelEvents {
 
     private final List<String> events = new CopyOnWriteArrayList<>();
     private final List<String> wrongThreads = new CopyOnWriteArrayList<>();
+    private final List<Duration> retries = new CopyOnWriteArrayList<>();
+    private final List<TunnelClosed> disconnects = new CopyOnWriteArrayList<>();
 
     @Override
     public void onEstablished(String sessionId, List<RegisteredTunnel> tunnels) {
         record("established " + sessionId + " " + tunnels.getFirst().url());
+    }
+
+    @Override
+    public void onDisconnected(TunnelClosed reason, Duration retryIn) {
+        retries.add(retryIn);
+        disconnects.add(reason);
+        record("disconnected " + reason.reason() + " "
+                + reason.code().map(ErrorCode::code).orElse("-"));
+    }
+
+    @Override
+    public void onReconnected(String sessionId, List<RegisteredTunnel> tunnels, boolean sameUrls) {
+        record("reconnected " + sessionId + " " + tunnels.getFirst().url() + " sameUrls=" + sameUrls);
     }
 
     @Override
@@ -55,6 +70,16 @@ final class RecordingEvents implements TunnelEvents {
             throw new AssertionError("events arrived off the client's I/O thread: " + wrongThreads);
         }
         return List.copyOf(events);
+    }
+
+    /** The reason of each {@code onDisconnected}, in order. */
+    List<TunnelClosed> disconnects() {
+        return List.copyOf(disconnects);
+    }
+
+    /** The {@code retryIn} of each {@code onDisconnected}, in order. */
+    List<Duration> retries() {
+        return List.copyOf(retries);
     }
 
     /** Waits for an event starting with {@code prefix} and returns it. */

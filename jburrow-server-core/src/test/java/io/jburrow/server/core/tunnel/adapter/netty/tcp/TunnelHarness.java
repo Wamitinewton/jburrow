@@ -12,7 +12,6 @@ import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
-import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
@@ -38,7 +37,6 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.time.Duration;
-import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -140,7 +138,7 @@ final class TunnelHarness implements AutoCloseable {
 
     final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
     final SessionAdmission admission = new SessionAdmission(16, 8, 3);
-    final PortReservationService ports;
+    final PortReservationService<Principal> ports;
     final EdgeServer edge;
     final ControlSessionInitializer sessions;
 
@@ -154,8 +152,7 @@ final class TunnelHarness implements AutoCloseable {
 
     TunnelHarness(PortRange range, RandomGenerator random, Settings flow) {
         streamQuota = new StreamQuota(flow.maxStreams());
-        ports = new PortReservationService(
-                new PortPool(range, Duration.ofSeconds(60), Duration.ofMinutes(10), random, InstantSource.system()));
+        ports = RegistrationFixtures.ports(range, random);
         EdgeSettings settings = new EdgeSettings(
                 new InetSocketAddress(InetAddress.getLoopbackAddress(), 0),
                 "localhost",

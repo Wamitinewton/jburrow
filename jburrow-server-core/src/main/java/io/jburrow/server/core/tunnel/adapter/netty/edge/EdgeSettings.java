@@ -27,6 +27,7 @@ import java.util.Set;
  * @param serverVersion this build's version, announced in the server {@code HELLO}
  * @param http how HTTP tunnels are served
  * @param capabilities the capabilities the server enables; a session has those its client also offers
+ * @param drain how the edge drains when it stops
  */
 public record EdgeSettings(
         InetSocketAddress bind,
@@ -47,7 +48,8 @@ public record EdgeSettings(
         int maxStreams,
         String serverVersion,
         HttpSettings http,
-        Set<Capability> capabilities) {
+        Set<Capability> capabilities,
+        DrainSettings drain) {
 
     public EdgeSettings {
         Objects.requireNonNull(bind, "bind");
@@ -58,6 +60,7 @@ public record EdgeSettings(
         Objects.requireNonNull(serverVersion, "serverVersion");
         Objects.requireNonNull(http, "http");
         capabilities = Set.copyOf(capabilities);
+        Objects.requireNonNull(drain, "drain");
         if (bind.isUnresolved()) {
             throw new IllegalArgumentException("The edge binds an IP address, not a name: " + bind);
         }
@@ -77,6 +80,75 @@ public record EdgeSettings(
             throw new IllegalArgumentException(
                     "maxStreams must be at least maxConcurrentStreams: " + maxStreams + " < " + maxConcurrentStreams);
         }
+    }
+
+    /** With {@link DrainSettings#DEFAULTS}. */
+    public EdgeSettings(
+            InetSocketAddress bind,
+            String connectHost,
+            EdgeTransport transport,
+            int ioThreads,
+            List<Cidr> trustedProxies,
+            int maxSessions,
+            int maxHandshaking,
+            Duration requestTimeout,
+            Duration handshakeTimeout,
+            Duration pingInterval,
+            Duration idleTimeout,
+            int sessionWriteLow,
+            int sessionWriteHigh,
+            Windows windows,
+            int maxConcurrentStreams,
+            int maxStreams,
+            String serverVersion,
+            HttpSettings http,
+            Set<Capability> capabilities) {
+        this(
+                bind,
+                connectHost,
+                transport,
+                ioThreads,
+                trustedProxies,
+                maxSessions,
+                maxHandshaking,
+                requestTimeout,
+                handshakeTimeout,
+                pingInterval,
+                idleTimeout,
+                sessionWriteLow,
+                sessionWriteHigh,
+                windows,
+                maxConcurrentStreams,
+                maxStreams,
+                serverVersion,
+                http,
+                capabilities,
+                DrainSettings.DEFAULTS);
+    }
+
+    /** These settings with {@code drain} instead. */
+    public EdgeSettings withDrain(DrainSettings drain) {
+        return new EdgeSettings(
+                bind,
+                connectHost,
+                transport,
+                ioThreads,
+                trustedProxies,
+                maxSessions,
+                maxHandshaking,
+                requestTimeout,
+                handshakeTimeout,
+                pingInterval,
+                idleTimeout,
+                sessionWriteLow,
+                sessionWriteHigh,
+                windows,
+                maxConcurrentStreams,
+                maxStreams,
+                serverVersion,
+                http,
+                capabilities,
+                drain);
     }
 
     private static void requirePositive(int value, String name) {
