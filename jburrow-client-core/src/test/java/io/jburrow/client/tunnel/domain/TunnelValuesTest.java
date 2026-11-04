@@ -8,6 +8,7 @@ import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.wire.ErrorCode;
 import java.util.Optional;
+import java.util.OptionalInt;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -67,6 +68,19 @@ class TunnelValuesTest {
                         TunnelClosed.Reason.SERVER_ERROR, Optional.of(ErrorCode.SERVER_SHUTTING_DOWN), "bye"));
         assertThat(TunnelClosed.localError(ErrorCode.PROTOCOL_ERROR, "bad").reason())
                 .isEqualTo(TunnelClosed.Reason.LOCAL_ERROR);
+    }
+
+    @Test
+    void onlyAFailedUpgradeCarriesAnHttpStatus() {
+        TunnelClosed lost = TunnelClosed.connectionLost("Refused.");
+
+        assertThat(lost.upgradeStatus()).isEmpty();
+        assertThat(lost.withUpgradeStatus(OptionalInt.of(503)).upgradeStatus()).hasValue(503);
+        assertThat(lost.withUpgradeStatus(OptionalInt.of(503)).message()).isEqualTo("Refused.");
+        assertThatThrownBy(() -> lost.withUpgradeStatus(OptionalInt.of(99)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> lost.withUpgradeStatus(OptionalInt.of(600)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

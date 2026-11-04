@@ -132,7 +132,8 @@ public final class SessionExchanges {
 
     /**
      * Admits an exchange with phase 2's checks, then opens its stream and sends {@code OPEN}. Refused, the edge answers
-     * with a page: {@code TUNNEL_BUSY} at a stream cap, and for a session that has ended, the page for why it ended.
+     * with a page: {@code TUNNEL_BUSY} at a stream cap, {@code SERVER_SHUTTING_DOWN} for a session that is draining, and
+     * for a session that has ended, the page for why it ended.
      */
     void open(SessionExchange exchange, ByteBuf leftover, boolean requestEnded) {
         requireLoop();
@@ -167,13 +168,15 @@ public final class SessionExchanges {
     }
 
     private void refuse(SessionExchange exchange, StreamAdmission.Refusal refusal, ByteBuf leftover) {
-        EdgeError error;
         if (refusal != StreamAdmission.Refusal.NOT_ESTABLISHED) {
             metrics.visitorRefused(refusal);
-            error = EdgeError.TUNNEL_BUSY;
-        } else {
-            error = endedSession();
         }
+        EdgeError error =
+                switch (refusal) {
+                    case NOT_ESTABLISHED -> endedSession();
+                    case DRAINING -> EdgeError.SERVER_SHUTTING_DOWN;
+                    case STREAM_LIMIT, SERVER_STREAM_LIMIT -> EdgeError.TUNNEL_BUSY;
+                };
         exchange.refused(error, leftover);
     }
 

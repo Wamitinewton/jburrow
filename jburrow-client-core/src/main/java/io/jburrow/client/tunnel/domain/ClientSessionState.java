@@ -13,6 +13,11 @@ public enum ClientSessionState {
     AWAITING_REGISTERED,
     /** The {@code REGISTER} reply arrived. Streams may be opened. */
     ESTABLISHED,
+    /**
+     * With {@code resume}, the server sent {@code GOAWAY}: the streams already open carry on, no new one is opened, and
+     * the server ends the session once they are done.
+     */
+    DRAINING,
     /** The session is ending; nothing new starts. */
     CLOSING
 }

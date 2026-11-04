@@ -1,18 +1,61 @@
 package io.jburrow.server.e2e;
 
-import static io.jburrow.server.e2e.TunnelTestSupport.KERNEL_SOCKET_BUFFERS;
-import static io.jburrow.server.e2e.TunnelTestSupport.LOOPBACK_IS_THE_INGRESS;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.jburrow.protocol.adapter.netty.Frame;
+import io.jburrow.protocol.control.ClientInfo;
+import io.jburrow.protocol.control.Hello;
+import io.jburrow.protocol.control.Register;
+import io.jburrow.protocol.control.ResumeToken;
+import io.jburrow.protocol.control.TunnelKind;
+import io.jburrow.protocol.control.TunnelRequest;
+import io.jburrow.protocol.testsupport.ScriptedPeer;
+import io.jburrow.protocol.wire.Capability;
+import io.jburrow.protocol.wire.ErrorCode;
+import io.jburrow.protocol.wire.ProtocolVersion;
+import io.jburrow.server.core.portpool.application.PortReservationService;
+import io.jburrow.server.core.portpool.domain.PortPool;
+import io.jburrow.server.core.portpool.domain.PortRange;
+import io.jburrow.server.core.routing.application.SubdomainRoutes;
+import io.jburrow.server.core.routing.domain.Blocklist;
+import io.jburrow.server.core.routing.domain.NameGenerator;
+import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
+import io.jburrow.server.core.tunnel.adapter.netty.control.SessionRegistry;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.EngineDependencies;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettings;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.TcpSettings;
+import io.jburrow.server.core.tunnel.adapter.netty.tcp.NettyTunnelListeners;
+import io.jburrow.server.core.tunnel.application.RegisterTunnels;
+import io.jburrow.server.core.tunnel.application.RegistrationPolicy;
+import io.jburrow.server.core.tunnel.application.ResumeTokens;
+import io.jburrow.server.core.tunnel.application.SessionAdmission;
+import io.jburrow.server.core.tunnel.application.StreamQuota;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
+import io.jburrow.server.core.tunnel.domain.Principal;
+import io.jburrow.server.core.tunnel.domain.TunnelId;
 import io.jburrow.server.e2e.support.HttpVisitor;
 import java.io.InterruptedIOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URI;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.InstantSource;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -243,6 +286,147 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
             for (JsonNode line : log.lines()) {
                 assertThat(line.toString()).as("a log line").doesNotContain(SECRET);
             }
+        }
+    }
+
+    /**
+     * Step 2a's log ({@code docs/phase-4-staying-connected/ARCHITECTURE.md} §Observability): the "session replaced"
+     * line with both session ids and the principal, and neither resume token, nor its hash in hex or base64, in any line.
+     * The server lists {@code resume} only from the drain on, so this engine is assembled here with it enabled.
+     */
+    @Nested
+    class Resume {
+
+        private static final String TOKEN = "jb_" + "r".repeat(43);
+        private static final Duration STOP_TIMEOUT = Duration.ofSeconds(15);
+
+        @Test
+        void aReplacedSessionIsLoggedWithoutItsToken(CapturedOutput output) throws Exception {
+            ExecutorService blocking = Executors.newVirtualThreadPerTaskExecutor();
+            EdgeServer edge = resumingEdge(blocking);
+            try (ScriptedPeer first = connect(edge);
+                    ScriptedPeer second = connect(edge)) {
+                UUID firstId = hello(first);
+                first.send(register(null));
+                ResumeToken firstToken =
+                        first.expect(Frame.Registered.class, TIMEOUT).message().resumeToken();
+                UUID secondId = hello(second);
+                second.send(register(firstToken));
+                ResumeToken secondToken =
+                        second.expect(Frame.Registered.class, TIMEOUT).message().resumeToken();
+                first.expectError(ErrorCode.SESSION_REPLACED, TIMEOUT);
+                await(
+                        "the second session's establishment is logged",
+                        () -> output.getAll().contains("session established: session=" + secondId));
+
+                String all = output.getAll();
+                assertThat(all.lines().filter(line -> line.contains("session replaced:")))
+                        .singleElement()
+                        .asString()
+                        .contains("session=" + firstId, "replacedBy=" + secondId, "principal=resumer", "silentFor=");
+                for (ResumeToken token : List.of(firstToken, secondToken)) {
+                    byte[] hash = token.sha256();
+                    assertThat(all)
+                            .doesNotContain(token.value().substring(4))
+                            .doesNotContain(HexFormat.of().formatHex(hash))
+                            .doesNotContain(Base64.getEncoder().encodeToString(hash))
+                            .doesNotContain(
+                                    Base64.getUrlEncoder().withoutPadding().encodeToString(hash));
+                }
+            } finally {
+                edge.stop(STOP_TIMEOUT).get(20, TimeUnit.SECONDS);
+                blocking.shutdownNow();
+            }
+        }
+
+        private static EdgeServer resumingEdge(ExecutorService blocking) {
+            HttpSettings http = new HttpSettings(
+                    "localhost",
+                    1024 * 1024,
+                    Duration.ofSeconds(60),
+                    Duration.ofSeconds(75),
+                    16 * 1024,
+                    Duration.ofSeconds(1),
+                    16L * 1024 * 1024,
+                    2L * 1024 * 1024);
+            EdgeSettings settings = new EdgeSettings(
+                    new InetSocketAddress(InetAddress.getLoopbackAddress(), 0),
+                    "localhost",
+                    EdgeTransport.AUTO,
+                    2,
+                    List.of(),
+                    8,
+                    4,
+                    Duration.ofSeconds(5),
+                    Duration.ofSeconds(5),
+                    Duration.ofSeconds(15),
+                    Duration.ofSeconds(45),
+                    128 * 1024,
+                    512 * 1024,
+                    ScriptedPeer.SERVER_WINDOWS,
+                    16,
+                    16,
+                    "test",
+                    http,
+                    Set.of(Capability.HTTP, Capability.RESUME));
+            SessionAdmission admission = new SessionAdmission(8, 4, 1);
+            PortReservationService<Principal> ports = new PortReservationService<>(new PortPool<>(
+                    new PortRange(32_020, 32_024),
+                    Duration.ofSeconds(60),
+                    Duration.ofMinutes(10),
+                    Duration.ofSeconds(120),
+                    new SecureRandom(),
+                    InstantSource.system()));
+            SubdomainRoutes<Principal, TunnelId> routes = new SubdomainRoutes<>(
+                    Blocklist.defaults(Set.of()),
+                    new NameGenerator(new SecureRandom()),
+                    Duration.ofSeconds(120),
+                    InstantSource.system());
+            SessionRegistry registry = new SessionRegistry();
+            RegisterTunnels register = new RegisterTunnels(
+                    authtoken -> TOKEN.equals(authtoken) ? Optional.of("resumer") : Optional.empty(),
+                    admission,
+                    ports,
+                    routes,
+                    new RegistrationPolicy(1, "localhost", new RegistrationPolicy.HttpPublic("localhost", "http", 80)),
+                    TunnelMetrics.noop(),
+                    registry,
+                    new ResumeTokens(),
+                    SessionRegistry.REPLACE_TIMEOUT);
+            EngineDependencies deps = new EngineDependencies(
+                    register,
+                    admission,
+                    new StreamQuota(16),
+                    ports,
+                    routes,
+                    TunnelMetrics.noop(),
+                    blocking,
+                    new TcpSettings("127.0.0.1", "localhost", 32 * 1024));
+            EdgeServer edge = new EdgeServer(
+                    settings,
+                    deps,
+                    new ControlSessionInitializer(settings, deps, registry, new NettyTunnelListeners(settings, deps)));
+            edge.start();
+            return edge;
+        }
+
+        private static ScriptedPeer connect(EdgeServer edge) {
+            return ScriptedPeer.connect(
+                    URI.create("ws://localhost:" + edge.boundPort() + ScriptedPeer.CONNECT_PATH),
+                    ProtocolVersion.CURRENT);
+        }
+
+        private static UUID hello(ScriptedPeer peer) {
+            peer.send(new Frame.Hello(new Hello(
+                    new ClientInfo("jburrow-test", "1.0", "linux", "amd64"),
+                    List.of("http", "resume"),
+                    ScriptedPeer.CLIENT_WINDOWS)));
+            return peer.expect(Frame.ServerHello.class, TIMEOUT).message().sessionId();
+        }
+
+        private static Frame register(ResumeToken resume) {
+            return new Frame.Register(new Register(
+                    TOKEN, List.of(new TunnelRequest("web", TunnelKind.HTTP, "resumed-demo", null)), resume));
         }
     }
 

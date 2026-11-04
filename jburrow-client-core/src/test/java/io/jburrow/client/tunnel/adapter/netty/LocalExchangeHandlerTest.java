@@ -8,6 +8,7 @@ import io.jburrow.client.tunnel.domain.ClientSession;
 import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.HostHeader;
 import io.jburrow.client.tunnel.domain.LocalTarget;
+import io.jburrow.client.tunnel.domain.Resumption;
 import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.BodyFraming;
@@ -52,6 +53,8 @@ import org.junit.jupiter.params.provider.ValueSource;
  * server receives. The local connection's bytes are read as ISO 8859-1, one byte to one character.
  */
 class LocalExchangeHandlerTest {
+
+    private final RecordingSupervision supervision = new RecordingSupervision();
 
     private static final UUID SESSION_ID = UUID.fromString("0b8e5c1e-7c55-4c46-9a3e-2f1d0c9e4b7a");
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
@@ -450,27 +453,34 @@ class LocalExchangeHandlerTest {
 
     private void start(HostHeader hostHeader) {
         control.config().setWriteBufferWaterMark(ROOMY);
-        ControlConnection connection = new ControlConnection(new ClientSettings(
-                URI.create("ws://localhost:7080/v1/connect"),
-                "jb_" + "t".repeat(43),
-                List.of(TunnelSpec.http("default", TARGET).hostHeader(hostHeader)),
-                new TunnelEvents() {
-                    @Override
-                    public void onExchangeCompleted(ExchangeSummary exchange) {
-                        exchanges.add(exchange);
-                    }
+        ControlConnection connection = new ControlConnection(
+                new ClientSettings(
+                        URI.create("ws://localhost:7080/v1/connect"),
+                        "jb_" + "t".repeat(43),
+                        List.of(TunnelSpec.http("default", TARGET).hostHeader(hostHeader)),
+                        new TunnelEvents() {
+                            @Override
+                            public void onExchangeCompleted(ExchangeSummary exchange) {
+                                exchanges.add(exchange);
+                            }
 
-                    @Override
-                    public void onStreamClosed(
-                            int streamId, long bytesIn, long bytesOut, long durationMillis, Optional<ErrorCode> reset) {
-                        closedStreams.add(
-                                streamId + " " + reset.map(ErrorCode::code).orElse("-"));
-                    }
-                },
-                new ClientInfo("jburrow-test", "1.0.0", null, null),
-                Optional.empty(),
-                ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
-                ClientSettings.DEFAULT_WINDOWS));
+                            @Override
+                            public void onStreamClosed(
+                                    int streamId,
+                                    long bytesIn,
+                                    long bytesOut,
+                                    long durationMillis,
+                                    Optional<ErrorCode> reset) {
+                                closedStreams.add(streamId + " "
+                                        + reset.map(ErrorCode::code).orElse("-"));
+                            }
+                        },
+                        new ClientInfo("jburrow-test", "1.0.0", null, null),
+                        Optional.empty(),
+                        ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT,
+                        ClientSettings.DEFAULT_WINDOWS),
+                Resumption.none(),
+                supervision);
         ClientSession session = connection.session();
         session.onUpgraded();
         session.onServerHello(new ServerHello(

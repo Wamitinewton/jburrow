@@ -48,7 +48,8 @@ class ErrorCodeSpaceTest {
         assertThat(Arrays.stream(io.jburrow.protocol.wire.ErrorCode.values())
                         .filter(code -> code.capability().isPresent())
                         .map(Enum::name))
-                .containsExactlyInAnyOrder("SUBDOMAIN_UNAVAILABLE", "SUBDOMAIN_FORBIDDEN", "LOCAL_SERVICE_ERROR")
+                .containsExactlyInAnyOrder(
+                        "SUBDOMAIN_UNAVAILABLE", "SUBDOMAIN_FORBIDDEN", "LOCAL_SERVICE_ERROR", "SESSION_REPLACED")
                 .noneMatch(rest::contains);
     }
 

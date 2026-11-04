@@ -80,7 +80,6 @@ class DirectMemoryBudgetTest {
                 "https",
                 443,
                 List.of(),
-                Duration.ofSeconds(60),
                 DataSize.ofMegabytes(100),
                 Duration.ofSeconds(60),
                 Duration.ofSeconds(75),

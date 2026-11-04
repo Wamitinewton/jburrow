@@ -3,6 +3,7 @@ package io.jburrow.client.tunnel.domain;
 import static io.jburrow.protocol.wire.FrameType.CLOSE;
 import static io.jburrow.protocol.wire.FrameType.DATA;
 import static io.jburrow.protocol.wire.FrameType.ERROR;
+import static io.jburrow.protocol.wire.FrameType.GOAWAY;
 import static io.jburrow.protocol.wire.FrameType.HELLO;
 import static io.jburrow.protocol.wire.FrameType.OPEN;
 import static io.jburrow.protocol.wire.FrameType.PING;
@@ -11,12 +12,14 @@ import static io.jburrow.protocol.wire.FrameType.REGISTER;
 import static io.jburrow.protocol.wire.FrameType.WINDOW_UPDATE;
 
 import io.jburrow.protocol.control.ClientInfo;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.HttpResponseHead;
 import io.jburrow.protocol.control.Open;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.SessionLimits;
 import io.jburrow.protocol.control.TunnelKind;
@@ -58,7 +61,12 @@ import java.util.UUID;
  * from the flow model directly.
  *
  * <p>A session asking for an HTTP tunnel sends its {@code REGISTER} only once the server's {@code HELLO} has listed
- * {@code http} (§8.3); one asking only for TCP tunnels sends it with its {@code HELLO}.
+ * {@code http} (§8.3), and one with a resume token to present only once it knows whether the server listed
+ * {@code resume}; one asking only for TCP tunnels, with no token, sends it with its {@code HELLO}.
+ *
+ * <p>With {@code resume}, an established session moves to {@link ClientSessionState#DRAINING} at the server's
+ * {@code GOAWAY}: its open streams carry on, and an {@code OPEN} or a second {@code GOAWAY} is {@code PROTOCOL_ERROR}
+ * (§6.10). Without it, every {@code GOAWAY} is {@code PROTOCOL_ERROR}.
  *
  * <p>The client doesn't check {@code limits.maxConcurrentStreams}: it binds the server, and the client's view of which
  * streams are open can lag behind the server's (§8.5).
@@ -78,13 +86,19 @@ public final class ClientSession {
         ALLOWED_INBOUND.put(ClientSessionState.AWAITING_HELLO, EnumSet.of(HELLO, ERROR));
         ALLOWED_INBOUND.put(ClientSessionState.AWAITING_REGISTERED, EnumSet.of(REGISTER, PING, PONG, ERROR));
         ALLOWED_INBOUND.put(
-                ClientSessionState.ESTABLISHED, EnumSet.of(OPEN, DATA, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR));
+                ClientSessionState.ESTABLISHED,
+                EnumSet.of(OPEN, DATA, WINDOW_UPDATE, CLOSE, PING, PONG, GOAWAY, ERROR));
+        ALLOWED_INBOUND.put(ClientSessionState.DRAINING, EnumSet.of(DATA, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR));
         ALLOWED_INBOUND.put(ClientSessionState.CLOSING, EnumSet.allOf(FrameType.class));
     }
 
+    /** The tunnels this session asks for: the user's, with what {@link Resumption} asks for again. */
     private final List<TunnelSpec> requested;
+
     private final Windows own;
     private final Set<Capability> offered;
+    /** The previous session's token, presented in {@code REGISTER} if the server lists {@code resume}; may be null. */
+    private final ResumeToken resume;
     /** Insertion order is opening order, so iteration is by increasing id. */
     private final Map<Integer, Entry> streams = new LinkedHashMap<>();
 
@@ -96,6 +110,8 @@ public final class ClientSession {
     private int highestStreamId = StreamIds.CONTROL;
     /** Created by the server's {@code HELLO}, which carries its windows. */
     private SessionFlow flow;
+    /** The token the {@code REGISTER} reply carried, with {@code resume}. */
+    private ResumeToken resumeToken;
 
     /** A session that offers no capability, so it asks for TCP tunnels only. */
     public ClientSession(List<TunnelSpec> requested, Windows own) {
@@ -109,8 +125,24 @@ public final class ClientSession {
      *     needs
      */
     public ClientSession(List<TunnelSpec> requested, Windows own, Set<Capability> offered) {
+        this(requested, own, offered, Resumption.none());
+    }
+
+    /**
+     * @param requested the tunnels to ask for, in order, as the user asked for them; at least one, with distinct refs
+     * @param own this client's receive windows, announced in its {@code HELLO}
+     * @param offered the capabilities this client offers in its {@code HELLO}; every capability a requested tunnel
+     *     needs, and {@code resume} if {@code resumption} has a token
+     * @param resumption what this session asks for again from the one before it: the names and ports the server chose
+     *     then, and the token to present if the server lists {@code resume}
+     */
+    public ClientSession(List<TunnelSpec> requested, Windows own, Set<Capability> offered, Resumption resumption) {
         this.own = Objects.requireNonNull(own, "own");
-        this.requested = List.copyOf(Objects.requireNonNull(requested, "requested"));
+        Objects.requireNonNull(resumption, "resumption");
+        this.resume = resumption.token().orElse(null);
+        this.requested = Objects.requireNonNull(requested, "requested").stream()
+                .map(resumption::apply)
+                .toList();
         this.offered = Collections.unmodifiableSet(
                 Objects.requireNonNull(offered, "offered").isEmpty()
                         ? EnumSet.noneOf(Capability.class)
@@ -121,8 +153,11 @@ public final class ClientSession {
         if (this.requested.stream().map(TunnelSpec::ref).distinct().count() != this.requested.size()) {
             throw new IllegalArgumentException("Each tunnel of a session needs its own ref");
         }
-        if (registersAfterHello() && !this.offered.contains(Capability.HTTP)) {
+        if (asksForHttp() && !this.offered.contains(Capability.HTTP)) {
             throw new IllegalArgumentException("An HTTP tunnel needs a session that offers the http capability");
+        }
+        if (resume != null && !this.offered.contains(Capability.RESUME)) {
+            throw new IllegalArgumentException("A resume token needs a session that offers the resume capability");
         }
     }
 
@@ -130,8 +165,13 @@ public final class ClientSession {
         return state;
     }
 
+    /** Whether the {@code REGISTER} reply arrived and the session isn't closing: established or draining. */
     public boolean isEstablished() {
-        return state == ClientSessionState.ESTABLISHED;
+        return state == ClientSessionState.ESTABLISHED || state == ClientSessionState.DRAINING;
+    }
+
+    public boolean isDraining() {
+        return state == ClientSessionState.DRAINING;
     }
 
     public boolean isClosing() {
@@ -143,17 +183,25 @@ public final class ClientSession {
         return new Hello(client, offered.stream().map(Capability::wireName).toList(), own);
     }
 
-    /** The {@code REGISTER} this session sends, with {@code authtoken}. */
+    /**
+     * The {@code REGISTER} this session sends, with {@code authtoken}, and with its resume token if the session has
+     * {@code resume}.
+     */
     public Register register(String authtoken) {
         return new Register(
-                authtoken, requested.stream().map(TunnelSpec::toRequest).toList());
+                authtoken, requested.stream().map(TunnelSpec::toRequest).toList(), resumeEnabled() ? resume : null);
     }
 
     /**
      * Whether {@code REGISTER} waits for the server's {@code HELLO}: it asks for an HTTP tunnel, which only a session
-     * the server has given {@code http} may (§4.2).
+     * the server has given {@code http} may, or it has a resume token, which only one given {@code resume} may send
+     * (§4.2).
      */
     public boolean registersAfterHello() {
+        return asksForHttp() || resume != null;
+    }
+
+    private boolean asksForHttp() {
         return requested.stream().anyMatch(spec -> spec.kind() == TunnelKind.HTTP);
     }
 
@@ -173,10 +221,13 @@ public final class ClientSession {
      * {@link ClientSessionState#CLOSING} every frame passes: the caller ignores it, releasing what it holds.
      *
      * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} for a frame out of order, which includes every
-     *     {@code GOAWAY} in this draft
+     *     {@code GOAWAY} in a session without {@code resume}
      */
     public void checkInbound(FrameType type) {
         Objects.requireNonNull(type, "type");
+        if (type == GOAWAY && state != ClientSessionState.CLOSING && !resumeEnabled()) {
+            throw protocolError("GOAWAY is not allowed in a session without the resume capability.");
+        }
         if (!ALLOWED_INBOUND.get(state).contains(type)) {
             throw protocolError(type + " is not allowed while the session is " + describe(state) + ".");
         }
@@ -225,12 +276,18 @@ public final class ClientSession {
         return capabilities.contains(Capability.HTTP);
     }
 
+    /** Whether the session has {@code resume}: {@code GOAWAY}, the resume tokens and {@code SESSION_REPLACED}. */
+    public boolean resumeEnabled() {
+        return capabilities.contains(Capability.RESUME);
+    }
+
     /**
      * A capability the requested tunnels need that the server's {@code HELLO} didn't list. Such a session can't
-     * register, and ends without sending {@code REGISTER}.
+     * register, and ends without sending {@code REGISTER}. A resume token never makes one missing: without
+     * {@code resume} the session registers without it.
      */
     public Optional<Capability> missingCapability() {
-        return registersAfterHello() && !httpEnabled() ? Optional.of(Capability.HTTP) : Optional.empty();
+        return asksForHttp() && !httpEnabled() ? Optional.of(Capability.HTTP) : Optional.empty();
     }
 
     /**
@@ -238,12 +295,18 @@ public final class ClientSession {
      * for entry, in order, with the same {@code ref} and {@code kind}, the requested port where one was asked for, and
      * a tunnel id of its own for each (§8.4).
      *
+     * <p>With {@code resume} the reply carries the session's resume token, which {@link #resumeToken()} then holds.
+     *
      * @return the tunnels, in request order
-     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} for a reply out of order or one that doesn't match
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} for a reply out of order, one that doesn't match, or
+     *     one without a resume token in a session with {@code resume}
      */
     public List<ActiveTunnel> onRegistered(Registered reply) {
         Objects.requireNonNull(reply, "reply");
         require(ClientSessionState.AWAITING_REGISTERED, REGISTER);
+        if (resumeEnabled() && reply.resumeToken() == null) {
+            throw protocolError("The REGISTER reply of a session with resume has no resumeToken.");
+        }
         List<RegisteredTunnel> answers = reply.tunnels();
         if (answers.size() != requested.size()) {
             throw protocolError(
@@ -267,8 +330,36 @@ public final class ClientSession {
             }
         }
         tunnels = byId;
+        resumeToken = resumeEnabled() ? reply.resumeToken() : null;
         state = ClientSessionState.ESTABLISHED;
         return List.copyOf(byId.values());
+    }
+
+    /**
+     * The server's {@code GOAWAY}, in a session with {@code resume}: {@code ESTABLISHED -> DRAINING}. The streams already
+     * open carry on as before; the server opens no other, and ends the session once they are done or
+     * {@code drainMs} has passed (§6.10).
+     *
+     * @return {@code goAway}, whose {@code reconnectAfterMs} is the least the client waits before connecting again
+     * @throws ProtocolException {@link ErrorCode#PROTOCOL_ERROR} without {@code resume}, before the {@code REGISTER}
+     *     reply, or for a second {@code GOAWAY}
+     */
+    public GoAway onGoAway(GoAway goAway) {
+        Objects.requireNonNull(goAway, "goAway");
+        if (!resumeEnabled()) {
+            throw protocolError("GOAWAY is not allowed in a session without the resume capability.");
+        }
+        require(ClientSessionState.ESTABLISHED, GOAWAY);
+        state = ClientSessionState.DRAINING;
+        return goAway;
+    }
+
+    /**
+     * The token the {@code REGISTER} reply carried, for the next session to present; empty until established, and in a
+     * session without {@code resume}. Never logged or written anywhere.
+     */
+    public Optional<ResumeToken> resumeToken() {
+        return Optional.ofNullable(resumeToken);
     }
 
     /**
@@ -595,6 +686,7 @@ public final class ClientSession {
             case AWAITING_HELLO -> "awaiting HELLO";
             case AWAITING_REGISTERED -> "awaiting the REGISTER reply";
             case ESTABLISHED -> "established";
+            case DRAINING -> "draining";
             case CLOSING -> "closing";
         };
     }

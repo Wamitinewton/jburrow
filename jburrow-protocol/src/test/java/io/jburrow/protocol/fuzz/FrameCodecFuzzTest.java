@@ -11,6 +11,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ErrorScope;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import java.nio.ByteBuffer;
@@ -41,21 +42,23 @@ class FrameCodecFuzzTest {
     private static final ControlJson JSON = ControlJson.create();
     private static final FrameCodec SERVER = new FrameCodec(Role.SERVER, JSON);
     private static final FrameCodec CLIENT = new FrameCodec(Role.CLIENT, JSON);
-    private static final FrameCodec SERVER_WITH_HTTP = new FrameCodec(Role.SERVER, JSON, () -> true);
-    private static final FrameCodec CLIENT_WITH_HTTP = new FrameCodec(Role.CLIENT, JSON, () -> true);
+    private static final FrameCodec SERVER_WITH_CAPABILITIES =
+            new FrameCodec(Role.SERVER, JSON, ProtocolVersion::capabilities);
+    private static final FrameCodec CLIENT_WITH_CAPABILITIES =
+            new FrameCodec(Role.CLIENT, JSON, ProtocolVersion::capabilities);
     private static final ByteBufAllocator ALLOC = ByteBufAllocator.DEFAULT;
     private static final int LENGTH_FIELD_OFFSET = 6;
 
     @FuzzTest(maxDuration = "2m")
     void decodeAsServer(byte[] message) {
         decodeBothForms(SERVER, CLIENT, message);
-        decodeBothForms(SERVER_WITH_HTTP, CLIENT_WITH_HTTP, message);
+        decodeBothForms(SERVER_WITH_CAPABILITIES, CLIENT_WITH_CAPABILITIES, message);
     }
 
     @FuzzTest(maxDuration = "2m")
     void decodeAsClient(byte[] message) {
         decodeBothForms(CLIENT, SERVER, message);
-        decodeBothForms(CLIENT_WITH_HTTP, SERVER_WITH_HTTP, message);
+        decodeBothForms(CLIENT_WITH_CAPABILITIES, SERVER_WITH_CAPABILITIES, message);
     }
 
     private static void decodeBothForms(FrameCodec receiver, FrameCodec peer, byte[] message) {

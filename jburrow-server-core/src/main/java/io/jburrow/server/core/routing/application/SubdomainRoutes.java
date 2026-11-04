@@ -2,6 +2,8 @@ package io.jburrow.server.core.routing.application;
 
 import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
+import io.jburrow.server.core.routing.application.port.ClaimSnapshot;
+import io.jburrow.server.core.routing.application.port.ClaimSnapshots;
 import io.jburrow.server.core.routing.application.port.RouteLookup;
 import io.jburrow.server.core.routing.application.port.SubdomainClaims;
 import io.jburrow.server.core.routing.domain.Blocklist;
@@ -10,6 +12,8 @@ import io.jburrow.server.core.routing.domain.NameGenerator;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -25,8 +29,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>An expired hold is removed when its name is next claimed or released, and by a sweep that runs at most once per
  * {@link #SWEEP_INTERVAL} on the thread of a {@link #release}, so the table doesn't grow with names nobody uses again.
  * There is no scheduler.
+ *
+ * <p>{@link #version} counts every change to the table, made inside the same atomic compute as the change, so a reader
+ * that sees the same value twice knows nothing was claimed, released, seeded or expired in between.
  */
-public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, RouteLookup<T> {
+public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, RouteLookup<T>, ClaimSnapshots<P> {
 
     static final int MAX_RANDOM_DRAWS = 8;
     static final Duration SWEEP_INTERVAL = Duration.ofMinutes(1);
@@ -37,6 +44,7 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
     private final Duration hold;
     private final InstantSource clock;
     private final AtomicLong nextSweepMillis;
+    private final AtomicLong version = new AtomicLong();
 
     /** @param hold how long a released name stays held for its principal; zero turns holds off */
     public SubdomainRoutes(Blocklist blocklist, NameGenerator names, Duration hold, InstantSource clock) {
@@ -57,6 +65,7 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
         for (int draw = 0; draw < MAX_RANDOM_DRAWS; draw++) {
             SubdomainName name = names.next();
             if (blocklist.allows(name) && claims.putIfAbsent(name, Claim.active(name, principal, tunnel)) == null) {
+                version.incrementAndGet();
                 return name;
             }
         }
@@ -71,8 +80,13 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
             throw new ClaimRefused(ClaimRefused.Reason.FORBIDDEN);
         }
         Instant now = clock.instant();
-        Claim<P, T> result = claims.compute(
-                name, (key, existing) -> existing == null || existing.yieldsTo(principal, now) ? wanted : existing);
+        Claim<P, T> result = claims.compute(name, (key, existing) -> {
+            if (existing == null || existing.yieldsTo(principal, now)) {
+                version.incrementAndGet();
+                return wanted;
+            }
+            return existing;
+        });
         if (result != wanted) {
             throw new ClaimRefused(ClaimRefused.Reason.UNAVAILABLE);
         }
@@ -86,9 +100,14 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
         Instant now = clock.instant();
         claims.computeIfPresent(name, (key, existing) -> {
             if (existing.isActiveFor(tunnel)) {
+                version.incrementAndGet();
                 return hold.isZero() ? null : existing.heldUntil(now.plus(hold));
             }
-            return existing.expiredAt(now) ? null : existing;
+            if (existing.expiredAt(now)) {
+                version.incrementAndGet();
+                return null;
+            }
+            return existing;
         });
         sweepIfDue(now);
     }
@@ -97,6 +116,41 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
     public Optional<T> find(SubdomainName name) {
         Claim<P, T> claim = claims.get(name);
         return claim != null && claim.active() ? Optional.of(claim.tunnel()) : Optional.empty();
+    }
+
+    @Override
+    public List<ClaimSnapshot<P>> snapshot(Instant now) {
+        Objects.requireNonNull(now, "now");
+        List<ClaimSnapshot<P>> snapshot = new ArrayList<>();
+        claims.forEach((name, claim) -> {
+            if (!claim.expiredAt(now)) {
+                snapshot.add(new ClaimSnapshot<>(name, claim.principal(), claim.heldUntil()));
+            }
+        });
+        return snapshot;
+    }
+
+    @Override
+    public boolean seedHold(SubdomainName name, P principal, Instant until) {
+        Objects.requireNonNull(name, "name");
+        Claim<P, T> seeded = Claim.seededHold(name, principal, until);
+        Instant now = clock.instant();
+        if (!until.isAfter(now)) {
+            return false;
+        }
+        Claim<P, T> result = claims.compute(name, (key, existing) -> {
+            if (existing == null || existing.expiredAt(now)) {
+                version.incrementAndGet();
+                return seeded;
+            }
+            return existing;
+        });
+        return result == seeded;
+    }
+
+    @Override
+    public long version() {
+        return version.get();
     }
 
     /** How many names have a claim, active or held, expired or not. */
@@ -111,8 +165,8 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
             return;
         }
         claims.forEach((name, claim) -> {
-            if (claim.expiredAt(now)) {
-                claims.remove(name, claim);
+            if (claim.expiredAt(now) && claims.remove(name, claim)) {
+                version.incrementAndGet();
             }
         });
     }

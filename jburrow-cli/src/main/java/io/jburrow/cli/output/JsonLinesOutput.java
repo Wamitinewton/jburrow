@@ -9,6 +9,7 @@ import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.ErrorCode;
 import java.io.PrintWriter;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -24,7 +25,9 @@ import tools.jackson.databind.json.JsonMapper;
  * {@code --output json}: one JSON object per line on stdout, {@code type} first, times in ISO-8601 UTC. Every run ends
  * with exactly one {@code closed} line, whether the session ended, never started, or the arguments were refused, so a
  * script always gets a final event. An HTTP tunnel's stream also has a {@code request} line, just before its
- * {@code stream_closed}.
+ * {@code stream_closed}. While the client reconnects, each lost session and each failed attempt is a
+ * {@code disconnected} line with the delay before the next attempt, and each session that follows a
+ * {@code reconnected} line. No line carries the authtoken or the resume token: no event does.
  *
  * <p>These events aren't protocol messages, so they have their own mapper rather than the protocol's strict one. Its
  * output is ASCII: anything else is escaped.
@@ -48,6 +51,11 @@ public final class JsonLinesOutput implements Output {
     record Registered(String type, String time, String sessionId, List<Tunnel> tunnels) {}
 
     record Tunnel(String ref, String url, String publicHost, int publicPort, String local) {}
+
+    record Disconnected(String type, String time, String reason, String code, long retryInMs) {}
+
+    /** {@code sameUrls} is false when a name or port the server had chosen was taken in between. */
+    record Reconnected(String type, String time, String sessionId, List<Tunnel> tunnels, boolean sameUrls) {}
 
     record StreamOpened(String type, String time, int streamId, String remote) {}
 
@@ -78,15 +86,22 @@ public final class JsonLinesOutput implements Output {
 
     @Override
     public void onEstablished(String sessionId, List<RegisteredTunnel> tunnels) {
-        List<Tunnel> entries = tunnels.stream()
-                .map(tunnel -> new Tunnel(
-                        tunnel.ref(),
-                        tunnel.url(),
-                        tunnel.publicHost(),
-                        tunnel.publicPort(),
-                        String.valueOf(targets.get(tunnel.ref()))))
-                .toList();
-        write(new Registered("registered", now(), sessionId, entries));
+        write(new Registered("registered", now(), sessionId, entries(tunnels)));
+    }
+
+    @Override
+    public void onDisconnected(TunnelClosed reason, Duration retryIn) {
+        write(new Disconnected(
+                "disconnected",
+                now(),
+                reason.reason().name(),
+                reason.code().map(ErrorCode::name).orElse(null),
+                retryIn.toMillis()));
+    }
+
+    @Override
+    public void onReconnected(String sessionId, List<RegisteredTunnel> tunnels, boolean sameUrls) {
+        write(new Reconnected("reconnected", now(), sessionId, entries(tunnels), sameUrls));
     }
 
     @Override
@@ -144,6 +159,17 @@ public final class JsonLinesOutput implements Output {
 
     private void closed(String reason, Optional<ErrorCode> code, String message) {
         write(new Closed("closed", now(), reason, code.map(ErrorCode::name).orElse(null), message));
+    }
+
+    private List<Tunnel> entries(List<RegisteredTunnel> tunnels) {
+        return tunnels.stream()
+                .map(tunnel -> new Tunnel(
+                        tunnel.ref(),
+                        tunnel.url(),
+                        tunnel.publicHost(),
+                        tunnel.publicPort(),
+                        String.valueOf(targets.get(tunnel.ref()))))
+                .toList();
     }
 
     private String now() {

@@ -10,6 +10,7 @@ import io.jburrow.protocol.adapter.netty.FrameCodec.Role;
 import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.HttpRequestHead;
@@ -19,6 +20,7 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
@@ -28,6 +30,7 @@ import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.FrameType;
+import io.jburrow.protocol.wire.ProtocolVersion;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
@@ -69,8 +72,8 @@ class ProtocolDocumentExamplesTest {
             Pattern.compile("<!-- example:([a-z0-9-]+) -->(.*?)<!-- /example -->", Pattern.DOTALL);
     private static final Pattern FENCE = Pattern.compile("```(\\w*)\\n(.*?)```", Pattern.DOTALL);
     private static final int TYPE_OFFSET = 4;
-    private static final Set<FrameType> CONTROL_PAYLOADS =
-            EnumSet.of(FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.ERROR);
+    private static final Set<FrameType> CONTROL_PAYLOADS = EnumSet.of(
+            FrameType.HELLO, FrameType.REGISTER, FrameType.OPEN, FrameType.HEADERS, FrameType.GOAWAY, FrameType.ERROR);
     private static final Pattern HEX_BYTE = Pattern.compile("[0-9a-f]{2}");
 
     private static final ByteBufAllocator ALLOC = ByteBufAllocator.DEFAULT;
@@ -81,6 +84,7 @@ class ProtocolDocumentExamplesTest {
     private static final UUID TUNNEL_ID = UUID.fromString("5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23");
     private static final String TOKEN = "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00";
     private static final String HTTP_HOST = "quiet-otter-4f2a.example.dev";
+    private static final ResumeToken RESUME_TOKEN = new ResumeToken("jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
 
     /** What each example in the document must be, and the side that sends it. Data frames are built per use. */
     private static final Map<String, Expected> EXPECTED = expected();
@@ -186,6 +190,29 @@ class ProtocolDocumentExamplesTest {
                         SERVER,
                         () -> new Frame.Error(new ErrorBody(
                                 ErrorCode.PORT_UNAVAILABLE, "Port 20417 is already in use.", "default"))));
+        examples.put("goaway", new Expected(SERVER, () -> new Frame.GoAway(new GoAway(830, 5_000))));
+        examples.put(
+                "register-request-resume",
+                new Expected(
+                        CLIENT,
+                        () -> new Frame.Register(new Register(
+                                TOKEN, List.of(new TunnelRequest("default", TunnelKind.TCP, 20_417)), RESUME_TOKEN))));
+        examples.put(
+                "register-reply-resume",
+                new Expected(
+                        SERVER,
+                        () -> new Frame.Registered(new Registered(
+                                List.of(RegisteredTunnel.of(
+                                        "default", TUNNEL_ID, TunnelKind.TCP, "tcp.example.dev", 20_417)),
+                                RESUME_TOKEN))));
+        examples.put(
+                "error-session-replaced",
+                new Expected(
+                        SERVER,
+                        () -> new Frame.Error(new ErrorBody(
+                                ErrorCode.SESSION_REPLACED,
+                                "A newer session of this client replaced this one.",
+                                null))));
         return Map.copyOf(examples);
     }
 
@@ -303,9 +330,12 @@ class ProtocolDocumentExamplesTest {
         throw new IllegalStateException("No " + DOCUMENT + " in " + start + " or above it");
     }
 
-    /** Every example is in a session with {@code http}, which leaves the examples of draft 2 itself unchanged. */
+    /**
+     * Every example is in a session with every capability, which leaves the examples of draft 2 itself unchanged: a
+     * capability only adds to the draft.
+     */
     private static FrameCodec codec(Role role) {
-        return new FrameCodec(role, JSON, () -> true);
+        return new FrameCodec(role, JSON, ProtocolVersion::capabilities);
     }
 
     private static Role receiverOf(Role sender) {

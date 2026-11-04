@@ -7,7 +7,6 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ProtocolException;
-import io.jburrow.protocol.wire.ProtocolVersion;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -46,6 +45,7 @@ import javax.net.ssl.TrustManagerFactory;
  *     stream, and on all streams together, before it returns credit
  * @param capabilities the capabilities offered in {@code HELLO}: by default every one this client implements, whatever
  *     its tunnels need, so the server's answer says what it supports (§4.2); fewer only to stand in for an older client
+ * @param reconnect whether a session that ends is followed by another
  */
 public record ClientSettings(
         URI server,
@@ -56,7 +56,8 @@ public record ClientSettings(
         Optional<TrustManagerFactory> trustManager,
         Duration handshakeTimeout,
         Windows windows,
-        Set<Capability> capabilities) {
+        Set<Capability> capabilities,
+        ReconnectPolicy reconnect) {
 
     public static final String CONNECT_PATH = "/v1/connect";
     public static final Duration DEFAULT_HANDSHAKE_TIMEOUT = Duration.ofSeconds(10);
@@ -65,6 +66,9 @@ public record ClientSettings(
      * machine runs one session and the server's memory doesn't depend on it.
      */
     public static final Windows DEFAULT_WINDOWS = new Windows(256 * 1024, 1024 * 1024);
+
+    /** The capabilities this client implements, and offers by default. */
+    public static final Set<Capability> IMPLEMENTED_CAPABILITIES = Set.of(Capability.HTTP, Capability.RESUME);
 
     static final String DEFAULT_CLIENT_NAME = "jburrow-client-core";
 
@@ -100,9 +104,9 @@ public record ClientSettings(
         Objects.requireNonNull(windows, "windows");
         Objects.requireNonNull(capabilities, "capabilities");
         capabilities = Set.copyOf(capabilities);
-        if (!ProtocolVersion.capabilities().containsAll(capabilities)) {
+        if (!IMPLEMENTED_CAPABILITIES.containsAll(capabilities)) {
             throw new IllegalArgumentException(
-                    "Only the capabilities this client implements can be offered: " + ProtocolVersion.capabilities());
+                    "Only the capabilities this client implements can be offered: " + IMPLEMENTED_CAPABILITIES);
         }
         for (TunnelSpec tunnel : tunnels) {
             Optional<Capability> needed = tunnel.kind().capability();
@@ -112,9 +116,34 @@ public record ClientSettings(
                                 + needed.get().wireName() + " capability offered");
             }
         }
+        Objects.requireNonNull(reconnect, "reconnect");
     }
 
-    /** Settings offering every capability this client implements. */
+    /** Settings offering {@code capabilities}, and reconnecting on the standard schedule. */
+    public ClientSettings(
+            URI server,
+            String authtoken,
+            List<TunnelSpec> tunnels,
+            TunnelEvents events,
+            ClientInfo clientInfo,
+            Optional<TrustManagerFactory> trustManager,
+            Duration handshakeTimeout,
+            Windows windows,
+            Set<Capability> capabilities) {
+        this(
+                server,
+                authtoken,
+                tunnels,
+                events,
+                clientInfo,
+                trustManager,
+                handshakeTimeout,
+                windows,
+                capabilities,
+                ReconnectPolicy.standard());
+    }
+
+    /** Settings offering every capability this client implements, and reconnecting on the standard schedule. */
     public ClientSettings(
             URI server,
             String authtoken,
@@ -133,7 +162,7 @@ public record ClientSettings(
                 trustManager,
                 handshakeTimeout,
                 windows,
-                ProtocolVersion.capabilities());
+                IMPLEMENTED_CAPABILITIES);
     }
 
     /** Whether the connection uses TLS: a {@code wss} URL. */
@@ -164,7 +193,7 @@ public record ClientSettings(
         return "ClientSettings[server=" + server + ", authtoken=***, tunnels=" + tunnels + ", clientInfo="
                 + clientInfo + ", trustManager=" + (trustManager.isPresent() ? "custom" : "system")
                 + ", handshakeTimeout=" + handshakeTimeout + ", windows=" + windows + ", capabilities=" + capabilities
-                + "]";
+                + ", reconnect=" + reconnect + "]";
     }
 
     /**

@@ -42,6 +42,7 @@ class ErrorCodeTest {
                 arguments(ErrorCode.SUBDOMAIN_FORBIDDEN, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.HEARTBEAT_TIMEOUT, Set.of(SESSION), NONE, 1008),
                 arguments(ErrorCode.PING_RATE_EXCEEDED, Set.of(SESSION), NONE, 1008),
+                arguments(ErrorCode.SESSION_REPLACED, Set.of(SESSION), NONE, 1000),
                 arguments(ErrorCode.INTERNAL_ERROR, Set.of(SESSION, STREAM), NONE, 1011),
                 arguments(ErrorCode.PEER_RESET, Set.of(STREAM), NONE, NONE),
                 arguments(ErrorCode.LOCAL_SERVICE_UNREACHABLE, Set.of(STREAM), NONE, NONE),
@@ -59,13 +60,15 @@ class ErrorCodeTest {
     }
 
     @Test
-    void onlyTheHttpCodesNeedACapability() {
+    void onlyTheHttpAndResumeCodesNeedACapability() {
         Set<ErrorCode> http =
                 Set.of(ErrorCode.SUBDOMAIN_UNAVAILABLE, ErrorCode.SUBDOMAIN_FORBIDDEN, ErrorCode.LOCAL_SERVICE_ERROR);
+        Set<ErrorCode> resume = Set.of(ErrorCode.SESSION_REPLACED);
         for (ErrorCode code : ErrorCode.values()) {
-            assertThat(code.capability())
-                    .as(code.code())
-                    .isEqualTo(http.contains(code) ? Optional.of(Capability.HTTP) : Optional.empty());
+            Optional<Capability> expected = http.contains(code)
+                    ? Optional.of(Capability.HTTP)
+                    : resume.contains(code) ? Optional.of(Capability.RESUME) : Optional.empty();
+            assertThat(code.capability()).as(code.code()).isEqualTo(expected);
         }
     }
 

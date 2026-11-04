@@ -153,7 +153,7 @@ class ErrorPagesIntegrationTest {
         Response response = visitor.response();
 
         assertPage(response, 503, "SERVER_SHUTTING_DOWN");
-        assertThat(response.header("retry-after")).isNotNull();
+        assertThat(response.header("retry-after")).isEqualTo("10");
     }
 
     @ParameterizedTest

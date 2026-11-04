@@ -8,7 +8,6 @@ import io.jburrow.client.tunnel.domain.TunnelSpec;
 import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.Capability;
-import io.jburrow.protocol.wire.ProtocolVersion;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,7 +34,8 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     private TrustManagerFactory trustManager;
     private Duration handshakeTimeout = ClientSettings.DEFAULT_HANDSHAKE_TIMEOUT;
     private Windows windows = ClientSettings.DEFAULT_WINDOWS;
-    private Set<Capability> capabilities = ProtocolVersion.capabilities();
+    private Set<Capability> capabilities = ClientSettings.IMPLEMENTED_CAPABILITIES;
+    private ReconnectPolicy reconnect = ReconnectPolicy.standard();
 
     @Override
     public JBurrowClient.Builder server(URI uri) {
@@ -111,6 +111,12 @@ final class DefaultBuilder implements JBurrowClient.Builder {
     }
 
     @Override
+    public JBurrowClient.Builder reconnect(ReconnectPolicy policy) {
+        this.reconnect = Objects.requireNonNull(policy, "policy");
+        return this;
+    }
+
+    @Override
     public JBurrowClient build() {
         return new NettyTunnelClient(settings());
     }
@@ -126,7 +132,8 @@ final class DefaultBuilder implements JBurrowClient.Builder {
                 Optional.ofNullable(trustManager),
                 handshakeTimeout,
                 windows,
-                capabilities);
+                capabilities,
+                reconnect);
     }
 
     /** The tunnels from {@link #tunnel}, then the one {@link #http} describes. */

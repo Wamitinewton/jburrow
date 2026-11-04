@@ -12,6 +12,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import java.io.PrintWriter;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
@@ -36,12 +37,23 @@ import java.util.stream.Collectors;
  * 14:02:11  GET  /                      200   3.4 KiB    12 ms
  * 14:02:14  GET  /missing                 -         -     3 ms  local service unreachable
  * </pre>
+ *
+ * <p>A lost session is one line, and so is the reconnect; between them, a failed attempt prints only when its reason
+ * differs from the last one printed, so an outage doesn't fill the terminal:
+ *
+ * <pre>
+ * 14:05:40  connection lost: the server is restarting; reconnecting in 0.8 s
+ * 14:05:41  still reconnecting: the server isn't reachable (503); next try in 1.0 s
+ * 14:05:47  reconnected   https://quiet-otter-4f2a.example.dev
+ * </pre>
  */
 public final class ConsoleOutput implements Output {
 
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT);
-    private static final String RECONNECT_ADVICE =
-            "Run the command again; automatic reconnect arrives in a later release.";
+    private static final String RUN_AGAIN = "Run the command again.";
+    private static final String RUN_AGAIN_RECONNECTING =
+            "Run the command again, or leave out --no-reconnect to have it reconnect by itself.";
+
     private static final int MAX_TARGET = 60;
     private static final String CUT = "...";
     private static final String NONE = "-";
@@ -51,10 +63,15 @@ public final class ConsoleOutput implements Output {
     private final Clock clock;
     private final String version;
     private final Map<String, TunnelSpec> tunnels;
-    /** Only touched on the client's I/O thread, which delivers every stream event. */
+    private final boolean reconnects;
+    /** Only touched on the client's I/O thread, which delivers every session and stream event. */
     private final Map<Integer, OpenStream> streams = new HashMap<>();
     /** HTTP streams print one line, from their exchange, so their stream events print nothing. Same thread. */
     private final Set<Integer> exchanges = new HashSet<>();
+    /** The URL each tunnel had in the last session, by ref. Same thread. */
+    private final Map<String, String> urls = new HashMap<>();
+    /** The reason last printed since the session was lost; null while a session is up. Same thread. */
+    private String lostBecause;
 
     private record OpenStream(String remote, LocalTarget target) {}
 
@@ -62,13 +79,22 @@ public final class ConsoleOutput implements Output {
      * @param clock its zone is the one times are printed in
      * @param version this CLI's version, for the first line
      * @param tunnels the tunnels the command asked for
+     * @param reconnects whether the client starts another session when one ends, which changes the advice for a lost
+     *     one
      */
-    public ConsoleOutput(PrintWriter out, PrintWriter err, Clock clock, String version, List<TunnelSpec> tunnels) {
+    public ConsoleOutput(
+            PrintWriter out,
+            PrintWriter err,
+            Clock clock,
+            String version,
+            List<TunnelSpec> tunnels,
+            boolean reconnects) {
         this.out = Objects.requireNonNull(out, "out");
         this.err = Objects.requireNonNull(err, "err");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.version = Objects.requireNonNull(version, "version");
         this.tunnels = tunnels.stream().collect(Collectors.toUnmodifiableMap(TunnelSpec::ref, Function.identity()));
+        this.reconnects = reconnects;
     }
 
     @Override
@@ -76,8 +102,38 @@ public final class ConsoleOutput implements Output {
         line(out, "jburrow " + version + ", protocol " + ProtocolVersion.CURRENT);
         for (RegisteredTunnel tunnel : registered) {
             line(out, "Forwarding  " + tunnel.url() + " -> " + local(tunnels.get(tunnel.ref())));
+            urls.put(tunnel.ref(), tunnel.url());
         }
         line(out, "");
+    }
+
+    /**
+     * The first call after a session was up is that session's end; every later one, until {@link #onReconnected}, is
+     * an attempt that failed.
+     */
+    @Override
+    public void onDisconnected(TunnelClosed reason, Duration retryIn) {
+        boolean sessionEnded = lostBecause == null;
+        String because = inWords(reason, !sessionEnded);
+        if (sessionEnded) {
+            line(out, now() + "  connection lost: " + because + "; reconnecting in " + seconds(retryIn));
+        } else if (!because.equals(lostBecause)) {
+            line(out, now() + "  still reconnecting: " + because + "; next try in " + seconds(retryIn));
+        }
+        lostBecause = because;
+    }
+
+    @Override
+    public void onReconnected(String sessionId, List<RegisteredTunnel> registered, boolean sameUrls) {
+        lostBecause = null;
+        for (RegisteredTunnel tunnel : registered) {
+            String before = urls.put(tunnel.ref(), tunnel.url());
+            if (sameUrls || tunnel.url().equals(before)) {
+                line(out, now() + "  reconnected   " + tunnel.url());
+            } else {
+                line(out, now() + "  reconnected with a new URL  " + tunnel.url() + "  (the old one was taken)");
+            }
+        }
     }
 
     @Override
@@ -123,9 +179,7 @@ public final class ConsoleOutput implements Output {
                 answered ? String.valueOf(exchange.status().getAsInt()) : NONE,
                 answered ? Sizes.binaryBytes(exchange.responseBytes()) : NONE,
                 Sizes.shortDuration(exchange.durationMillis()));
-        line(
-                out,
-                line + exchange.reset().map(code -> "  " + exchangeReset(code)).orElse(""));
+        line(out, line + exchange.reset().map(code -> "  " + words(code)).orElse(""));
     }
 
     @Override
@@ -170,7 +224,7 @@ public final class ConsoleOutput implements Output {
     }
 
     /** Advice for the failures a user can do something about; a label is an error code, or a reason without one. */
-    private static String advice(String label, List<String> supportedVersions) {
+    private String advice(String label, List<String> supportedVersions) {
         return switch (label) {
             case "AUTHTOKEN_INVALID" -> "Check the token; tokens are shown once when created.";
             case "UNSUPPORTED_PROTOCOL_VERSION" ->
@@ -180,9 +234,48 @@ public final class ConsoleOutput implements Output {
             case "PORT_UNAVAILABLE" -> "Try without --remote-port.";
             case "SUBDOMAIN_UNAVAILABLE" -> "Try another, or leave out --subdomain.";
             case "UNSUPPORTED_BY_SERVER" -> "Upgrade the server, or use jburrow tcp.";
-            case "CONNECTION_LOST", "HEARTBEAT_TIMEOUT", "SERVER_SHUTTING_DOWN" -> RECONNECT_ADVICE;
+            case "CONNECTION_LOST", "HEARTBEAT_TIMEOUT", "SERVER_SHUTTING_DOWN" ->
+                reconnects ? RUN_AGAIN : RUN_AGAIN_RECONNECTING;
             default -> null;
         };
+    }
+
+    /**
+     * Why a session ended, or why an attempt failed, in a few words. A lost connection reads differently for each: a
+     * session's connection dropped, an attempt's server couldn't be reached.
+     */
+    private static String inWords(TunnelClosed closed, boolean attempt) {
+        if (closed.reason() == TunnelClosed.Reason.HEARTBEAT_TIMEOUT) {
+            return "the server stopped answering";
+        }
+        if (closed.code().isPresent()) {
+            return switch (closed.code().get()) {
+                case SERVER_SHUTTING_DOWN -> "the server is restarting";
+                case SERVER_AT_CAPACITY -> "the server is busy";
+                case SUBDOMAIN_UNAVAILABLE, PORT_UNAVAILABLE -> "the old URL is taken, asking for a new one";
+                default -> words(closed.code().get());
+            };
+        }
+        if (closed.reason() == TunnelClosed.Reason.CONNECTION_LOST) {
+            if (!attempt) {
+                return "the connection dropped";
+            }
+            String cause = closed.upgradeStatus().isPresent()
+                    ? String.valueOf(closed.upgradeStatus().getAsInt())
+                    : withoutFullStop(closed.message());
+            return "the server isn't reachable (" + cause + ")";
+        }
+        return withoutFullStop(closed.message());
+    }
+
+    private static String withoutFullStop(String message) {
+        String text = message.strip();
+        return text.endsWith(".") ? text.substring(0, text.length() - 1) : text;
+    }
+
+    /** Whole seconds and tenths: {@code 0.8 s}, {@code 30.0 s}. */
+    private static String seconds(Duration delay) {
+        return String.format(Locale.ROOT, "%.1f s", delay.toMillis() / 1000.0);
     }
 
     private static String resetReason(ErrorCode code, LocalTarget target) {
@@ -197,7 +290,7 @@ public final class ConsoleOutput implements Output {
     }
 
     /** The code in words: {@code LOCAL_SERVICE_UNREACHABLE} is {@code local service unreachable}. */
-    private static String exchangeReset(ErrorCode code) {
+    private static String words(ErrorCode code) {
         return code.name().toLowerCase(Locale.ROOT).replace('_', ' ');
     }
 

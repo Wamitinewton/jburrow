@@ -812,7 +812,10 @@ connection, and the handshake cap bounds how many at once. With a token, a princ
   4. Shut down the event loop groups (no quiet period, 5-second timeout).
 
 The whole stop fits well inside phase 0's 20-second shutdown phase timeout and the pod's 30-second
-grace period. Phase 4 replaces step 2 with `GOAWAY` and a real drain.
+grace period. Phase 4 puts a drain in front of step 2: readiness goes down first, sessions with
+`resume` are sent `GOAWAY`, open streams get up to 5 seconds, and the leases are flushed once every
+session has ended. Step 2 is still how each session ends. The sequence that runs now is
+[`docs/phase-4-staying-connected/ARCHITECTURE.md` §The drain](../phase-4-staying-connected/ARCHITECTURE.md#the-drain).
 
 `EdgeHealthIndicator` reports the edge as `UP` while its server channel is bound and open. It is
 shown under `/actuator/health` and kept out of readiness, as phase 0 keeps every dependency out of

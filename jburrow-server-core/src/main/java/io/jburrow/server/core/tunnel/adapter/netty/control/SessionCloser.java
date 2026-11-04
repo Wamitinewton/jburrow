@@ -117,7 +117,7 @@ public final class SessionCloser {
         if (session.state() == SessionState.CLOSING) {
             return;
         }
-        boolean established = session.state() == SessionState.ESTABLISHED;
+        boolean established = session.isServing();
         session.onClosing();
         context.end(SessionEnd.CLIENT_CLOSED);
         if (error.code().scopes().contains(ErrorScope.SESSION)) {
@@ -169,7 +169,7 @@ public final class SessionCloser {
         if (session.state() == SessionState.CLOSING) {
             return false;
         }
-        boolean established = session.state() == SessionState.ESTABLISHED;
+        boolean established = session.isServing();
         session.onClosing(code);
         metrics.protocolError(code, Side.LOCAL);
         if (!established) {
@@ -188,6 +188,12 @@ public final class SessionCloser {
     private static void logSessionError(SessionContext context, ProtocolException error) {
         if (error.code() == ErrorCode.SERVER_SHUTTING_DOWN) {
             log.debug("session {}: ending for shutdown", context.session().id());
+            return;
+        }
+        if (error.code() == ErrorCode.SESSION_REPLACED) {
+            log.debug(
+                    "session {}: ending, replaced by a newer session",
+                    context.session().id());
             return;
         }
         log.warn(

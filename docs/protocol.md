@@ -36,8 +36,8 @@ capitals, as shown here.
 
 ## 1. Status and version
 
-This document specifies `jburrow.v1-draft.2` and its one capability, `http` (§4.2). It is the
-authority on the wire. Other JBurrow
+This document specifies `jburrow.v1-draft.2` and its two capabilities, `http` and `resume` (§4.2).
+It is the authority on the wire. Other JBurrow
 documents that describe the protocol summarize this one, and where they disagree, this one is
 right.
 
@@ -57,6 +57,7 @@ Section numbers refer to the document of the draft in the same row.
 | `jburrow.v1-draft.1` | 2026-10-25 | 10 | A side that has paused reading keeps sending `PING` every `pingIntervalMs`, so its peer doesn't end a healthy session during a long stall. Not a wire change: every peer already answers a `PING`. |
 | `jburrow.v1-draft.2` | 2026-10-26 | 1, 2.1, 4.1, 4.2, 6, 6.5, 6.6, 7.3, 7.4, 8.2, 8.3, 8.5, 9.2–9.5, 10–17 | Flow control. Each side announces its receive windows in its `HELLO` (`windows`, required). `WINDOW_UPDATE` is defined, on stream 0 for the session window and on a data stream for that stream's window. `DATA` past a window, or credit past `2^31 - 1`, is the new session error `FLOW_CONTROL_ERROR`. Optimistic data is bounded by the client's stream window, and a client no longer stops reading the connection while it connects to a local target. New §10; §10–§16 of draft 1 are §11–§17. Not compatible with draft 1. |
 | `jburrow.v1-draft.2` | 2026-10-29 | 1, 2.1, 4.2, 4.3, 6, 6.4, 7, 7.5–7.7, 7.9, 7.10, 8.2–8.4, 9, 9.7, 12.2, 13–17 | The `http` capability, draft 2's first: HTTP tunnels. `HEADERS` is defined, the `"http"` tunnel kind, `subdomain` in `REGISTER`, `request` in `OPEN` and the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR` are added, and a stream of an HTTP tunnel carries one exchange: a request head, a response head and two bodies without their HTTP/1.1 framing (§9.7). Additive: a peer that doesn't offer `http` sees draft 2 unchanged, except that `subdomain` and `request`, now known fields, are refused on a `"tcp"` entry rather than ignored. |
+| `jburrow.v1-draft.2` | 2026-11-03 | 1, 2.1, 4.2, 6, 6.10, 7, 7.5, 7.6, 7.11, 8, 12, 13, 14, 15, 16 | The `resume` capability: `GOAWAY`, resume tokens, `SESSION_REPLACED`. `GOAWAY` is defined, with a payload, for a server that is draining; `resume` in `REGISTER` and `resumeToken` in its reply name the client's previous session, which registration ends first (§8.4, step 2a); and a session with `resume` has a Draining state. Without it, draft 2 is unchanged. |
 
 ## 2. Conventions
 
@@ -82,6 +83,8 @@ Section numbers refer to the document of the draft in the same row.
 | window | The credit a receiver gives its peer to start with, announced in its `HELLO`: one for each new stream and one for the session (§10.1). |
 | release | A receiver releases a byte of `DATA` when it no longer holds it: it has written the byte to its destination, or discarded it (§10.4). |
 | capability | An optional feature of a version, negotiated in `HELLO` (§4.2). "In a session with `http`" means one whose server listed `http` in its `HELLO`. |
+| resume token | With `resume`, a random string the server issues in its `REGISTER` reply. It names that session, so that the client's next session can end it (§8.4). |
+| drain | With `resume`, the end of a session the server announces with `GOAWAY`: the streams already open finish, and no new one starts (§6.10). |
 | head | The request line or status line of an HTTP message and its header fields, as a JSON object (§7.7, §7.9). |
 | body | The content of an HTTP message, carried as `DATA` without its HTTP/1.1 framing (§9.7). |
 
@@ -278,17 +281,25 @@ lists the capabilities it supports in its `HELLO` (§7.3). The server answers in
   when that `HELLO` arrives, so a client that needs a capability for its `REGISTER` sends it only
   then (§8.3).
 
-`jburrow.v1-draft.2` defines one capability:
+`jburrow.v1-draft.2` defines two capabilities:
 
 | Capability | Introduces | Defined in |
 |---|---|---|
 | `http` | HTTP tunnels: the `HEADERS` frame; the value `"http"` of `tunnels[].kind` and `OPEN.kind`; the codes `SUBDOMAIN_UNAVAILABLE`, `SUBDOMAIN_FORBIDDEN` and `LOCAL_SERVICE_ERROR`; and the stream rules of §9.7 | §6.4, §7.5–§7.7, §7.9, §7.10, §9.7, §12 |
+| `resume` | Staying connected across a gap: the payload of the `GOAWAY` frame and the Draining state; the fields `resume` of `REGISTER` and `resumeToken` of its reply; the code `SESSION_REPLACED`; and step 2a of registration | §6.10, §7.5, §7.6, §7.11, §8.1, §8.2, §8.4, §8.6, §12 |
 
 The fields `tunnels[].subdomain` (§7.5) and `request` (§7.7) belong to `http` too, but they are
 only valid with the kind `"http"`, so a session without it refuses them with the kind they arrive
 with. In a session without `http` the server's `HELLO` lists no capability, and draft 2 is
 exactly as it was before `http` existed. A server MAY leave `http` out of its answer even when it
 supports HTTP tunnels, for example when its operator has turned them off.
+
+`resume`'s two fields are optional fields of payloads draft 2 already has, so in a session without
+`resume` a receiver ignores them as the unknown keys they are (§4.3), whatever their values, and a
+sender doesn't send them. A client and a server can each offer `resume` independently of `http`.
+Without `resume`, `GOAWAY` stays the reserved frame of the draft (§6.10) and `SESSION_REPLACED` is an
+unknown code; a server that is stopping ends such a session with `ERROR SERVER_SHUTTING_DOWN`, as it
+always has.
 
 ### 4.3 What a receiver doesn't know
 
@@ -350,7 +361,7 @@ truncation and framing bugs at the first bad frame.
 | `0x07` | `CLOSE` | data stream | both | empty, or a code of 1–64 | `0x01` `RST` | §6.7 |
 | `0x08` | `PING` | 0 | both | exactly 8 | none | §6.8 |
 | `0x09` | `PONG` | 0 | both | exactly 8 | none | §6.9 |
-| `0x0A` | `GOAWAY` | 0 | server | 0–16,384 | none | reserved (§6.10) |
+| `0x0A` | `GOAWAY` | 0 | server, with `resume` | JSON, 0–16,384 | none | §6.10 |
 | `0x0B` | `ERROR` | 0 | both | JSON, 0–16,384 | none | §6.11 |
 
 Type `0x00` and types `0x0C` to `0xFF` are unassigned, and receiving one is `PROTOCOL_ERROR`. An
@@ -523,14 +534,43 @@ The client answers the `PING` above:
 
 ### 6.10 `GOAWAY` (0x0A)
 
-Reserved for a server that is draining before a restart, defined in a later draft. In this draft no
-peer may send it.
+The server is draining, usually before a restart. Introduced by `resume` (§4.2): it is sent only in
+a session with `resume`.
 
-- Sent by the server only, on stream 0. No flags. Payload: up to 16,384 bytes, which a receiver of
-  this draft doesn't parse.
-- A server that receives `GOAWAY` raises `PROTOCOL_ERROR` at step 4 of §13. A client that receives
-  one decodes the header, checks the length and the flags, and then raises `PROTOCOL_ERROR` at
-  step 9.
+- Sent by the server only, on stream 0. No flags. Payload: one JSON object (§7.11), at most 16,384
+  bytes.
+- At most once per session, and only once the session is established (§8.2). After it the server
+  opens no new stream on the session, and the session is Draining (§8.1).
+- The client carries on with the streams already open: it keeps sending `DATA`, `HEADERS`, `CLOSE`
+  and `WINDOW_UPDATE` for them, and they finish normally. The client doesn't close the session
+  itself: the server ends it with `ERROR SERVER_SHUTTING_DOWN` once those streams have closed or
+  `drainMs` has passed (§8.6). After the connection closes, the client waits at least
+  `reconnectAfterMs` before it connects again.
+- A server that receives `GOAWAY` raises `PROTOCOL_ERROR` at step 4 of §13. A client in a session
+  with `resume` parses the payload at step 8, and raises `PROTOCOL_ERROR` at step 9 for a `GOAWAY`
+  before the `REGISTER` reply, a second `GOAWAY`, and an `OPEN` after one.
+- A client in a session without `resume` doesn't parse the payload: it decodes the header, checks
+  the length and the flags, and then raises `PROTOCOL_ERROR` at step 9, as for any frame out of
+  order. A server never sends `GOAWAY` in such a session; a server that is stopping while a session
+  is still in its handshake doesn't send it either, and sends `ERROR SERVER_SHUTTING_DOWN` instead.
+
+`reconnectAfterMs` spreads the reconnects of the server's clients over time, so they don't all reach
+the next server in the same instant. It is a lower bound: a client adds its own backoff on top.
+
+The server announces a drain, asking the client to wait at least 830 ms before reconnecting:
+
+<!-- example:goaway -->
+```json
+{ "reconnectAfterMs": 830, "drainMs": 5000 }
+```
+
+```text
+00 00 00 00 0a 00 00 00 00 27
+7b 22 72 65 63 6f 6e 6e 65 63 74 41 66 74 65 72
+4d 73 22 3a 38 33 30 2c 22 64 72 61 69 6e 4d 73
+22 3a 35 30 30 30 7d
+```
+<!-- /example -->
 
 ### 6.11 `ERROR` (0x0B)
 
@@ -540,7 +580,7 @@ Reports a session error. The sender closes the connection right after it (§8.6)
 
 ## 7. Control payloads
 
-`HELLO`, `REGISTER`, `OPEN`, `HEADERS` and `ERROR` each carry one JSON object
+`HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR`, and with `resume` `GOAWAY`, each carry one JSON object
 ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) encoded in UTF-8, at most 16,384 bytes.
 
 ### 7.1 Encoding rules
@@ -596,8 +636,8 @@ tables.
 
 - Field names are camelCase.
 - Enumerated values are lower-case strings, such as `"tcp"`, and compared exactly.
-- In a field table, a value or field marked "with `http`" is one the `http` capability introduces:
-  in a session without it, it is unknown (§4.2).
+- In a field table, a value or field marked "with `http`" or "with `resume`" is one that capability
+  introduces: in a session without it, it is unknown (§4.2).
 - Durations are integer milliseconds, in fields whose names end in `Ms`.
 - Identifiers the server issues (`sessionId`, `tunnelId`) are UUIDs in the canonical lower-case
   form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` of hexadecimal digits `[0-9a-f]`. Any other form,
@@ -721,6 +761,7 @@ side announces what it is willing to receive, and neither side's windows change 
 | `tunnels[].kind` | string | `"tcp"`, or with `http` `"http"`. |
 | `tunnels[].remotePort` | integer (32-bit) | Optional, `"tcp"` only. 1 to 65,535. Asks for this public port. Without it, the server chooses. |
 | `tunnels[].subdomain` | string | Optional, `"http"` only. `[a-z0-9][a-z0-9-]{1,61}[a-z0-9]` with no `--` anywhere: 3 to 63 characters. Asks for this name under the server's HTTP domain. Without it, the server chooses. |
+| `resume` | string | Optional, with `resume`. `jbr_` followed by exactly 43 characters of `[A-Za-z0-9_-]`: 47 characters in all. The `resumeToken` of the client's previous session's `REGISTER` reply (§7.6), so the server can end that session if it is still open (§8.4). A receiver never logs it and never repeats it, as the authtoken. |
 
 A `remotePort` on an `"http"` entry, or a `subdomain` on a `"tcp"` entry, is `VALIDATION_FAILED`.
 Whether a requested name is free, and allowed on this server, is the server's to decide (§8.4).
@@ -751,6 +792,36 @@ each `ref` to its local target itself.
 
 The token in this example is the documented development token of the reference server, which only
 unlocks a server running on the developer's own machine.
+
+In a session with `resume`, a client that reconnects asks for the port its previous session had, and
+presents that session's resume token. The token in this example is 32 bytes counting up from 0, an
+obviously made-up value:
+
+<!-- example:register-request-resume -->
+```json
+{
+  "authtoken": "jb_LOCAL-DEVELOPMENT-ONLY-unlocks-localhost-00",
+  "tunnels": [{ "ref": "default", "kind": "tcp", "remotePort": 20417 }],
+  "resume": "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+}
+```
+
+```text
+00 00 00 00 02 00 00 00 00 b7
+7b 22 61 75 74 68 74 6f 6b 65 6e 22 3a 22 6a 62
+5f 4c 4f 43 41 4c 2d 44 45 56 45 4c 4f 50 4d 45
+4e 54 2d 4f 4e 4c 59 2d 75 6e 6c 6f 63 6b 73 2d
+6c 6f 63 61 6c 68 6f 73 74 2d 30 30 22 2c 22 74
+75 6e 6e 65 6c 73 22 3a 5b 7b 22 72 65 66 22 3a
+22 64 65 66 61 75 6c 74 22 2c 22 6b 69 6e 64 22
+3a 22 74 63 70 22 2c 22 72 65 6d 6f 74 65 50 6f
+72 74 22 3a 32 30 34 31 37 7d 5d 2c 22 72 65 73
+75 6d 65 22 3a 22 6a 62 72 5f 41 41 45 43 41 77
+51 46 42 67 63 49 43 51 6f 4c 44 41 30 4f 44 78
+41 52 45 68 4d 55 46 52 59 58 47 42 6b 61 47 78
+77 64 48 68 38 22 7d
+```
+<!-- /example -->
 
 In a session with `http`, the client asks for an HTTP tunnel named `myapp`:
 
@@ -786,6 +857,7 @@ In a session with `http`, the client asks for an HTTP tunnel named `myapp`:
 | `tunnels[].publicHost` | string | A lower-case DNS name or an IPv4 address, at most 253 characters: dot-separated labels of 1 to 63 characters from `[a-z0-9-]` that neither start nor end with `-`, with no trailing dot. An IPv6 host would need brackets in `url`, and this draft has no IPv6 tunnels. |
 | `tunnels[].publicPort` | integer (32-bit) | 1 to 65,535. With a `remotePort` in the request, that port. For an `"http"` tunnel, the port visitors connect to. |
 | `tunnels[].url` | string | For `"tcp"`, exactly `tcp://<publicHost>:<publicPort>`. For `"http"`, `http://<publicHost>` or `https://<publicHost>`, followed by `:<publicPort>` unless `publicPort` is that scheme's default (80 for `http`, 443 for `https`). `publicPort` is in decimal without leading zeros. |
+| `resumeToken` | string | With `resume`, required; without it, never sent. The rule of `REGISTER.resume` (§7.5). A new token for this session: valid while this session is open on this server, and used up when a later `REGISTER` presents it (§8.4). |
 
 <!-- example:register-reply -->
 ```json
@@ -819,6 +891,59 @@ In a session with `http`, the client asks for an HTTP tunnel named `myapp`:
 22 7d 5d 7d
 ```
 <!-- /example -->
+
+**The resume token.** The server draws a new token for every session with `resume` from a
+cryptographically secure random source: 32 bytes, encoded as base64url without padding (RFC 4648
+§5) after the prefix `jbr_`. It is not a credential. A `REGISTER` that presents it still carries the
+authtoken and is checked exactly as any other, and the token only counts next to an authtoken of the
+same owner (§8.4). A server keeps no more of it than it needs to recognize it, such as a hash, and
+keeps that only in memory, for as long as the session is open: a token means nothing to another
+server process. A client keeps it in memory only, for its next session, and neither side writes it
+to a log, an error message or a file. A client SHOULD treat a reply without `resumeToken`, in a
+session with `resume`, as `PROTOCOL_ERROR`.
+
+The reply to the request above, with the new session's token:
+
+<!-- example:register-reply-resume -->
+```json
+{
+  "tunnels": [
+    {
+      "ref": "default",
+      "tunnelId": "5d0f4f0e-31a6-4a39-8d51-0c0f7f1f6c23",
+      "kind": "tcp",
+      "publicHost": "tcp.example.dev",
+      "publicPort": 20417,
+      "url": "tcp://tcp.example.dev:20417"
+    }
+  ],
+  "resumeToken": "jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+}
+```
+
+```text
+00 00 00 00 02 00 00 00 00 f4
+7b 22 74 75 6e 6e 65 6c 73 22 3a 5b 7b 22 72 65
+66 22 3a 22 64 65 66 61 75 6c 74 22 2c 22 74 75
+6e 6e 65 6c 49 64 22 3a 22 35 64 30 66 34 66 30
+65 2d 33 31 61 36 2d 34 61 33 39 2d 38 64 35 31
+2d 30 63 30 66 37 66 31 66 36 63 32 33 22 2c 22
+6b 69 6e 64 22 3a 22 74 63 70 22 2c 22 70 75 62
+6c 69 63 48 6f 73 74 22 3a 22 74 63 70 2e 65 78
+61 6d 70 6c 65 2e 64 65 76 22 2c 22 70 75 62 6c
+69 63 50 6f 72 74 22 3a 32 30 34 31 37 2c 22 75
+72 6c 22 3a 22 74 63 70 3a 2f 2f 74 63 70 2e 65
+78 61 6d 70 6c 65 2e 64 65 76 3a 32 30 34 31 37
+22 7d 5d 2c 22 72 65 73 75 6d 65 54 6f 6b 65 6e
+22 3a 22 6a 62 72 5f 41 41 45 43 41 77 51 46 42
+67 63 49 43 51 6f 4c 44 41 30 4f 44 78 41 52 45
+68 4d 55 46 52 59 58 47 42 6b 61 47 78 77 64 48
+68 38 22 7d
+```
+<!-- /example -->
+
+A real server never issues the token the client presented; the example repeats it only to keep the
+document short.
 
 For an HTTP tunnel the server chooses the scheme, and the URL leaves out the scheme's default port.
 The reply to the request above, with a name the server chose:
@@ -980,6 +1105,25 @@ capability introduces only in a session with it.
 ```
 <!-- /example -->
 
+In a session with `resume`, the server ends a session whose resume token a newer session of the same
+client presented (§8.4):
+
+<!-- example:error-session-replaced -->
+```json
+{ "code": "SESSION_REPLACED", "message": "A newer session of this client replaced this one." }
+```
+
+```text
+00 00 00 00 0b 00 00 00 00 59
+7b 22 63 6f 64 65 22 3a 22 53 45 53 53 49 4f 4e
+5f 52 45 50 4c 41 43 45 44 22 2c 22 6d 65 73 73
+61 67 65 22 3a 22 41 20 6e 65 77 65 72 20 73 65
+73 73 69 6f 6e 20 6f 66 20 74 68 69 73 20 63 6c
+69 65 6e 74 20 72 65 70 6c 61 63 65 64 20 74 68
+69 73 20 6f 6e 65 2e 22 7d
+```
+<!-- /example -->
+
 ### 7.9 `HEADERS`, client to server
 
 With `http`. A response head on a stream of an HTTP tunnel (§9.7).
@@ -1039,6 +1183,17 @@ the limit on any JSON string (§7.1), which a longer value already breaks, as `P
 whole payload, head and all, stays within 16,384 bytes: a side whose head doesn't fit refuses the
 message on its own HTTP connection rather than sending it (§9.7).
 
+### 7.11 `GOAWAY`, server to client
+
+With `resume`. The server is draining (§6.10).
+
+| Field | Type | Rule |
+|---|---|---|
+| `reconnectAfterMs` | integer (64-bit) | 0 to 60,000. Once the connection has closed, the client waits at least this long before it connects again. |
+| `drainMs` | integer (64-bit) | 0 to 300,000. The longest the server keeps the session open for the streams already open. |
+
+The example is in §6.10.
+
 ## 8. Sessions
 
 A session is one WebSocket connection. It begins when the upgrade completes and ends when the
@@ -1058,6 +1213,8 @@ stateDiagram-v2
     AwaitingHello --> Closing: handshake deadline, session error
     AwaitingRegister --> Closing: handshake deadline, session error
     Established --> Closing: session error, idle timeout, shutdown, client closed
+    Established --> Draining: GOAWAY sent (with resume)
+    Draining --> Closing: open streams done or drainMs passed, session error, idle timeout, client closed
     Closing --> [*]: connection closed, tunnels removed
 ```
 
@@ -1067,24 +1224,27 @@ stateDiagram-v2
 | AwaitingRegister | `HELLO`s exchanged; the client's `REGISTER` hasn't arrived. |
 | Registering | The server is checking the `REGISTER` and creating the tunnels. |
 | Established | The `REGISTER` reply is sent. Streams may be opened. |
+| Draining | With `resume`: `GOAWAY` is sent. The streams already open carry on; no new one is opened. |
 | Closing | The session is ending; nothing new starts. |
 
 The client's view is the same, with "sent" and "received" swapped: it is established when it
-receives the `REGISTER` reply.
+receives the `REGISTER` reply, and draining when it receives `GOAWAY`. A session without `resume` is
+never Draining.
 
 ### 8.2 Frame order
 
 | From | Before the session is established | Once it is established |
 |---|---|---|
 | Client | `HELLO` first; then `REGISTER`, exactly once; `PING`, `PONG` | `DATA`, `CLOSE` and `WINDOW_UPDATE` on streams the server opened, and with `http` `HEADERS` on streams of HTTP tunnels; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
-| Server | `HELLO` first, after the client's `HELLO` arrives; then the `REGISTER` reply, exactly once, after the client's `REGISTER` arrives; `PING`, `PONG` | `OPEN`, `DATA`, `CLOSE` and `WINDOW_UPDATE` on data streams; `WINDOW_UPDATE` on stream 0; `PING`, `PONG` |
+| Server | `HELLO` first, after the client's `HELLO` arrives; then the `REGISTER` reply, exactly once, after the client's `REGISTER` arrives; `PING`, `PONG` | `OPEN`, `DATA`, `CLOSE` and `WINDOW_UPDATE` on data streams; `WINDOW_UPDATE` on stream 0; `PING`, `PONG`; with `resume`, `GOAWAY` at most once, and no `OPEN` after it |
 
 Either side may send `ERROR` at any point, including first, and it ends the session (§8.6).
 
 Any frame outside this table is `PROTOCOL_ERROR`, in either direction. In particular: a frame
 other than `HELLO` or `ERROR` before the peer's `HELLO`; a second `HELLO`; a second `REGISTER`;
 `OPEN`, `DATA`, `CLOSE`, `WINDOW_UPDATE` or `HEADERS` before the session is established; `HEADERS`
-in a session without `http`; and in this draft any `GOAWAY`.
+in a session without `http`; any `GOAWAY` in a session without `resume`; and with `resume`, a
+`GOAWAY` before the session is established, a second `GOAWAY`, or an `OPEN` after one.
 
 Stream 0 is processed in order. A receiver handles each control frame completely, including any
 error it raises, before the next one.
@@ -1098,6 +1258,9 @@ The client SHOULD send `REGISTER` immediately after its `HELLO`, without waiting
 A `REGISTER` that asks for an `"http"` tunnel uses what `http` introduces, so the client sends it
 only once the server's `HELLO` has arrived and lists `http` (§4.2). Setting up an HTTP tunnel takes
 one more round trip, and a client learns before it registers that a server can't give it one.
+
+The same holds for `resume`: a client with a resume token to present waits for the server's `HELLO`,
+and includes the token only if that `HELLO` lists `resume`. Otherwise it registers without it.
 
 ```mermaid
 sequenceDiagram
@@ -1130,8 +1293,9 @@ that fails:
 |---|---|---|
 | 1 | No more tunnels than `limits.maxTunnels`. | `TUNNEL_LIMIT_EXCEEDED` |
 | 2 | The authtoken is valid. | `AUTHTOKEN_INVALID` |
+| 2a | With `resume`: if `resume` names a session that is still open on this server and belongs to the authtoken's owner, that session ends with `SESSION_REPLACED`, and the server waits until its tunnels are removed. | never refuses |
 | 3 | The token's owner may open another session. | `SESSION_LIMIT_EXCEEDED` |
-| 4 | Each tunnel can be created. A requested `remotePort` that is outside the server's range or in use fails; so does running out of ports. | `PORT_UNAVAILABLE`, `PORT_POOL_EXHAUSTED` |
+| 4 | Each tunnel can be created. A requested `remotePort` that is outside the server's range or in use fails, and so does one the server holds for someone else for a while after their session ended; so does running out of ports. | `PORT_UNAVAILABLE`, `PORT_POOL_EXHAUSTED` |
 | 5 | With `http`, each requested `subdomain` may be claimed. A name the server reserves for itself, or that contains a term it blocks, fails first; then a name another tunnel holds, or the server holds for someone else for a while after their session ended. | `SUBDOMAIN_FORBIDDEN`, `SUBDOMAIN_UNAVAILABLE` |
 
 A payload that breaks a field rule fails earlier, as `VALIDATION_FAILED` (§7.1), and an unexpected
@@ -1139,6 +1303,17 @@ failure in the server is `INTERNAL_ERROR`.
 
 Which names a server reserves, blocks or holds, and for how long, is the server's policy, not
 the protocol's. An `"http"` entry without a `subdomain` gets a name the server chooses.
+
+**Step 2a** lets a client whose connection went silent get its tunnels back without waiting for the
+server to time the old session out (§11). It comes before step 3 because the old session still
+counts against its owner's sessions. A token the server doesn't know, one whose session has ended,
+and one whose session belongs to another owner are treated alike: the step does nothing, and
+registration goes on. The reply doesn't say whether a session was replaced; a client that wants to
+know compares the tunnels it gets with those it had. The step waits for the old session's tunnels
+to be removed, so that the new one can ask for the same ports and names, but only for a bounded
+time the server chooses; after that, registration goes on, and a port still in use fails step 4 as
+usual. A replaced session's tunnels are held for their owner like those of any session that ended,
+where the server holds them at all.
 
 Registration is **all or nothing**. If every check passes, the server creates every requested
 tunnel and sends the `REGISTER` reply: one entry per request entry, in the same order, with the same
@@ -1166,7 +1341,7 @@ peer's, and a receiver treats `DATA` past its own as `FLOW_CONTROL_ERROR` (§10.
 
 ### 8.6 Closing
 
-A session ends in one of three ways:
+A session ends in one of four ways:
 
 - **With an error.** The side that detects a session error sends `ERROR` with its code, then a
   WebSocket close frame whose status is the code's close code (§12), and then closes the TCP
@@ -1177,6 +1352,9 @@ A session ends in one of three ways:
   `1000` and no `ERROR`.
 - **By losing the connection.** The TCP connection fails, or one side declares the other dead
   (§11).
+- **After a drain.** With `resume`, a server that sent `GOAWAY` ends the session with an error,
+  `SERVER_SHUTTING_DOWN`, once its open streams have closed or `drainMs` has passed, whichever is
+  first. Streams still open then are reset, as at the end of any session.
 
 A side that closes without being able to send `ERROR`, because the connection is already gone,
 just closes. When a session ends, for any reason, every stream on it is reset on both sides, and the
@@ -1495,7 +1673,8 @@ one of three places, which make up its **scope**:
 
 The registry for `jburrow.v1-draft.2`. The upgrade status is the HTTP status of a refused upgrade;
 the close code is the WebSocket close status that follows an `ERROR` (§8.6). A code marked "with
-`http`" is introduced by that capability, and is unknown in a session without it (§4.2).
+`http`" or "with `resume`" is introduced by that capability, and is unknown in a session without it
+(§4.2).
 
 | Code | Scope | Meaning | Upgrade status | Close code |
 |---|---|---|---|---|
@@ -1518,6 +1697,7 @@ the close code is the WebSocket close status that follows an `ERROR` (§8.6). A 
 | `SUBDOMAIN_FORBIDDEN` | session | With `http`. A requested `subdomain` is reserved or blocked on this server (§8.4). | | 1008 |
 | `HEARTBEAT_TIMEOUT` | session | Nothing was received for `limits.idleTimeoutMs`. | | 1008 |
 | `PING_RATE_EXCEEDED` | session | The client sent `PING`s faster than the server allows. | | 1008 |
+| `SESSION_REPLACED` | session | With `resume`. A newer session of the same client presented this session's resume token (§8.4). | | 1000 |
 | `INTERNAL_ERROR` | session, stream | A bug or an unexpected failure in the sender. | | 1011 |
 | `PEER_RESET` | stream | The visitor's or the local target's connection was reset. | | |
 | `LOCAL_SERVICE_UNREACHABLE` | stream | The client couldn't connect to the tunnel's local target. | | |
@@ -1553,7 +1733,7 @@ expensive.
 | 5 | The stream id is 0 for a type sent on stream 0, and not 0 for a type sent on a data stream. `WINDOW_UPDATE` may be on either. | `PROTOCOL_ERROR` |
 | 6 | The length is allowed for the type (§6), for `CLOSE` given its `RST` bit. | `FRAME_SIZE_ERROR` |
 | 7 | Every flag bit the type doesn't define is 0. | `PROTOCOL_ERROR` |
-| 8 | The payload is valid for the type: a control payload, `HEADERS` included, follows §7 (`PROTOCOL_ERROR` for an encoding rule, `VALIDATION_FAILED` for a field rule); a `CLOSE` reset holds a known stream code (§6.7); a `WINDOW_UPDATE` increment is 1 to `2^31 - 1` (§6.6). A value or code a capability introduces is known only in a session with it (§4.2). `DATA`, `PING` and `PONG` payloads are opaque, and `GOAWAY` payloads are not parsed in this draft. | `PROTOCOL_ERROR`, or `VALIDATION_FAILED` |
+| 8 | The payload is valid for the type: a control payload, `HEADERS` included, follows §7 (`PROTOCOL_ERROR` for an encoding rule, `VALIDATION_FAILED` for a field rule); a `CLOSE` reset holds a known stream code (§6.7); a `WINDOW_UPDATE` increment is 1 to `2^31 - 1` (§6.6). A value or code a capability introduces is known only in a session with it (§4.2). `DATA`, `PING` and `PONG` payloads are opaque, and a `GOAWAY` payload is parsed only in a session with `resume` (§6.10). | `PROTOCOL_ERROR`, or `VALIDATION_FAILED` |
 | 9 | The frame is allowed in the session's state (§8.2) and in its stream's state (§9.2, §9.3), and respects the limits the receiver announced (§8.5). A `DATA` frame fits the receiver's windows, and a `WINDOW_UPDATE` doesn't take a credit past `2^31 - 1` (§10.5). | The error those sections give |
 | 10 | On a stream of an HTTP tunnel, the frame keeps the exchange's rules: heads in order, and bodies as their heads frame them (§9.7). `HEADERS` is only on an HTTP tunnel's stream. | The error §9.7 gives |
 
@@ -1568,7 +1748,7 @@ the session and the stream.
 | Frame header | 10 bytes | protocol |
 | WebSocket message | at most 65,546 bytes | protocol |
 | `DATA` payload | 1 to 65,536 bytes | protocol; `limits.maxFramePayload` may lower it for the client |
-| Control payload (`HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `ERROR`), and `GOAWAY` in this draft | at most 16,384 bytes | protocol |
+| Control payload (`HELLO`, `REGISTER`, `OPEN`, `HEADERS`, `GOAWAY`, `ERROR`) | at most 16,384 bytes | protocol |
 | `PING` and `PONG` payload | exactly 8 bytes | protocol |
 | `WINDOW_UPDATE` payload | exactly 4 bytes | protocol |
 | Stream window | 65,536 to `2^31 - 1` bytes | each side, in its `HELLO`; 256 KiB in the reference server and client |
@@ -1588,6 +1768,9 @@ the session and the stream.
 | Header field value | 0 to 4,096 characters | protocol, with `http`; the JSON string limit |
 | `content-length` | `2^53 - 1` | protocol, with `http` |
 | Subdomain | 3 to 63 characters | protocol, with `http` |
+| Resume token | 47 characters: `jbr_` and 32 random bytes in base64url | protocol, with `resume` |
+| `reconnectAfterMs` | 0 to 60,000 | protocol, with `resume`; spread over 0 to 2 s by the reference server |
+| `drainMs` | 0 to 300,000 | protocol, with `resume`; 5 s in the reference server |
 | Stream ids per session | `2^31 - 1` | protocol |
 | Tunnels per session | `limits.maxTunnels` | server; 1 in the reference server |
 | Concurrent streams per session | `limits.maxConcurrentStreams` | server; 1 in the reference server |
@@ -1606,18 +1789,20 @@ The conformance vectors are in
 
 Each vector names the side that receives the message, since what a message means depends on it,
 and the capabilities its session has negotiated, since a capability changes what a receiver knows.
-Many HTTP vectors come in pairs, one with `http` and one without.
+Many HTTP vectors come in pairs, one with `http` and one without, and so do the `resume` vectors: with
+`resume` a `GOAWAY` payload and the resume tokens are parsed and checked, and without it the tokens
+are dropped as unknown keys and a `GOAWAY` is decoded only as far as its header.
 The format of the files, including the hex notation and the neutral description of a decoded frame,
 is in the [`README.md`](../jburrow-protocol/src/test/resources/io/jburrow/protocol/vectors/README.md)
 next to them.
 
 **An implementation conforms to the framing layer of `jburrow.v1-draft.2` when it passes every
 vector for each role it implements, and for each capability it implements.** A client runs the
-vectors whose role is `client`, and a server those whose role is `server`. An implementation
-without `http` runs the vectors without capabilities.
+vectors whose role is `client`, and a server those whose role is `server`. An implementation runs
+the vectors without capabilities, and those whose capabilities it all implements.
 
 The vectors cover steps 1 to 8 of §13. They don't cover the session and stream rules of steps 9 and
-10, the transport, liveness, flow control or registration, which need a running peer. JBurrow tests
+10, among them where `GOAWAY` may come (§6.10), the transport, liveness, flow control or registration, which need a running peer. JBurrow tests
 those against a scripted peer that can send any sequence of frames, valid or not, and that fails a
 test the moment the implementation sends `DATA` past one of the peer's windows, or breaks a rule of
 an HTTP stream.
@@ -1684,6 +1869,13 @@ anything other than the tunnel's own host before the response reaches the visito
 **The visitor's address goes to the client.** `OPEN` tells the client each visitor's IP address and
 port (§7.7), as other tunnelling services do for HTTP through `X-Forwarded-For`. A tunnel owner
 learns who connects to their tunnel.
+
+**A resume token is not a credential.** With `resume`, the token can end a session, which is all
+it can do, and only next to an authtoken of the same owner (§8.4), so a stolen token without the
+authtoken does nothing. It is 256 bits from a secure random source, valid only while its session is
+open, and used up by the registration that presents it. A server SHOULD look it up by a hash, so that
+the time a lookup takes reveals nothing about the tokens it holds, and neither side ever logs it,
+not even in part, or writes it to disk.
 
 **Session ids are not secrets.** A `sessionId` identifies a session in logs and support requests.
 Nothing in the protocol accepts one as proof of anything.

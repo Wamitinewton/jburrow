@@ -15,7 +15,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Works out the address of the client behind a connection and stores it on the channel.
+ * Works out the address of the client behind a connection and stores it on the channel for tunneling.
  *
  * <p>{@code X-Forwarded-For} is believed only when the TCP peer is a trusted proxy, and then only as far as the
  * proxies that wrote it are trusted: walking from the right, the first entry that isn't a trusted proxy is the address

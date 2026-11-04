@@ -68,6 +68,7 @@ public final class Session {
         ALLOWED_INBOUND.put(SessionState.REGISTERING, EnumSet.of(PING, PONG, ERROR));
         ALLOWED_INBOUND.put(
                 SessionState.ESTABLISHED, EnumSet.of(DATA, HEADERS, WINDOW_UPDATE, CLOSE, PING, PONG, ERROR));
+        ALLOWED_INBOUND.put(SessionState.DRAINING, ALLOWED_INBOUND.get(SessionState.ESTABLISHED));
         ALLOWED_INBOUND.put(SessionState.CLOSING, EnumSet.allOf(FrameType.class));
     }
 
@@ -83,7 +84,10 @@ public final class Session {
     private ClientInfo client;
     private Principal principal;
     private Map<TunnelId, Tunnel> tunnels = Map.of();
+    private ResumeTokenHash resumeTokenHash;
     private ErrorCode closeReason;
+    /** Run once when a draining session has no open stream, or starts closing; null otherwise. */
+    private Runnable whenDrained;
     /** Created by the client's {@code HELLO}, which carries its windows. */
     private SessionFlow flow;
 
@@ -159,6 +163,11 @@ public final class Session {
         return capabilities.contains(Capability.HTTP);
     }
 
+    /** Whether the session has {@code resume}: its client gets a resume token, and {@code GOAWAY} when it drains. */
+    public boolean resumeEnabled() {
+        return capabilities.contains(Capability.RESUME);
+    }
+
     /** The client's {@code REGISTER}: {@code AWAITING_REGISTER -> REGISTERING}. A second one is out of order. */
     public void onRegisterReceived() {
         require(SessionState.AWAITING_REGISTER, REGISTER);
@@ -172,7 +181,16 @@ public final class Session {
      *     registration result comes back, since the session may have closed meanwhile
      */
     public void onEstablished(Principal principal, List<Tunnel> tunnels) {
+        onEstablished(principal, tunnels, Optional.empty());
+    }
+
+    /**
+     * {@link #onEstablished(Principal, List)} for a session whose reply carries a resume token, of which the session
+     * keeps only {@code resumeTokenHash}.
+     */
+    public void onEstablished(Principal principal, List<Tunnel> tunnels, Optional<ResumeTokenHash> resumeTokenHash) {
         Objects.requireNonNull(principal, "principal");
+        Objects.requireNonNull(resumeTokenHash, "resumeTokenHash");
         Objects.requireNonNull(tunnels, "tunnels");
         if (state != SessionState.REGISTERING) {
             throw new IllegalStateException("Session " + id + " can't be established while " + state);
@@ -188,11 +206,44 @@ public final class Session {
         }
         this.principal = principal;
         this.tunnels = byId;
+        this.resumeTokenHash = resumeTokenHash.orElse(null);
         state = SessionState.ESTABLISHED;
+    }
+
+    /** The hash of the resume token sent in the session's {@code REGISTER} reply; empty without {@code resume}. */
+    public Optional<ResumeTokenHash> resumeTokenHash() {
+        return Optional.ofNullable(resumeTokenHash);
     }
 
     public boolean isRegistering() {
         return state == SessionState.REGISTERING;
+    }
+
+    /**
+     * Whether the {@code REGISTER} reply was sent and the session hasn't started closing: {@link SessionState#ESTABLISHED}
+     * or {@link SessionState#DRAINING}.
+     */
+    public boolean isServing() {
+        return state == SessionState.ESTABLISHED || state == SessionState.DRAINING;
+    }
+
+    /**
+     * The server is stopping: {@code ESTABLISHED -> DRAINING}. No stream is admitted from now on; open ones carry on.
+     * {@code whenDrained} runs once, on this session's thread, as soon as no stream is open, which may be before this
+     * returns, or when the session starts closing, whichever comes first.
+     *
+     * @throws IllegalStateException if the session isn't established
+     */
+    public void onDraining(Runnable whenDrained) {
+        Objects.requireNonNull(whenDrained, "whenDrained");
+        if (state != SessionState.ESTABLISHED) {
+            throw new IllegalStateException("Session " + id + " can't drain while " + state);
+        }
+        state = SessionState.DRAINING;
+        this.whenDrained = whenDrained;
+        if (streams.size() == 0) {
+            drained();
+        }
     }
 
     /**
@@ -208,6 +259,7 @@ public final class Session {
             closeReason = reason;
             state = SessionState.CLOSING;
         }
+        drained();
     }
 
     /**
@@ -216,6 +268,7 @@ public final class Session {
      */
     public void onClosing() {
         state = SessionState.CLOSING;
+        drained();
     }
 
     /** The session error the session is closing for; empty if it is open or closed without one. */
@@ -231,6 +284,9 @@ public final class Session {
      */
     public Optional<StreamAdmission.Refusal> checkAdmission(TunnelId tunnel) {
         Objects.requireNonNull(tunnel, "tunnel");
+        if (state == SessionState.DRAINING) {
+            return Optional.of(StreamAdmission.Refusal.DRAINING);
+        }
         if (state != SessionState.ESTABLISHED) {
             return Optional.of(StreamAdmission.Refusal.NOT_ESTABLISHED);
         }
@@ -622,6 +678,17 @@ public final class Session {
             flow.onRemoved(entry.flow());
             departed.put(streamId, entry.flow());
         }
+        if (state == SessionState.DRAINING && streams.size() == 0) {
+            drained();
+        }
+    }
+
+    private void drained() {
+        Runnable run = whenDrained;
+        whenDrained = null;
+        if (run != null) {
+            run.run();
+        }
     }
 
     private Entry requireOpen(int streamId) {
@@ -658,6 +725,7 @@ public final class Session {
             case AWAITING_REGISTER -> "awaiting REGISTER";
             case REGISTERING -> "registering";
             case ESTABLISHED -> "established";
+            case DRAINING -> "draining";
             case CLOSING -> "closing";
         };
     }

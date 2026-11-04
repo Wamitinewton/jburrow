@@ -4,6 +4,7 @@ import io.jburrow.client.tunnel.domain.ExchangeSummary;
 import io.jburrow.client.tunnel.domain.TunnelClosed;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.wire.ErrorCode;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 
@@ -15,16 +16,33 @@ import java.util.Optional;
  * block: the loop carries every byte of the session. An exception thrown by a listener is logged and otherwise
  * ignored.
  *
- * <p>A session that never establishes reports nothing here; {@code JBurrowClient.start()} throws instead. An
- * established session reports {@link #onEstablished} first and {@link #onClosed} last, exactly once each, and every
- * {@link #onStreamOpened} is followed by exactly one {@link #onStreamClosed} for the same stream before
- * {@link #onClosed}. A stream of an HTTP tunnel reports {@link #onExchangeCompleted} once, just before its
- * {@link #onStreamClosed}.
+ * <p>A client whose first session never establishes reports nothing here; {@code JBurrowClient.start()} throws instead.
+ * Otherwise the first session reports {@link #onEstablished}, and {@link #onClosed} comes last, exactly once each. In
+ * between, each session that ends while the client will try again reports {@link #onDisconnected}, and so does each
+ * attempt that fails, with the delay before the next one; {@link #onReconnected} reports the session that follows. Every
+ * {@link #onStreamOpened} is followed by exactly one {@link #onStreamClosed} for the same stream, before its session's
+ * {@link #onDisconnected} or the client's {@link #onClosed}. A stream of an HTTP tunnel reports
+ * {@link #onExchangeCompleted} once, just before its {@link #onStreamClosed}.
  */
 public interface TunnelEvents {
 
-    /** The server's {@code REGISTER} reply arrived: the tunnels are public. */
+    /** The first session's {@code REGISTER} reply arrived: the tunnels are public. */
     default void onEstablished(String sessionId, List<RegisteredTunnel> tunnels) {}
+
+    /**
+     * A session ended, or an attempt to start the next one failed, and the client tries again after {@code retryIn}.
+     *
+     * @param reason why: for a session ended after {@code GOAWAY}, {@code SERVER_ERROR} with {@code SERVER_SHUTTING_DOWN}
+     */
+    default void onDisconnected(TunnelClosed reason, Duration retryIn) {}
+
+    /**
+     * A later session's {@code REGISTER} reply arrived: the tunnels are public again.
+     *
+     * @param sameUrls whether every tunnel has the URL it had in the session before; false when a name or port the
+     *     server had chosen was taken in between, and it chose another
+     */
+    default void onReconnected(String sessionId, List<RegisteredTunnel> tunnels, boolean sameUrls) {}
 
     /**
      * The server opened a stream for a visitor, and the client is connecting it to the tunnel's local target.
@@ -50,6 +68,6 @@ public interface TunnelEvents {
      */
     default void onExchangeCompleted(ExchangeSummary exchange) {}
 
-    /** The session ended. Nothing follows. */
+    /** The client stopped: the session ended, and no other will be tried. Nothing follows. */
     default void onClosed(TunnelClosed closed) {}
 }

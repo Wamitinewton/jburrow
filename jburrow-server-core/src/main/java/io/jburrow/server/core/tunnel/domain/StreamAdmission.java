@@ -12,6 +12,8 @@ public final class StreamAdmission {
     /** Why a visitor connection was refused. {@link #label()} is the metric label. */
     public enum Refusal {
         NOT_ESTABLISHED("not_established"),
+        /** The server is stopping: the session finishes its open streams and takes no new one. */
+        DRAINING("draining"),
         STREAM_LIMIT("stream_limit"),
         SERVER_STREAM_LIMIT("server_stream_limit");
 

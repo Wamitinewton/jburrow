@@ -18,12 +18,15 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.config.YamlPropertiesFactoryBean;
 import org.springframework.boot.context.properties.bind.BindException;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.bind.validation.BindValidationException;
 import org.springframework.boot.context.properties.bind.validation.ValidationBindHandler;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
+import org.springframework.boot.convert.DurationStyle;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.util.unit.DataSize;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 
@@ -89,7 +92,6 @@ class JBurrowPropertiesTest {
         assertThat(http.publicScheme()).isEqualTo("https");
         assertThat(http.publicPort()).isEqualTo(443);
         assertThat(http.reservedNames()).isEmpty();
-        assertThat(http.nameHold()).isEqualTo(Duration.ofSeconds(60));
         assertThat(http.maxRequestBody()).isEqualTo(DataSize.ofMegabytes(100));
         assertThat(http.responseTimeout()).isEqualTo(Duration.ofSeconds(60));
         assertThat(http.keepAliveTimeout()).isEqualTo(Duration.ofSeconds(75));
@@ -100,13 +102,71 @@ class JBurrowPropertiesTest {
     }
 
     @Test
+    void theResumeWindowDefaultsToTwoMinutesAndMayBeZero() {
+        assertThat(bind(DEFAULTS).session().resumeWindow()).isEqualTo(Duration.ofSeconds(120));
+        assertThat(bind(with(Map.of("jburrow.session.resume-window", "0s")))
+                        .session()
+                        .resumeWindow())
+                .isZero();
+    }
+
+    @Test
+    void theDrainLastsAtMostFiveSecondsAndSpreadsReconnectsOverTwo() {
+        JBurrowProperties.Drain drain = bind(DEFAULTS).drain();
+        assertThat(drain.timeout()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(drain.reconnectSpread()).isEqualTo(Duration.ofSeconds(2));
+
+        JBurrowProperties.Drain widest = bind(with(Map.of(
+                        "jburrow.drain.timeout", "10s",
+                        "jburrow.drain.reconnect-spread", "60s")))
+                .drain();
+        assertThat(widest.timeout()).isEqualTo(Duration.ofSeconds(10));
+        assertThat(widest.reconnectSpread()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(bind(with(Map.of("jburrow.drain.reconnect-spread", "0s")))
+                        .drain()
+                        .reconnectSpread())
+                .isZero();
+    }
+
+    /**
+     * The longest drain the key allows still leaves the whole stop inside the shutdown phase, so Spring never abandons
+     * the stop halfway through and skips the lease flush.
+     */
+    @Test
+    void theLongestDrainFitsTheShutdownPhase() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yaml"));
+        Duration phase = DurationStyle.detectAndParse(
+                yaml.getObject().getProperty("spring.lifecycle.timeout-per-shutdown-phase"));
+
+        assertThat(EdgeServerLifecycle.worstCaseStop(JBurrowProperties.Drain.MAX_TIMEOUT))
+                .isLessThan(phase);
+        assertThat(EdgeServerLifecycle.worstCaseStop(Duration.ofSeconds(5))).isEqualTo(Duration.ofMillis(14_500));
+    }
+
+    @Test
+    void leasesRefreshEveryThirtySecondsWithinFiveSecondsToFiveMinutes() {
+        assertThat(bind(DEFAULTS).lease().refresh()).isEqualTo(Duration.ofSeconds(30));
+        assertThat(bind(with(Map.of("jburrow.lease.refresh", "5s"))).lease().refresh())
+                .isEqualTo(Duration.ofSeconds(5));
+        assertThat(bind(with(Map.of("jburrow.lease.refresh", "5m"))).lease().refresh())
+                .isEqualTo(Duration.ofMinutes(5));
+    }
+
+    @Test
+    void theRemovedNameHoldIsNotBound() {
+        assertThat(JBurrowProperties.Http.class.getRecordComponents())
+                .extracting(RecordComponent::getName)
+                .doesNotContain("nameHold");
+    }
+
+    @Test
     void httpSettingsBindAsALocalServerUsesThem() {
         JBurrowProperties.Http http = bind(with(Map.of(
                         "jburrow.http.domain", "example.dev",
                         "jburrow.http.public-scheme", "http",
                         "jburrow.http.public-port", "7080",
                         "jburrow.http.reserved-names", "status-page,grafana",
-                        "jburrow.http.name-hold", "0s",
                         "jburrow.http.socket-buffer", "0",
                         "jburrow.http.max-parked", "0",
                         "jburrow.http.max-parked-per-session", "0")))
@@ -116,7 +176,6 @@ class JBurrowPropertiesTest {
         assertThat(http.publicScheme()).isEqualTo("http");
         assertThat(http.publicPort()).isEqualTo(7080);
         assertThat(http.reservedNames()).containsExactly("status-page", "grafana");
-        assertThat(http.nameHold()).isZero();
         assertThat(http.socketBuffer()).isEqualTo(DataSize.ofBytes(0));
         assertThat(http.maxParked()).isEqualTo(DataSize.ofBytes(0));
     }
@@ -227,7 +286,13 @@ class JBurrowPropertiesTest {
                 arguments(Map.of("jburrow.http.reserved-names", "status,Grafana"), "jburrow.http.reserved-names"),
                 arguments(Map.of("jburrow.http.reserved-names", "ab"), "jburrow.http.reserved-names"),
                 arguments(Map.of("jburrow.http.reserved-names", "two--hyphens"), "jburrow.http.reserved-names"),
-                arguments(Map.of("jburrow.http.name-hold", "-1s"), "jburrow.http.name-hold"),
+                arguments(Map.of("jburrow.session.resume-window", "-1s"), "jburrow.session.resume-window"),
+                arguments(Map.of("jburrow.drain.timeout", "0s"), "jburrow.drain.timeout"),
+                arguments(Map.of("jburrow.drain.timeout", "11s"), "jburrow.drain.timeout"),
+                arguments(Map.of("jburrow.drain.reconnect-spread", "-1s"), "jburrow.drain.reconnect-spread"),
+                arguments(Map.of("jburrow.drain.reconnect-spread", "61s"), "jburrow.drain.reconnect-spread"),
+                arguments(Map.of("jburrow.lease.refresh", "4s"), "jburrow.lease.refresh"),
+                arguments(Map.of("jburrow.lease.refresh", "301s"), "jburrow.lease.refresh"),
                 arguments(Map.of("jburrow.http.max-request-body", "0B"), "jburrow.http.max-request-body"),
                 arguments(Map.of("jburrow.http.response-timeout", "0s"), "jburrow.http.response-timeout"),
                 arguments(Map.of("jburrow.http.keep-alive-timeout", "-1s"), "jburrow.http.keep-alive-timeout"),

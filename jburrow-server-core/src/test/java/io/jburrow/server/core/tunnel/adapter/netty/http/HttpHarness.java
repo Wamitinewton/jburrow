@@ -14,13 +14,13 @@ import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.portpool.application.PortReservationService;
-import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.routing.application.SubdomainRoutes;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionContext;
 import io.jburrow.server.core.tunnel.adapter.netty.control.SessionRegistry;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
+import io.jburrow.server.core.tunnel.adapter.netty.edge.DrainSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeConnections;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
@@ -43,7 +43,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
-import java.time.InstantSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -69,7 +68,13 @@ final class HttpHarness implements AutoCloseable {
      * What a test may change about the server it runs against. Edge connections' socket buffers are the kernel's by
      * default, as in the {@code local} profile: on loopback a 16 KiB buffer is smaller than one segment.
      */
-    record Settings(EdgeTransport transport, HttpSettings http, int maxConcurrentStreams, int maxStreams) {
+    record Settings(
+            EdgeTransport transport,
+            HttpSettings http,
+            int maxConcurrentStreams,
+            int maxStreams,
+            Set<Capability> capabilities,
+            DrainSettings drain) {
 
         static Settings defaults(EdgeTransport transport) {
             return new Settings(
@@ -84,15 +89,28 @@ final class HttpHarness implements AutoCloseable {
                             16L * 1024 * 1024,
                             2L * 1024 * 1024),
                     100,
-                    200);
+                    200,
+                    Set.of(Capability.HTTP),
+                    DrainSettings.DEFAULTS);
         }
 
         Settings http(HttpSettings http) {
-            return new Settings(transport, http, maxConcurrentStreams, maxStreams);
+            return new Settings(transport, http, maxConcurrentStreams, maxStreams, capabilities, drain);
         }
 
         Settings streams(int maxConcurrentStreams, int maxStreams) {
-            return new Settings(transport, http, maxConcurrentStreams, maxStreams);
+            return new Settings(transport, http, maxConcurrentStreams, maxStreams, capabilities, drain);
+        }
+
+        /** The server enables {@code resume} as well as {@code http}, and drains with {@code drain}. */
+        Settings resume(DrainSettings drain) {
+            return new Settings(
+                    transport,
+                    http,
+                    maxConcurrentStreams,
+                    maxStreams,
+                    Set.of(Capability.HTTP, Capability.RESUME),
+                    drain);
         }
 
         Settings maxRequestBody(long bytes) {
@@ -136,6 +154,7 @@ final class HttpHarness implements AutoCloseable {
     final RecordingTunnelMetrics metrics = new RecordingTunnelMetrics();
     final StreamQuota streamQuota;
     final SessionRegistry registry = new SessionRegistry();
+    final ControlSessionInitializer sessions;
     final EdgeServer edge;
 
     private final ExecutorService blocking = Executors.newVirtualThreadPerTaskExecutor();
@@ -163,14 +182,11 @@ final class HttpHarness implements AutoCloseable {
                 settings.maxStreams(),
                 "test",
                 settings.http(),
-                Set.of(Capability.HTTP));
+                settings.capabilities(),
+                settings.drain());
         SubdomainRoutes<Principal, TunnelId> routes = RegistrationFixtures.routes();
-        PortReservationService ports = new PortReservationService(new PortPool(
-                PortRange.parse("42100-42109"),
-                Duration.ofSeconds(60),
-                Duration.ofMinutes(10),
-                new Random(3),
-                InstantSource.system()));
+        PortReservationService<Principal> ports =
+                RegistrationFixtures.ports(PortRange.parse("42100-42109"), new Random(3));
         SessionAdmission admission = new SessionAdmission(16, 8, 8);
         RegisterTunnels register = new RegisterTunnels(
                 new InMemoryAuthtokenVerifier().with(TOKEN, "tester"),
@@ -188,7 +204,7 @@ final class HttpHarness implements AutoCloseable {
                 metrics,
                 blocking,
                 new TcpSettings("127.0.0.1", "localhost", 32 * 1024));
-        ControlSessionInitializer sessions = new ControlSessionInitializer(
+        sessions = new ControlSessionInitializer(
                 edgeSettings, deps, registry, new NettyTunnelListeners(edgeSettings, deps));
         edge = new EdgeServer(edgeSettings, deps, sessions, SessionExchanges.in(registry));
         edge.start();

@@ -8,7 +8,12 @@ import java.util.Optional;
  */
 public enum Capability {
     /** HTTP tunnels: the {@code "http"} kind, {@code HEADERS}, and the fields and codes that go with them (§4.2). */
-    HTTP("http");
+    HTTP("http"),
+    /**
+     * Staying connected across a gap: {@code GOAWAY}, {@code resume} in {@code REGISTER}, {@code resumeToken} in its
+     * reply, and {@code SESSION_REPLACED} (§4.2).
+     */
+    RESUME("resume");
 
     private final String wireName;
 

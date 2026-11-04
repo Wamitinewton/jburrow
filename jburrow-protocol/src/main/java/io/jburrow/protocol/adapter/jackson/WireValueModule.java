@@ -2,12 +2,15 @@ package io.jburrow.protocol.adapter.jackson;
 
 import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.HeaderFields;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.TunnelKind;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import tools.jackson.core.JsonGenerator;
@@ -36,8 +39,15 @@ import tools.jackson.databind.util.AccessPattern;
  * reported as required (primitives), both {@code VALIDATION_FAILED}; a {@code null} is a wrong JSON type, so
  * {@code PROTOCOL_ERROR}. Optional fields are omitted on the wire, never {@code null}. Records and lists get the same
  * null rule by wrapping Jackson's readers for them.
+ *
+ * <p>A field a capability introduces is read only when the session has the capability, which a read passes as the
+ * attribute {@link #NEGOTIATED}. Without it the field is an unknown key (§4.3): skipped whatever its value, and never
+ * checked against its rule.
  */
 final class WireValueModule extends SimpleModule {
+
+    /** The read attribute holding the session's capabilities, a {@code Set<Capability>}. Absent means every one. */
+    static final Object NEGOTIATED = new Object();
 
     private static final Pattern CANONICAL_UUID =
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
@@ -55,10 +65,12 @@ final class WireValueModule extends SimpleModule {
         addDeserializer(ErrorCode.class, new ErrorCodeReader());
         addDeserializer(BodyFraming.class, new BodyFramingReader());
         addDeserializer(HeaderFields.class, new HeaderFieldsReader());
+        addDeserializer(ResumeToken.class, new ResumeTokenReader());
         addSerializer(TunnelKind.class, new TunnelKindWriter());
         addSerializer(ErrorCode.class, new ErrorCodeWriter());
         addSerializer(BodyFraming.class, new BodyFramingWriter());
         addSerializer(HeaderFields.class, new HeaderFieldsWriter());
+        addSerializer(ResumeToken.class, new ResumeTokenWriter());
         setDeserializerModifier(new NullRejectingModifier());
     }
 
@@ -319,6 +331,58 @@ final class WireValueModule extends SimpleModule {
 
         private static ProtocolException invalid(String message) {
             return ProtocolException.session(ErrorCode.VALIDATION_FAILED, message);
+        }
+    }
+
+    /**
+     * A resume token as its string. With {@code resume} it is strict like every other leaf; without it, the key is
+     * unknown, so any value, {@code null} included, is skipped and the field stays absent.
+     */
+    private static final class ResumeTokenReader extends StrictReader<ResumeToken> {
+        private static final String RULE = "must be jbr_ and 43 characters of [A-Za-z0-9_-]";
+
+        ResumeTokenReader() {
+            super(ResumeToken.class, JsonToken.VALUE_STRING);
+        }
+
+        @Override
+        public ResumeToken deserialize(JsonParser parser, DeserializationContext context) {
+            if (!negotiated(context, Capability.RESUME)) {
+                parser.skipChildren();
+                return null;
+            }
+            return super.deserialize(parser, context);
+        }
+
+        @Override
+        ResumeToken read(JsonParser parser) {
+            try {
+                return new ResumeToken(parser.getString());
+            } catch (ProtocolException rejected) {
+                throw new InvalidValueException(parser, ResumeToken.class, RULE);
+            }
+        }
+
+        @Override
+        public ResumeToken getNullValue(DeserializationContext context) {
+            return negotiated(context, Capability.RESUME) ? super.getNullValue(context) : null;
+        }
+    }
+
+    private static boolean negotiated(DeserializationContext context, Capability capability) {
+        @SuppressWarnings("unchecked")
+        Set<Capability> negotiated = (Set<Capability>) context.getAttribute(NEGOTIATED);
+        return negotiated == null || negotiated.contains(capability);
+    }
+
+    private static final class ResumeTokenWriter extends StdSerializer<ResumeToken> {
+        ResumeTokenWriter() {
+            super(ResumeToken.class);
+        }
+
+        @Override
+        public void serialize(ResumeToken token, JsonGenerator generator, SerializationContext context) {
+            generator.writeString(token.value());
         }
     }
 

@@ -48,6 +48,12 @@
             <artifactId>junit-platform-launcher</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- SessionResumeFuzzTest. -->
+        <dependency>
+            <groupId>com.code-intelligence</groupId>
+            <artifactId>jazzer-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
         <!-- Test certificates: the replacement Netty 4.2 names for the deprecated SelfSignedCertificate. -->
         <dependency>
             <groupId>io.netty</groupId>

@@ -9,6 +9,7 @@ import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.BodyFraming;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.GoAway;
 import io.jburrow.protocol.control.HeaderFields;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.HttpRequestHead;
@@ -18,6 +19,7 @@ import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.RemoteAddress;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.ServerHello;
 import io.jburrow.protocol.control.ServerInfo;
 import io.jburrow.protocol.control.SessionLimits;
@@ -426,6 +428,42 @@ class ScriptedPeerTest {
         client.expect(Frame.ServerHello.class, TIMEOUT);
 
         assertThat(client.httpNegotiated()).isFalse();
+    }
+
+    @Test
+    void resumeIsNegotiatedLikeAnyCapabilityAndCarriesGoAwayAndTheToken() {
+        ResumeToken token = new ResumeToken("jbr_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8");
+        client.send(new Frame.Hello(new Hello(
+                new ClientInfo("jburrow-cli", "0.4.0", null, null), List.of("resume"), ScriptedPeer.CLIENT_WINDOWS)));
+        server.expect(Frame.Hello.class, TIMEOUT);
+        server.send(new Frame.ServerHello(serverHello(List.of("resume"))));
+        client.expect(Frame.ServerHello.class, TIMEOUT);
+
+        client.send(new Frame.Register(
+                new Register("jb_x", List.of(new TunnelRequest("default", TunnelKind.TCP, null)), token)));
+        assertThat(server.expect(Frame.Register.class, TIMEOUT).message().resume())
+                .isEqualTo(token);
+        server.send(new Frame.Registered(new Registered(
+                List.of(RegisteredTunnel.of("default", TUNNEL_ID, TunnelKind.TCP, "localhost", 21_000)), token)));
+        client.expect(Frame.Registered.class, TIMEOUT);
+        server.send(new Frame.GoAway(new GoAway(830, 5_000)));
+
+        assertThat(client.resumeNegotiated()).isTrue();
+        assertThat(server.resumeNegotiated()).isTrue();
+        assertThat(client.httpNegotiated()).isFalse();
+        assertThat(client.lastResumeToken()).contains(token);
+        assertThat(server.lastResumeToken()).contains(token);
+        assertThat(client.expect(Frame.GoAway.class, TIMEOUT).message()).isEqualTo(new GoAway(830, 5_000));
+    }
+
+    @Test
+    void withoutResumeAGoAwayIsOnlyItsHeaderAndTokensAreDropped() {
+        negotiateHttp();
+        server.sendRaw("00000000 0a 00 00000002 7b7d");
+
+        assertThat(client.resumeNegotiated()).isFalse();
+        assertThat(client.expect(Frame.Unsupported.class, TIMEOUT).type()).isEqualTo(FrameType.GOAWAY);
+        assertThat(client.lastResumeToken()).isEmpty();
     }
 
     @Test

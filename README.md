@@ -14,10 +14,11 @@ dashboard.
 
 ## Status
 
-**Pre-alpha, phase 1 complete: TCP tunnels.** `jburrow tcp <port>` exposes a local TCP port on a
-public port of the server, over the wire protocol in [`docs/protocol.md`](docs/protocol.md). Each
-session carries one connection at a time; multiplexing and flow control (phase 2), HTTP tunnels
-(phase 3) and automatic reconnect (phase 4) come next. JBurrow is built in public, one capability at
+**Pre-alpha, phase 3 complete: HTTP and TCP tunnels.** `jburrow http <port>` serves a local web
+server on a public HTTPS URL, and `jburrow tcp <port>` exposes a local TCP port on a public port of
+the server, over the wire protocol in [`docs/protocol.md`](docs/protocol.md). One session carries up
+to 1,000 connections at once under credit-based flow control. Automatic reconnect and resume across
+server restarts (phase 4) and accounts (phase 5) come next. JBurrow is built in public, one capability at
 a time; [`ROADMAP.md`](ROADMAP.md) lists the features and [`PROJECT.md`](PROJECT.md) §Build roadmap
 gives the order.
 
@@ -54,10 +55,24 @@ JBURROW_AUTHTOKEN=<your token> java -jar jburrow-cli/target/jburrow-cli-*.jar tc
 ssh -p 20417 you@tcp.cloudnativehub.app   # from anywhere, with the port printed above
 ```
 
+A local web server gets an HTTPS URL of its own instead of a port:
+
+```bash
+JBURROW_AUTHTOKEN=<your token> java -jar jburrow-cli/target/jburrow-cli-*.jar http 3000
+# Forwarding  https://quiet-otter-4f2a.cloudnativehub.app -> http://localhost:3000
+
+curl https://quiet-otter-4f2a.cloudnativehub.app/   # from anywhere, with the URL printed above
+```
+
+`--subdomain myapp` asks for a name of your own, and `--host-header rewrite` helps development
+servers that only answer `localhost`. WebSocket isn't passed through yet, so a page loads but its
+hot reload doesn't.
+
 The tunnel exposes the local service to the whole internet for as long as it runs: use key
 authentication for SSH, and stop the tunnel with Ctrl-C when you're done. If the connection drops
-or the server restarts, the CLI exits with code 4; run the command again, with
-`--remote-port <port>` to ask for the same port.
+or the server restarts, the CLI says so in one line, reconnects by itself and asks for the same URL
+or port, a random name included; open connections are cut, but new ones work as soon as it prints
+`reconnected`. Pass `--no-reconnect` to have it exit with code 4 instead, as a script may prefer.
 
 ### Against a server on your machine
 
@@ -93,6 +108,16 @@ curl http://quiet-otter-4f2a.localhost:7080/hello   # another terminal, with the
 `--host-header rewrite` sends the local service `localhost:3000` as its `Host`, for frameworks that
 only answer their own name.
 
+The tunnel survives a server restart. Stop the server with Ctrl-C and start it again with `make run`:
+the server warns the CLI before it goes, keeps the name for its owner for two minutes, even across
+the restart, and the CLI comes back with the same URL:
+
+```
+14:05:40  connection lost: the server is restarting; reconnecting in 0.8 s
+14:05:41  still reconnecting: the server isn't reachable (Couldn't connect to the server: Connection refused: localhost/127.0.0.1:7080); next try in 1.0 s
+14:05:47  reconnected   http://quiet-otter-4f2a.localhost:7080
+```
+
 `jburrow tcp 22` instead tunnels to your SSH daemon (`ssh -p 21037 localhost`). Add `--output json`
 for one JSON event per line. Ctrl-C stops the tunnel with exit code 0; any other exit code says
 what went wrong (`jburrow tcp --help`, and ARCHITECTURE.md §The CLI for the list); `jburrow http`
@@ -104,10 +129,10 @@ user of the machine.
 
 - [`PROJECT.md`](PROJECT.md): the project brief, architecture, tech stack and module layout.
 - [`ROADMAP.md`](ROADMAP.md): the feature list, staged as MVP, v1 and Later.
-- [`docs/phase-1-tcp-tunnel/ARCHITECTURE.md`](docs/phase-1-tcp-tunnel/ARCHITECTURE.md): the
-  detailed design of the latest phase, TCP tunnels and the wire protocol;
-  [`docs/phase-0-foundation/ARCHITECTURE.md`](docs/phase-0-foundation/ARCHITECTURE.md) is the one
-  before it.
+- [`docs/phase-3-http-tunnels/ARCHITECTURE.md`](docs/phase-3-http-tunnels/ARCHITECTURE.md): the
+  detailed design of the latest phase, HTTP tunnels; the earlier phases' designs are beside it in
+  [`docs/`](docs/) (phase 0 foundation, phase 1 TCP tunnels and the wire protocol, phase 2
+  multiplexing and flow control).
 - [`docs/protocol.md`](docs/protocol.md): the wire protocol specification, for anyone writing a
   client or a server.
 - [`docs/adr/`](docs/adr/): architecture decision records.

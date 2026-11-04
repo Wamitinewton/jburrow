@@ -6,6 +6,7 @@ import io.jburrow.protocol.adapter.netty.FrameCodec;
 import io.jburrow.protocol.adapter.netty.WebSocketFrameDecoder;
 import io.jburrow.protocol.adapter.netty.WebSocketFrameEncoder;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.stream.HttpExchangeRules;
 import io.jburrow.protocol.wire.Capability;
@@ -51,11 +52,13 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -91,17 +94,23 @@ import javax.net.ssl.SSLEngine;
  * and the {@code WINDOW_UPDATE}s it receives, so {@link #sendData} can send as a correct sender would, waiting for
  * credit. Every {@code DATA} it sends spends that credit, however it was sent.
  *
- * <p>It negotiates capabilities as its {@code HELLO}s say: a listening peer has {@code http} once it sends a
+ * <p>It negotiates capabilities as its {@code HELLO}s say: a listening peer has a capability once it sends a
  * {@code HELLO} listing it, a connecting peer once the implementation's {@code HELLO} lists it and its own offered it.
- * Until then its codec refuses {@code HEADERS} and everything else {@code http} introduces, in both directions, as a
- * correct peer would; {@link #sendRaw} still sends anything.
+ * Until then its codec refuses what the capability introduces, in both directions, as a correct peer would: without
+ * {@code http}, {@code HEADERS} and the rest of {@code http}; without {@code resume}, {@code GOAWAY}'s payload and
+ * {@code SESSION_REPLACED}, while {@code REGISTER.resume} and the reply's {@code resumeToken} are dropped as unknown
+ * keys. {@link #sendRaw} still sends anything.
+ *
+ * <p>It remembers the last resume token a {@code REGISTER} reply carried, sent or received, so a test can present it
+ * in the next session's {@code REGISTER} without ever printing it.
  *
  * <p>It also polices HTTP streams. It holds an {@link HttpExchangeRules} for each stream whose {@code OPEN} carried a
  * request, and the first frame from the implementation that breaks one of the stream's rules (request {@code DATA} past
  * its {@code content-length}, a second final {@code HEADERS}, a response that ends short) fails the test as an overrun
  * does. A head that breaks a field rule never gets that far: the codec refuses it, and the next {@code expect} fails.
  *
- * <p>Each peer has its own event loop. A listening peer accepts one connection and refuses any after it.
+ * <p>Each peer has its own event loop. A listening peer accepts one connection and refuses any after it, until
+ * {@link #stopListening()} hands its port on.
  */
 public final class ScriptedPeer implements AutoCloseable {
 
@@ -128,8 +137,9 @@ public final class ScriptedPeer implements AutoCloseable {
     private final SendCredit sendCredit;
     private final Map<Integer, HttpExchangeRules> exchanges = new ConcurrentHashMap<>();
     private final Set<Integer> tcpStreams = ConcurrentHashMap.newKeySet();
-    private volatile boolean httpOffered;
-    private volatile boolean http;
+    private volatile Set<Capability> offered = Set.of();
+    private volatile Set<Capability> negotiated = Set.of();
+    private volatile ResumeToken resumeToken;
     private volatile AssertionError violation;
     private volatile boolean violationReported;
     private volatile boolean autoGrant;
@@ -169,7 +179,7 @@ public final class ScriptedPeer implements AutoCloseable {
             throw new IllegalArgumentException("A scripted client speaks ws:// only: " + uri);
         }
         ScriptedPeer peer = new ScriptedPeer(FrameCodec.Role.CLIENT, CLIENT_WINDOWS, SERVER_WINDOWS);
-        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, ControlJson.create(), peer::httpNegotiated);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, ControlJson.create(), peer::negotiated);
         WebSocketClientProtocolConfig config = WebSocketClientProtocolConfig.newBuilder()
                 .webSocketUri(uri)
                 .subprotocol(subprotocol)
@@ -223,7 +233,7 @@ public final class ScriptedPeer implements AutoCloseable {
 
     private static ScriptedPeer listen(int port, String subprotocol, SslContext tls) {
         ScriptedPeer peer = new ScriptedPeer(FrameCodec.Role.SERVER, SERVER_WINDOWS, CLIENT_WINDOWS);
-        FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create(), peer::httpNegotiated);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.SERVER, ControlJson.create(), peer::negotiated);
         WebSocketServerProtocolConfig config = WebSocketServerProtocolConfig.newBuilder()
                 .websocketPath(CONNECT_PATH)
                 .subprotocols(subprotocol)
@@ -268,9 +278,24 @@ public final class ScriptedPeer implements AutoCloseable {
         return URI.create("ws://" + InetAddress.getLoopbackAddress().getHostAddress() + ":" + port() + CONNECT_PATH);
     }
 
+    /** The capabilities this session has, by the {@code HELLO}s sent and received so far. */
+    public Set<Capability> negotiated() {
+        return negotiated;
+    }
+
     /** Whether this session has the {@code http} capability, by the {@code HELLO}s sent and received so far. */
     public boolean httpNegotiated() {
-        return http;
+        return negotiated.contains(Capability.HTTP);
+    }
+
+    /** Whether this session has the {@code resume} capability, by the {@code HELLO}s sent and received so far. */
+    public boolean resumeNegotiated() {
+        return negotiated.contains(Capability.RESUME);
+    }
+
+    /** The resume token of the last {@code REGISTER} reply this peer sent or received, if it carried one. */
+    public Optional<ResumeToken> lastResumeToken() {
+        return Optional.ofNullable(resumeToken);
     }
 
     /**
@@ -292,17 +317,18 @@ public final class ScriptedPeer implements AutoCloseable {
         switch (frame) {
             case Frame.Hello hello -> {
                 ledger.announce(hello.message().windows());
-                httpOffered = offersHttp(hello.message().capabilities());
+                offered = known(hello.message().capabilities());
             }
             case Frame.ServerHello hello -> {
                 ledger.announce(hello.message().windows());
-                http = offersHttp(hello.message().capabilities());
+                negotiated = known(hello.message().capabilities());
             }
             case Frame.Open open
             when open.message().request() != null ->
                 exchanges.put(
                         open.streamId(), new HttpExchangeRules(open.message().request()));
             case Frame.Open open -> tcpStreams.add(open.streamId());
+            case Frame.Registered registered -> recordResumeToken(registered);
             case Frame.Close close
             when close.reset().isPresent() -> {
                 ledger.finish(close.streamId());
@@ -468,6 +494,14 @@ public final class ScriptedPeer implements AutoCloseable {
         } catch (TimeoutException e) {
             throw new IllegalStateException("No TLS handshake within " + CONNECT_TIMEOUT, e);
         }
+    }
+
+    /**
+     * Stops a listening peer accepting connections, and keeps the one it has. Another peer can then listen on the same
+     * port, so a test can hand a reconnecting client to a new server before the old one goes away.
+     */
+    public void stopListening() {
+        requireListener().close().syncUninterruptibly();
     }
 
     /** Closes the TCP connection without a WebSocket close, as a crashed or vanished peer would. */
@@ -680,8 +714,19 @@ public final class ScriptedPeer implements AutoCloseable {
         }
     }
 
-    private static boolean offersHttp(List<String> capabilities) {
-        return capabilities.contains(Capability.HTTP.wireName());
+    /** The capabilities among {@code names} that this implementation knows; others are ignored, as §4.2 requires. */
+    private static Set<Capability> known(List<String> names) {
+        Set<Capability> known = EnumSet.noneOf(Capability.class);
+        for (String name : names) {
+            Capability.fromWireName(name).ifPresent(known::add);
+        }
+        return Set.copyOf(known);
+    }
+
+    private void recordResumeToken(Frame.Registered registered) {
+        if (registered.message().resumeToken() != null) {
+            resumeToken = registered.message().resumeToken();
+        }
     }
 
     private void recordClosed(WebSocketCloseStatus status) {
@@ -737,7 +782,10 @@ public final class ScriptedPeer implements AutoCloseable {
                 }
                 case Frame.ServerHello hello -> {
                     sendCredit.announce(hello.message().windows());
-                    http = httpOffered && offersHttp(hello.message().capabilities());
+                    Set<Capability> agreed = EnumSet.noneOf(Capability.class);
+                    agreed.addAll(known(hello.message().capabilities()));
+                    agreed.retainAll(offered);
+                    negotiated = Set.copyOf(agreed);
                     received.add(hello);
                 }
                 case Frame.WindowUpdate update -> {
@@ -745,6 +793,10 @@ public final class ScriptedPeer implements AutoCloseable {
                     if (!ignoreWindowUpdates) {
                         received.add(update);
                     }
+                }
+                case Frame.Registered registered -> {
+                    recordResumeToken(registered);
+                    received.add(registered);
                 }
                 case Frame frame -> received.add(frame);
                 case CloseWebSocketFrame close -> {

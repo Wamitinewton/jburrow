@@ -95,6 +95,7 @@ final class ControlFrameHandler extends ChannelInboundHandlerAdapter {
                 }
                 case Frame.WindowUpdate update -> streams.onWindowUpdate(update);
                 case Frame.Close close -> streams.onClose(close);
+                case Frame.GoAway goAway -> connection.onGoAway(session.onGoAway(goAway.message()));
                 case Frame.Error error -> connection.peerFailed(error.body());
                 case Frame.Ping ping -> {}
                 case Frame.Pong pong -> {}

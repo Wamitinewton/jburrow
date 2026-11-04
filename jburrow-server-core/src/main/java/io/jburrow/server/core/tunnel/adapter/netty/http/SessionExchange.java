@@ -71,6 +71,7 @@ final class SessionExchange implements ExchangeGate.Reader {
 
     private EdgeError page;
     private ErrorCode resetCode;
+    /** From the request's {@code CLOSE} to the final head; null outside that span. */
     private ScheduledFuture<?> responseTimer;
 
     /** Made on the edge's loop; touches nothing until its first task runs on the session's loop. */
@@ -163,8 +164,6 @@ final class SessionExchange implements ExchangeGate.Reader {
         } else if (leftover != null) {
             leftover.release();
         }
-        responseTimer =
-                owner.loop().schedule(this::onResponseTimeout, owner.responseTimeoutNanos(), TimeUnit.NANOSECONDS);
         if (open.request().body() == BodyFraming.EMPTY) {
             bodyComplete = true;
             releaseHeld();
@@ -354,8 +353,21 @@ final class SessionExchange implements ExchangeGate.Reader {
     private void sendClose() {
         closeSent = true;
         owner.sendClose(streamId);
+        startResponseTimer();
         if (owner.session().streamState(streamId).isEmpty()) {
             finish("closed");
+        }
+    }
+
+    /**
+     * Starts the response timeout once the whole request has gone to the client, {@code CLOSE} included, so the time a
+     * body takes to arrive doesn't count against the local service. A final head that came before the request ended has
+     * already answered it, and the timer never starts.
+     */
+    private void startResponseTimer() {
+        if (!finalHeadSent) {
+            responseTimer =
+                    owner.loop().schedule(this::onResponseTimeout, owner.responseTimeoutNanos(), TimeUnit.NANOSECONDS);
         }
     }
 

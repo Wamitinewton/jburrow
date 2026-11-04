@@ -4,6 +4,7 @@ import io.jburrow.client.ClientSettings;
 import io.jburrow.client.JBurrowClient;
 import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.TunnelStartException;
+import io.jburrow.client.tunnel.domain.Resumption;
 import io.jburrow.protocol.adapter.jackson.ControlJson;
 import io.jburrow.protocol.adapter.netty.FrameCodec;
 import io.jburrow.protocol.adapter.netty.WebSocketFrameDecoder;
@@ -31,9 +32,11 @@ import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import io.netty.util.concurrent.FastThreadLocalThread;
 import io.netty.util.concurrent.Future;
 import java.time.Duration;
+import java.time.InstantSource;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.SplittableRandom;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,8 +48,9 @@ import javax.net.ssl.SSLException;
 
 /**
  * The client on Netty: one NIO event loop on a daemon thread, which carries the control connection, every local
- * connection and every timer of the session, so the session's state is touched by that one thread only. NIO on every
- * platform, never a native transport, so the client behaves the same everywhere and under native-image.
+ * connection, every timer of the session, and the {@link SessionSupervisor} that starts one session after another, so
+ * the sessions' state is touched by that one thread only. NIO on every platform, never a native transport, so the
+ * client behaves the same everywhere and under native-image.
  *
  * <p>Blocking work, resolving host names, runs on virtual threads and never on the loop.
  *
@@ -87,7 +91,7 @@ public final class NettyTunnelClient implements JBurrowClient {
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    private volatile ControlConnection connection;
+    private volatile SessionSupervisor supervisor;
 
     public NettyTunnelClient(ClientSettings settings) {
         this(settings, HostResolver.SYSTEM);
@@ -115,11 +119,48 @@ public final class NettyTunnelClient implements JBurrowClient {
             throw new IllegalStateException("The client is closed");
         }
         if (!started.compareAndSet(false, true)) {
-            throw new IllegalStateException("A client is started once; build a new one for a new session");
+            throw new IllegalStateException("A client is started once; build a new one for a new client");
         }
         ClientTls tls = settings.tls() ? tls() : null;
-        ControlConnection session = new ControlConnection(settings);
-        connection = session;
+        SessionSupervisor sessions = new SessionSupervisor(
+                settings,
+                loop,
+                (resumption, supervision) -> connect(resumption, supervision, tls),
+                settings.reconnect().newSchedule(new SplittableRandom(), InstantSource.system()));
+        supervisor = sessions;
+        if (closed.get()) {
+            sessions.abandon();
+        }
+        return sessions.start();
+    }
+
+    @Override
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        boolean onLoop = loop.inEventLoop();
+        SessionSupervisor sessions = supervisor;
+        if (sessions != null) {
+            sessions.close();
+            if (!onLoop) {
+                sessions.awaitClosed(ControlConnection.CLOSE_TIMEOUT.plusMillis(500));
+            }
+        }
+        Future<?> shutdown = group.shutdownGracefully(0, SHUTDOWN_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+        blocking.shutdownNow();
+        if (onLoop) {
+            return;
+        }
+        shutdown.awaitUninterruptibly(SHUTDOWN_TIMEOUT.multipliedBy(2).toMillis());
+        if (sessions != null) {
+            sessions.abandon();
+        }
+    }
+
+    /** One attempt, on the event loop: a new connection to the server, asking for {@code resumption}. */
+    private ControlConnection connect(Resumption resumption, ControlConnection.Supervision supervision, ClientTls tls) {
+        ControlConnection session = new ControlConnection(settings, resumption, supervision);
         Bootstrap bootstrap = new Bootstrap()
                 .group(loop)
                 .channelFactory((ChannelFactory<NioSocketChannel>) NioSocketChannel::new)
@@ -137,41 +178,17 @@ public final class NettyTunnelClient implements JBurrowClient {
                 session.startFailed(UpgradeFailures.fromCause(dialed.cause()));
             }
         });
-        return session.awaitStart();
-    }
-
-    @Override
-    public void close() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
-        }
-        boolean onLoop = loop.inEventLoop();
-        ControlConnection session = connection;
-        if (session != null) {
-            session.close();
-            if (!onLoop) {
-                session.awaitClosed(ControlConnection.CLOSE_TIMEOUT.plusMillis(500));
-            }
-        }
-        Future<?> shutdown = group.shutdownGracefully(0, SHUTDOWN_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
-        blocking.shutdownNow();
-        if (onLoop) {
-            return;
-        }
-        shutdown.awaitUninterruptibly(SHUTDOWN_TIMEOUT.multipliedBy(2).toMillis());
-        if (session != null) {
-            session.abandon();
-        }
+        return session;
     }
 
     /** Whether the client has stopped reading the control connection, which flow control never does. */
     boolean isControlReadPaused() throws InterruptedException {
-        ControlConnection session = connection;
-        if (session == null) {
+        SessionSupervisor sessions = supervisor;
+        if (sessions == null) {
             return false;
         }
         try {
-            return loop.submit(session::isReadPaused).get(5, TimeUnit.SECONDS);
+            return loop.submit(sessions::isReadPaused).get(5, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException e) {
             throw new IllegalStateException("Couldn't read the control connection's state", e);
         }
@@ -193,7 +210,7 @@ public final class NettyTunnelClient implements JBurrowClient {
     private void initControlPipeline(SocketChannel channel, ControlConnection session, ClientTls tls) {
         ClientLivenessHandler liveness = new ClientLivenessHandler(session.session(), session, nanoTime);
         LocalConnector streams = new LocalConnector(session, channel, dialer, json, nanoTime);
-        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, json, session.session()::httpEnabled);
+        FrameCodec codec = new FrameCodec(FrameCodec.Role.CLIENT, json, session.session()::capabilities);
         if (tls != null) {
             channel.pipeline().addLast("tls", tls.newHandler(channel.alloc()));
         }

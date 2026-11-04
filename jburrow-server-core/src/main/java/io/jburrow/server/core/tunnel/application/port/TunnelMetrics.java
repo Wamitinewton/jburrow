@@ -70,6 +70,14 @@ public interface TunnelMetrics {
         FORBIDDEN
     }
 
+    /** What a {@code REGISTER} carrying a resume token found (step 2a of {@code docs/protocol.md} §8.4). */
+    enum ResumeOutcome {
+        /** The token named a live session of the same owner, which was ended. */
+        REPLACED,
+        /** It named none: unknown, already used, ended, or another owner's. */
+        NONE
+    }
+
     /** A connection upgraded and its session began: {@code jburrow_sessions_active} up. */
     void sessionStarted();
 
@@ -133,6 +141,9 @@ public interface TunnelMetrics {
 
     /** {@code jburrow_subdomain_claims_total}: registration claimed a name, or was refused the one it asked for. */
     default void subdomainClaimed(ClaimOutcome outcome) {}
+
+    /** {@code jburrow_resume_total}: a registration presented a resume token. Called on a virtual thread. */
+    default void resumed(ResumeOutcome outcome) {}
 
     /** Binds {@code jburrow_flow_parked_bytes} to the bytes parked across the server. */
     default void bindParkedBytes(LongSupplier parkedBytes) {}

@@ -64,7 +64,7 @@ class EdgeErrorPageTest {
             response.release();
             switch (error) {
                 case TUNNEL_BUSY -> assertThat(retryAfter).isEqualTo("1");
-                case SERVER_SHUTTING_DOWN -> assertThat(retryAfter).isEqualTo("5");
+                case SERVER_SHUTTING_DOWN -> assertThat(retryAfter).isEqualTo("10");
                 default -> assertThat(retryAfter).as(error.name()).isNull();
             }
         }

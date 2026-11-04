@@ -9,13 +9,15 @@ import io.netty.util.concurrent.ScheduledFuture;
 import java.net.InetAddress;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Everything one control session holds: the {@link Session}, its connection, its handshake ticket, its registration
  * once there is one, its streams, its timers and its counters, and the {@link SessionCloser} that ends it.
  *
- * <p>Not thread-safe. Confined to the event loop of {@link #channel()}, except {@link #session()}'s id and
- * {@link #channel()} itself, which never change and may be read from anywhere.
+ * <p>Not thread-safe. Confined to the event loop of {@link #channel()}, except {@link #session()}'s id,
+ * {@link #channel()} itself and {@link #closer()}, which never change, and {@link #released()}, which may be read
+ * from anywhere.
  */
 public final class SessionContext {
 
@@ -25,6 +27,7 @@ public final class SessionContext {
     private final InetAddress clientAddress;
     private final long startedNanos;
     private final SessionCloser closer;
+    private final CompletableFuture<Void> released = new CompletableFuture<>();
 
     private Registration registration;
     private SessionEnd end;
@@ -85,6 +88,19 @@ public final class SessionContext {
 
     public void registration(Registration registration) {
         this.registration = Objects.requireNonNull(registration, "registration");
+    }
+
+    /**
+     * Completes once the session has given back everything it took: its connection closed, which frees its admission
+     * ticket, its listeners closed, and its ports and names released into hold. Also completes if a listener could not
+     * be closed, with that port still reserved. Never fails; the result is a copy, so completing it changes nothing.
+     */
+    public CompletableFuture<Void> released() {
+        return released.copy();
+    }
+
+    void markReleased() {
+        released.complete(null);
     }
 
     /** Hands the registration over for release, so it is released exactly once. */

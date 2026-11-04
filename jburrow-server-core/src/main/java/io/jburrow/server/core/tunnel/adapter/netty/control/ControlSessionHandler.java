@@ -19,6 +19,7 @@ import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.server.core.tunnel.application.RegisterTunnels;
 import io.jburrow.server.core.tunnel.application.Registration;
+import io.jburrow.server.core.tunnel.application.ResumeTokens;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.SessionEnd;
 import io.jburrow.server.core.tunnel.domain.Principal;
@@ -244,7 +245,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             blockingExecutor.execute(() -> {
                 Object outcome;
                 try {
-                    outcome = registerTunnels.execute(context.ticket(), register, capabilities);
+                    outcome = registerTunnels.execute(session.id(), context.ticket(), register, capabilities);
                 } catch (ProtocolException refused) {
                     outcome = refused;
                 } catch (Throwable unexpected) {
@@ -298,21 +299,28 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
-    private void bind(Registration registration, long started) {
+    /**
+     * The resume token leaves the registration here and lives only until the reply is written, so the session keeps
+     * nothing of it but its hash.
+     */
+    private void bind(Registration accepted, long started) {
+        Optional<ResumeTokens.Issued> token = accepted.resumeToken();
+        Registration registration = accepted.withoutResumeToken();
         context.registration(registration);
         Future<List<Tunnel>> bound = tunnelListeners.bind(context, registration);
         bound.addListener(done -> {
             EventLoop loop = context.channel().eventLoop();
             if (loop.inEventLoop()) {
-                onBound(bound, registration.principal(), started);
+                onBound(bound, registration.principal(), token, started);
             } else {
-                loop.execute(() -> onBound(bound, registration.principal(), started));
+                loop.execute(() -> onBound(bound, registration.principal(), token, started));
             }
         });
     }
 
     /** If the session closed while binding, its teardown is already unbinding and releasing. */
-    private void onBound(Future<List<Tunnel>> bound, Principal principal, long started) {
+    private void onBound(
+            Future<List<Tunnel>> bound, Principal principal, Optional<ResumeTokens.Issued> token, long started) {
         if (!session.isRegistering()) {
             return;
         }
@@ -329,11 +337,12 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                 return;
             }
             List<Tunnel> tunnels = bound.getNow();
-            session.onEstablished(principal, tunnels);
+            session.onEstablished(principal, tunnels, token.map(ResumeTokens.Issued::hash));
             registry.addTunnels(context, tunnels);
             context.channel()
                     .writeAndFlush(new Frame.Registered(new Registered(
-                            tunnels.stream().map(Tunnel::toRegistered).toList())));
+                            tunnels.stream().map(Tunnel::toRegistered).toList(),
+                            token.map(ResumeTokens.Issued::token).orElse(null))));
             context.cancelHandshakeDeadline();
             metrics.handshakeEstablished();
             metrics.registerSucceeded(elapsed);
@@ -355,7 +364,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     }
 
     private void onHandshakeDeadline() {
-        if (session.state() != SessionState.ESTABLISHED) {
+        if (!session.isServing()) {
             closer.fail(
                     context,
                     ProtocolException.session(
@@ -443,7 +452,8 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
 
     /**
      * Ports go back to the pool only once every listener on them is closed; names go on hold on the same path, so
-     * registration is released in one place however the session ended.
+     * registration is released in one place however the session ended. The session is marked released at the end of
+     * that path, whichever way it ends, for a registration waiting to take the session's place.
      */
     private void unbindThenRelease() {
         Future<?> unbound;
@@ -451,16 +461,21 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
             unbound = tunnelListeners.unbindAll(context);
         } catch (RuntimeException e) {
             log.error("session {}: could not unbind its tunnels; their ports stay reserved", session.id(), e);
+            context.markReleased();
             return;
         }
         unbound.addListener(done -> {
-            if (done.isSuccess()) {
-                context.takeRegistration().ifPresent(registerTunnels::release);
-            } else {
-                log.error(
-                        "session {}: could not unbind its tunnels; their ports stay reserved",
-                        session.id(),
-                        done.cause());
+            try {
+                if (done.isSuccess()) {
+                    context.takeRegistration().ifPresent(registerTunnels::release);
+                } else {
+                    log.error(
+                            "session {}: could not unbind its tunnels; their ports stay reserved",
+                            session.id(),
+                            done.cause());
+                }
+            } finally {
+                context.markReleased();
             }
         });
     }

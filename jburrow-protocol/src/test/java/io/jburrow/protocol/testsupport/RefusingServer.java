@@ -50,6 +50,14 @@ public final class RefusingServer implements AutoCloseable {
      * {@code Connection: close}.
      */
     public static RefusingServer start(int status, String contentType, String body) {
+        return start(0, status, contentType, body);
+    }
+
+    /**
+     * As {@link #start(int, String, String)}, on loopback {@code port}, so a client that already knows a server's port
+     * can find this one in its place. Port 0 picks an ephemeral port.
+     */
+    public static RefusingServer start(int port, int status, String contentType, String body) {
         Objects.requireNonNull(contentType, "contentType");
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
@@ -78,7 +86,7 @@ public final class RefusingServer implements AutoCloseable {
                                 });
                     }
                 })
-                .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
+                .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port))
                 .syncUninterruptibly()
                 .channel();
         return new RefusingServer(group, listener);

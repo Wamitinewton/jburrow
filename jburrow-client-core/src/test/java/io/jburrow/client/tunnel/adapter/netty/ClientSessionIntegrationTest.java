@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.jburrow.client.ClientSettings;
+import io.jburrow.client.ReconnectPolicy;
 import io.jburrow.client.TunnelHandle;
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.client.TunnelStartException.Kind;
@@ -123,7 +124,7 @@ class ClientSessionIntegrationTest {
         Frame.Hello hello = peer.expect(Frame.Hello.class, TIMEOUT);
         Frame.Register register = peer.expect(Frame.Register.class, TIMEOUT);
         assertThat(hello.message().client()).isEqualTo(CLIENT);
-        assertThat(hello.message().capabilities()).containsExactly("http");
+        assertThat(hello.message().capabilities()).containsExactlyInAnyOrder("http", "resume");
         assertThat(hello.message().windows()).isEqualTo(new Windows(262_144, 1_048_576));
         assertThat(register.message().authtoken()).isEqualTo(TOKEN);
         assertThat(register.message().tunnels()).containsExactly(new TunnelRequest("default", TunnelKind.TCP, null));
@@ -953,7 +954,9 @@ class ClientSessionIntegrationTest {
                 CLIENT,
                 Optional.empty(),
                 handshake,
-                ClientSettings.DEFAULT_WINDOWS);
+                ClientSettings.DEFAULT_WINDOWS,
+                ClientSettings.IMPLEMENTED_CAPABILITIES,
+                ReconnectPolicy.never());
         client = new NettyTunnelClient(settings, resolver);
         return client;
     }

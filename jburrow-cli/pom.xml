@@ -75,6 +75,37 @@
             </resource>
         </resources>
         <plugins>
+            <!--
+              picocli-codegen writes its native-image configuration from the classes javac compiles in one run, and
+              replaces the file each time. An incremental build that recompiles only a changed class leaves a
+              configuration naming that class alone, and a native binary that fails at startup. Removing this
+              module's compiled classes first makes every build compile them all. NativeImageMetadataTest checks it.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>recompile-every-command-for-picocli-codegen</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <configuration>
+                            <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                            <filesets>
+                                <fileset>
+                                    <directory>${project.build.outputDirectory}</directory>
+                                    <includes>
+                                        <include>io/jburrow/**</include>
+                                        <include>META-INF/native-image/picocli-generated/**</include>
+                                    </includes>
+                                </fileset>
+                            </filesets>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- picocli-codegen writes the reflection configuration native-image needs for the commands. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

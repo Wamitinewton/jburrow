@@ -144,6 +144,11 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
     }
 
     @Override
+    public void resumed(ResumeOutcome outcome) {
+        record("resumed", outcome);
+    }
+
+    @Override
     public void bindParkedBytes(LongSupplier parkedBytes) {
         this.parkedBytes = parkedBytes;
     }

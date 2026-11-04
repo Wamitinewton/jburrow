@@ -10,6 +10,11 @@ public enum SessionState {
     REGISTERING,
     /** The {@code REGISTER} reply is sent. Streams may be opened. */
     ESTABLISHED,
+    /**
+     * The server is stopping, and has sent {@code GOAWAY} if the session has {@code resume}. Open streams finish; no new
+     * one is opened.
+     */
+    DRAINING,
     /** The session is ending; nothing new starts. */
     CLOSING
 }
