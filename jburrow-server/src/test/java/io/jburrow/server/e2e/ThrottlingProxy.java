@@ -18,9 +18,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * without touching client code. The client connects to {@link #port()} instead of the edge; the {@code Host} header it
  * sends still names {@code localhost}, so the edge accepts it.
  *
- * <p>Each direction is a token bucket with a {@link #BURST} burst, pumped by a virtual thread with blocking sockets.
- * Its receive buffers are kept small, so bytes back up in the sender rather than in the proxy's kernel buffers, and the
+ * <p>Each direction is a token bucket with a {@link #BURST} burst, pumped by a thread with blocking sockets. Its
+ * receive buffers are kept small, so bytes back up in the sender rather than in the proxy's kernel buffers, and the
  * throttle bites from the first second.
+ *
+ * <p>The threads are platform threads. On JDK 25 a virtual thread's {@code Thread.sleep} can miss its wakeup when the
+ * JVM is busy with many virtual threads, as in a full {@code verify}: a pump then sleeps forever, its direction stops,
+ * and the session dies of {@code HEARTBEAT_TIMEOUT} with nothing wrong in the tunnel.
  */
 final class ThrottlingProxy implements AutoCloseable {
 
@@ -40,7 +44,7 @@ final class ThrottlingProxy implements AutoCloseable {
         this.server = server;
         this.targetPort = targetPort;
         this.bytesPerSecond = bytesPerSecond;
-        Thread.ofVirtual().name("throttling-proxy-" + server.getLocalPort()).start(this::acceptLoop);
+        thread("throttling-proxy-" + server.getLocalPort()).start(this::acceptLoop);
     }
 
     /** Forwards to {@code targetPort} on loopback at {@code bytesPerSecond} each way. */
@@ -79,7 +83,7 @@ final class ThrottlingProxy implements AutoCloseable {
             } catch (IOException e) {
                 return;
             }
-            Thread.ofVirtual().start(() -> connect(downstream));
+            thread("throttling-proxy-connect").start(() -> connect(downstream));
         }
     }
 
@@ -97,8 +101,12 @@ final class ThrottlingProxy implements AutoCloseable {
             closeBoth(downstream, upstream);
             return;
         }
-        Thread.ofVirtual().start(() -> pump(downstream, upstream));
-        Thread.ofVirtual().start(() -> pump(upstream, downstream));
+        thread("throttling-proxy-up").start(() -> pump(downstream, upstream));
+        thread("throttling-proxy-down").start(() -> pump(upstream, downstream));
+    }
+
+    private static Thread.Builder thread(String name) {
+        return Thread.ofPlatform().daemon().name(name);
     }
 
     /** Copies {@code from} to {@code to} at the rate, passing on a half-close; any failure closes both. */
