@@ -242,7 +242,7 @@ public final class ScriptedPeer implements AutoCloseable {
                 .handleCloseFrames(false)
                 .handshakeTimeoutMillis(CONNECT_TIMEOUT.toMillis())
                 .build();
-        ChannelFuture bind = new ServerBootstrap()
+        ServerBootstrap bootstrap = new ServerBootstrap()
                 .group(peer.group)
                 .channel(NioServerSocketChannel.class)
                 .childHandler(new ChannelInitializer<SocketChannel>() {
@@ -261,10 +261,16 @@ public final class ScriptedPeer implements AutoCloseable {
                                 .addLast(new WebSocketServerProtocolHandler(config))
                                 .addLast(peer.frameHandlers(codec));
                     }
-                })
-                .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port))
-                .syncUninterruptibly();
-        peer.listener = bind.channel();
+                });
+        try {
+            ChannelFuture bind = bootstrap
+                    .bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port))
+                    .syncUninterruptibly();
+            peer.listener = bind.channel();
+        } catch (Exception e) {
+            peer.close();
+            throw e;
+        }
         return peer;
     }
 
