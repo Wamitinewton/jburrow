@@ -81,6 +81,8 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     private final Duration handshakeTimeout;
 
     private boolean tornDown;
+    /** Whether the session's {@code REGISTER} carried a resume token, for the "session established" line. */
+    private boolean presentedResumeToken;
 
     ControlSessionHandler(
             SessionContext context,
@@ -238,6 +240,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
 
     private void onRegister(Register register) {
         session.onRegisterReceived();
+        presentedResumeToken = register.resume() != null;
         EventLoop loop = context.channel().eventLoop();
         Set<Capability> capabilities = session.capabilities();
         long started = System.nanoTime();
@@ -483,7 +486,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
     private void logEstablished(Principal principal, List<Tunnel> tunnels) {
         ClientInfo client = session.client().orElseThrow();
         log.info(
-                "session established: session={} principal={} client={}/{} address={} tunnels={}",
+                "session established: session={} principal={} client={}/{} address={} tunnels={} resumed={}",
                 session.id(),
                 principal.name(),
                 client.name(),
@@ -492,6 +495,7 @@ final class ControlSessionHandler extends SimpleChannelInboundHandler<Object> {
                 tunnels.stream()
                         .map(tunnel -> tunnel.kind().wireName() + ":"
                                 + (tunnel.kind() == TunnelKind.HTTP ? tunnel.publicHost() : tunnel.publicPort()))
-                        .collect(Collectors.joining(",", "[", "]")));
+                        .collect(Collectors.joining(",", "[", "]")),
+                presentedResumeToken);
     }
 }

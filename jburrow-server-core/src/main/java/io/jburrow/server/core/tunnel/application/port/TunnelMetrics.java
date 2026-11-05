@@ -5,11 +5,13 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameType;
 import io.jburrow.server.core.portpool.application.port.PortPoolSnapshot;
 import io.jburrow.server.core.tunnel.domain.StreamAdmission;
+import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
- * What the engine reports, one method per metric of {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} §Observability.
+ * What the engine reports, one method per metric of the §Observability sections of
+ * {@code docs/phase-1-tcp-tunnel/ARCHITECTURE.md} and the phases after it.
  * Arguments are enums, numbers and codes from a fixed set only, so no label can carry a session id, tunnel id, port,
  * address or principal.
  * Called on event loops, so an implementation never blocks.
@@ -64,10 +66,24 @@ public interface TunnelMetrics {
         RANDOM,
         /** The client's requested name was claimed. */
         REQUESTED,
+        /** The requested name was held for the same principal, which took it back. */
+        RECLAIMED,
         /** The requested name is in use, or held for someone else. */
         UNAVAILABLE,
         /** The requested name is reserved or blocked. */
         FORBIDDEN
+    }
+
+    /** How a registration's reservation of a tunnel port ended. */
+    enum PortClaimOutcome {
+        /** The server chose the port. */
+        RANDOM,
+        /** The client's requested port was reserved. */
+        REQUESTED,
+        /** The requested port was held for the same principal, which took it back. */
+        RECLAIMED,
+        /** The requested port is outside the range, reserved, or held for someone else. */
+        UNAVAILABLE
     }
 
     /** What a {@code REGISTER} carrying a resume token found (step 2a of {@code docs/protocol.md} §8.4). */
@@ -142,14 +158,26 @@ public interface TunnelMetrics {
     /** {@code jburrow_subdomain_claims_total}: registration claimed a name, or was refused the one it asked for. */
     default void subdomainClaimed(ClaimOutcome outcome) {}
 
+    /** {@code jburrow_port_claims_total}: registration reserved a port, or was refused the one it asked for. */
+    default void portClaimed(PortClaimOutcome outcome) {}
+
     /** {@code jburrow_resume_total}: a registration presented a resume token. Called on a virtual thread. */
     default void resumed(ResumeOutcome outcome) {}
+
+    /** {@code jburrow_goaway_sent_total}: a draining session was sent {@code GOAWAY}. */
+    default void goAwaySent() {}
+
+    /** {@code jburrow_drain_streams_cut_total}: {@code streams} were still open when the drain ended. */
+    default void drainStreamsCut(int streams) {}
 
     /** Binds {@code jburrow_flow_parked_bytes} to the bytes parked across the server. */
     default void bindParkedBytes(LongSupplier parkedBytes) {}
 
-    /** Binds {@code jburrow_tcp_ports} to the pool. */
+    /** Binds {@code jburrow_tcp_ports}, and {@code jburrow_holds{kind="port"}} to its held ports, to the pool. */
     void bindPortPool(Supplier<PortPoolSnapshot> snapshot);
+
+    /** Binds {@code jburrow_holds{kind="name"}} to the names on hold now. */
+    default void bindHeldNames(IntSupplier heldNames) {}
 
     /** Binds {@code jburrow_netty_direct_memory_bytes}. */
     void bindDirectMemory(LongSupplier usedBytes);

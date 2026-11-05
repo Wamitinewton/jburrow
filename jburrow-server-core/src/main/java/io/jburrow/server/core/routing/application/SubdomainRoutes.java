@@ -4,6 +4,7 @@ import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
 import io.jburrow.server.core.routing.application.port.ClaimSnapshot;
 import io.jburrow.server.core.routing.application.port.ClaimSnapshots;
+import io.jburrow.server.core.routing.application.port.Claimed;
 import io.jburrow.server.core.routing.application.port.RouteLookup;
 import io.jburrow.server.core.routing.application.port.SubdomainClaims;
 import io.jburrow.server.core.routing.domain.Blocklist;
@@ -73,15 +74,17 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
     }
 
     @Override
-    public SubdomainName claim(SubdomainName name, P principal, T tunnel) {
+    public Claimed claim(SubdomainName name, P principal, T tunnel) {
         Objects.requireNonNull(name, "name");
         Claim<P, T> wanted = Claim.active(name, principal, tunnel);
         if (!blocklist.allows(name)) {
             throw new ClaimRefused(ClaimRefused.Reason.FORBIDDEN);
         }
         Instant now = clock.instant();
+        boolean[] reclaimed = {false};
         Claim<P, T> result = claims.compute(name, (key, existing) -> {
             if (existing == null || existing.yieldsTo(principal, now)) {
+                reclaimed[0] = existing != null && !existing.expiredAt(now);
                 version.incrementAndGet();
                 return wanted;
             }
@@ -90,7 +93,7 @@ public final class SubdomainRoutes<P, T> implements SubdomainClaims<P, T>, Route
         if (result != wanted) {
             throw new ClaimRefused(ClaimRefused.Reason.UNAVAILABLE);
         }
-        return name;
+        return new Claimed(name, reclaimed[0]);
     }
 
     @Override

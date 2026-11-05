@@ -144,8 +144,23 @@ public final class RecordingTunnelMetrics implements TunnelMetrics {
     }
 
     @Override
+    public void portClaimed(PortClaimOutcome outcome) {
+        record("portClaimed", outcome);
+    }
+
+    @Override
     public void resumed(ResumeOutcome outcome) {
         record("resumed", outcome);
+    }
+
+    @Override
+    public void goAwaySent() {
+        record("goAwaySent");
+    }
+
+    @Override
+    public void drainStreamsCut(int streams) {
+        record("drainStreamsCut", streams);
     }
 
     @Override

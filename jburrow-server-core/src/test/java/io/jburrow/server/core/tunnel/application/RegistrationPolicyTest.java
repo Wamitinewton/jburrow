@@ -31,7 +31,7 @@ class RegistrationPolicyTest {
     @Test
     void aTcpTunnelIsPublicOnTheTcpHostAtItsReservedPort() {
         PlannedTunnel.Tcp planned = new PlannedTunnel.Tcp(
-                new TunnelRequest("ssh", TunnelKind.TCP, null), new Reservation(20_417, 1), TunnelId.random());
+                new TunnelRequest("ssh", TunnelKind.TCP, null), new Reservation(20_417, 1, false), TunnelId.random());
 
         assertThat(planned.toTunnel(PRODUCTION).toRegistered().url()).isEqualTo("tcp://tcp.example.dev:20417");
     }
@@ -42,7 +42,7 @@ class RegistrationPolicyTest {
         TunnelRequest tcp = new TunnelRequest("ssh", TunnelKind.TCP, null);
 
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new PlannedTunnel.Tcp(http, new Reservation(20_417, 1), TunnelId.random()));
+                .isThrownBy(() -> new PlannedTunnel.Tcp(http, new Reservation(20_417, 1, false), TunnelId.random()));
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> new PlannedTunnel.Http(tcp, new SubdomainName("demo"), TunnelId.random()));
     }

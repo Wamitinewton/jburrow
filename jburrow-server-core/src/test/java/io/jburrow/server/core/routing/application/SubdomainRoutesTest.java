@@ -9,6 +9,7 @@ import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.server.core.portpool.domain.MutableClock;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
 import io.jburrow.server.core.routing.application.port.ClaimSnapshot;
+import io.jburrow.server.core.routing.application.port.Claimed;
 import io.jburrow.server.core.routing.domain.Blocklist;
 import io.jburrow.server.core.routing.domain.NameGenerator;
 import java.time.Duration;
@@ -37,7 +38,7 @@ class SubdomainRoutesTest {
     void claimsAFreeNameAndRoutesIt() {
         SubdomainRoutes<String, String> routes = routes(HOLD);
 
-        assertThat(routes.claim(DEMO, "alice", "t1")).isEqualTo(DEMO);
+        assertThat(routes.claim(DEMO, "alice", "t1").name()).isEqualTo(DEMO);
 
         assertThat(routes.find(DEMO)).contains("t1");
     }
@@ -85,9 +86,27 @@ class SubdomainRoutesTest {
         routes.release(DEMO, "t1");
         clock.advance(HOLD.minusSeconds(1));
 
-        routes.claim(DEMO, "alice", "t2");
+        assertThat(routes.claim(DEMO, "alice", "t2")).isEqualTo(new Claimed(DEMO, true));
 
         assertThat(routes.find(DEMO)).contains("t2");
+    }
+
+    @Test
+    void onlyANameStillHeldForItsPrincipalCountsAsReclaimed() {
+        SubdomainRoutes<String, String> routes = routes(HOLD);
+        assertThat(routes.claim(DEMO, "alice", "t1").reclaimed()).isFalse();
+        routes.release(DEMO, "t1");
+        clock.advance(HOLD);
+
+        assertThat(routes.claim(DEMO, "alice", "t2").reclaimed())
+                .as("a hold that has expired is a free name")
+                .isFalse();
+
+        SubdomainName seeded = new SubdomainName("seeded");
+        routes.seedHold(seeded, "alice", clock.instant().plusSeconds(45));
+        assertThat(routes.claim(seeded, "alice", "t3").reclaimed())
+                .as("a hold seeded from an earlier process")
+                .isTrue();
     }
 
     @Test
@@ -256,7 +275,7 @@ class SubdomainRoutesTest {
         assertThat(routes.find(DEMO)).isEmpty();
         assertThat(routes.snapshot(clock.instant())).containsExactly(new ClaimSnapshot<>(DEMO, "alice", until));
         assertRefused(() -> routes.claim(DEMO, "bob", "t2"), ClaimRefused.Reason.UNAVAILABLE);
-        assertThat(routes.claim(DEMO, "alice", "t1")).isEqualTo(DEMO);
+        assertThat(routes.claim(DEMO, "alice", "t1").name()).isEqualTo(DEMO);
         assertThat(routes.find(DEMO)).contains("t1");
     }
 
@@ -268,7 +287,7 @@ class SubdomainRoutesTest {
         clock.advance(Duration.ofSeconds(45));
 
         assertThat(routes.snapshot(clock.instant())).isEmpty();
-        assertThat(routes.claim(DEMO, "bob", "t2")).isEqualTo(DEMO);
+        assertThat(routes.claim(DEMO, "bob", "t2").name()).isEqualTo(DEMO);
     }
 
     @Test
@@ -284,7 +303,7 @@ class SubdomainRoutesTest {
         assertThat(routes.seedHold(held, "bob", until)).isFalse();
 
         assertThat(routes.find(DEMO)).contains("t1");
-        assertThat(routes.claim(held, "alice", "t3")).isEqualTo(held);
+        assertThat(routes.claim(held, "alice", "t3").name()).isEqualTo(held);
     }
 
     @Test

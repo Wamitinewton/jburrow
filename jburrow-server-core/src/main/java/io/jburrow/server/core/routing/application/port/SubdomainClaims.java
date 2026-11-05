@@ -18,12 +18,13 @@ public interface SubdomainClaims<P, T> {
     SubdomainName claimRandom(P principal, T tunnel);
 
     /**
-     * Claims {@code name}, if it is unclaimed, its hold has expired, or it is held for {@code principal}.
+     * Claims {@code name}, if it is unclaimed, its hold has expired, or it is held for {@code principal}; the last is a
+     * reclaim.
      *
      * @throws ClaimRefused {@link ClaimRefused.Reason#FORBIDDEN} if the blocklist refuses it,
      *     {@link ClaimRefused.Reason#UNAVAILABLE} if someone else has it
      */
-    SubdomainName claim(SubdomainName name, P principal, T tunnel);
+    Claimed claim(SubdomainName name, P principal, T tunnel);
 
     /**
      * Ends {@code tunnel}'s claim on {@code name} and starts its hold. Does nothing if {@code tunnel} no longer has an

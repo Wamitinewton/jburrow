@@ -7,7 +7,6 @@ import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
 import io.jburrow.protocol.control.Register;
 import io.jburrow.protocol.control.RegisteredTunnel;
-import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
 import io.jburrow.protocol.wire.ErrorCode;
@@ -23,9 +22,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.jdbc.autoconfigure.JdbcConnectionDetails;
 import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.TestPropertySource;
 
@@ -44,12 +41,6 @@ class LeaseRestartIntegrationTest extends TunnelTestSupport {
 
     /** {@code jburrow.session.resume-window}'s default, which the test profile keeps. */
     private static final Duration RESUME_WINDOW = Duration.ofSeconds(120);
-
-    @Autowired
-    private JdbcConnectionDetails db;
-
-    @Autowired
-    private Environment environment;
 
     @Autowired
     private JdbcClient jdbc;
@@ -154,25 +145,11 @@ class LeaseRestartIntegrationTest extends TunnelTestSupport {
         return peer.expect(Frame.Registered.class, TIMEOUT).message().tunnels().getFirst();
     }
 
-    private ErrorCode refusal(URI server, String token, TunnelRequest tunnel) {
-        ScriptedPeer peer = helloed(server);
-        peer.send(new Frame.Register(new Register(token, List.of(tunnel))));
-        return peer.expect(Frame.Error.class, TIMEOUT).body().code();
-    }
-
     private ScriptedPeer helloed(URI server) {
         ScriptedPeer peer = closeAfterTest(ScriptedPeer.connect(server, ProtocolVersion.CURRENT));
         peer.send(new Frame.Hello(new Hello(
                 new ClientInfo("jburrow-e2e", "1.0", "linux", "amd64"), List.of("http"), ScriptedPeer.CLIENT_WINDOWS)));
         peer.expect(Frame.ServerHello.class, TIMEOUT);
         return peer;
-    }
-
-    private static TunnelRequest httpRequest(String subdomain) {
-        return new TunnelRequest("web", TunnelKind.HTTP, subdomain, null);
-    }
-
-    private static TunnelRequest tcpRequest(Integer remotePort) {
-        return new TunnelRequest("ssh", TunnelKind.TCP, remotePort);
     }
 }

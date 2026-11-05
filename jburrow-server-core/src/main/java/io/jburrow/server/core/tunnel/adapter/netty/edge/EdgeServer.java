@@ -273,13 +273,18 @@ public final class EdgeServer {
                                     .thenCompose(rest -> cut != UNKNOWN
                                             ? CompletableFuture.completedFuture(cut)
                                             : within(ended, RELEASE_GRACE)))
-                            .thenAccept(cut -> log.info(
-                                    "drain: sessions={} streams={} cut={} ms={}",
-                                    started.sessions(),
-                                    started.openStreams(),
-                                    cut == UNKNOWN ? "unknown" : cut,
-                                    Duration.ofNanos(System.nanoTime() - startedNanos)
-                                            .toMillis()));
+                            .thenAccept(cut -> {
+                                if (cut != UNKNOWN) {
+                                    deps.metrics().drainStreamsCut(cut);
+                                }
+                                log.info(
+                                        "drain: sessions={} streams={} cut={} ms={}",
+                                        started.sessions(),
+                                        started.openStreams(),
+                                        cut == UNKNOWN ? "unknown" : cut,
+                                        Duration.ofNanos(System.nanoTime() - startedNanos)
+                                                .toMillis());
+                            });
                 })
                 .whenComplete((done, failure) -> {
                     if (failure != null) {

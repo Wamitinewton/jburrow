@@ -6,6 +6,7 @@ import io.jburrow.server.core.portpool.application.PortReservationService;
 import io.jburrow.server.core.portpool.domain.PortPool;
 import io.jburrow.server.core.portpool.domain.PortRange;
 import io.jburrow.server.core.routing.application.SubdomainRoutes;
+import io.jburrow.server.core.routing.application.port.ClaimSnapshots;
 import io.jburrow.server.core.routing.domain.Blocklist;
 import io.jburrow.server.core.routing.domain.NameGenerator;
 import io.jburrow.server.core.tunnel.adapter.netty.control.ControlSessionInitializer;
@@ -170,10 +171,21 @@ class EdgeConfiguration {
     }
 
     @Bean
-    MicrometerTunnelMetrics tunnelMetrics(MeterRegistry registry, PortReservationService<Principal> ports) {
+    MicrometerTunnelMetrics tunnelMetrics(
+            MeterRegistry registry,
+            PortReservationService<Principal> ports,
+            SubdomainRoutes<Principal, TunnelId> routes) {
         MicrometerTunnelMetrics metrics = new MicrometerTunnelMetrics(registry);
         metrics.bindPortPool(ports::snapshot);
+        metrics.bindHeldNames(() -> heldNames(routes, InstantSource.system()));
         return metrics;
+    }
+
+    /** The names on hold now, read from the route table's snapshot at each scrape. */
+    static int heldNames(ClaimSnapshots<?> routes, InstantSource clock) {
+        return (int) routes.snapshot(clock.instant()).stream()
+                .filter(claim -> !claim.active())
+                .count();
     }
 
     /** Every live session, which the edge keeps and anything outside it finds sessions through. */
