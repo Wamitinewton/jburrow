@@ -30,6 +30,7 @@ import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -45,6 +46,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -56,6 +58,7 @@ import org.junit.jupiter.api.Test;
 class SessionSupervisorTest {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration REBIND_PAUSE = Duration.ofMillis(20);
     private static final String AUTHTOKEN = "jb_" + "t".repeat(43);
     private static final ClientInfo CLIENT = new ClientInfo("jburrow-test", "1.0.0", "linux", "amd64");
     private static final SessionLimits LIMITS = new SessionLimits(FrameLimits.MAX_DATA_PAYLOAD, 1, 100, 15_000, 45_000);
@@ -359,11 +362,24 @@ class SessionSupervisorTest {
         return peer.expect(Frame.Register.class, TIMEOUT);
     }
 
-    /** A new peer on {@code old}'s port, which then accepts nothing more; its connection stays open. */
+    /**
+     * A new peer on {@code old}'s port, which then accepts nothing more; its connection stays open. The port is free
+     * between the two listeners, and another socket on the machine can hold it for a moment, so the bind is retried.
+     */
     private ScriptedPeer handOver(ScriptedPeer old) {
         int port = old.port();
         old.stopListening();
-        return listen(port);
+        long deadline = System.nanoTime() + TIMEOUT.toNanos();
+        while (true) {
+            try {
+                return listen(port);
+            } catch (Exception e) {
+                if (!(e instanceof BindException) || System.nanoTime() - deadline > 0) {
+                    throw e;
+                }
+                LockSupport.parkNanos(REBIND_PAUSE.toNanos());
+            }
+        }
     }
 
     private ScriptedPeer listen(int port) {

@@ -259,10 +259,24 @@ class PortPoolTest {
 
         assertThat(pool.snapshot()).isEqualTo(new PortPool.Snapshot(9, 0, 1, 0));
         assertThat(pool.reserveRequested(21_003, BOB)).isEmpty();
-        assertThat(pool.reserveRequested(21_003, ALICE))
-                .map(PortPool.Held::port)
-                .contains(21_003);
+        PortPool.Held reclaimed = pool.reserveRequested(21_003, ALICE).orElseThrow();
+        assertThat(reclaimed.port()).isEqualTo(21_003);
+        assertThat(reclaimed.reclaimed()).isTrue();
         assertThat(pool.snapshot()).isEqualTo(new PortPool.Snapshot(9, 1, 0, 0));
+    }
+
+    @Test
+    void onlyAPortHeldForItsPrincipalIsReclaimed() {
+        PortPool<String> pool = heldPool(TEN_PORTS);
+        PortPool.Held first = pool.reserveRequested(21_003, ALICE).orElseThrow();
+        assertThat(first.reclaimed()).isFalse();
+        assertThat(pool.reserveAny(ALICE).orElseThrow().reclaimed()).isFalse();
+        pool.release(first.port(), first.holder());
+        clock.advance(HOLD);
+
+        assertThat(pool.reserveRequested(21_003, ALICE).orElseThrow().reclaimed())
+                .as("a hold that has expired is a free port")
+                .isFalse();
     }
 
     @Test
@@ -388,9 +402,9 @@ class PortPoolTest {
         PortPool<String> pool = heldPool(TEN_PORTS);
         pool.seedHold(21_003, ALICE, clock.millis() + 45_000);
 
-        assertThat(pool.reserveRequested(21_003, ALICE))
-                .map(PortPool.Held::port)
-                .contains(21_003);
+        PortPool.Held reclaimed = pool.reserveRequested(21_003, ALICE).orElseThrow();
+        assertThat(reclaimed.port()).isEqualTo(21_003);
+        assertThat(reclaimed.reclaimed()).isTrue();
     }
 
     @Test

@@ -10,11 +10,13 @@ import io.jburrow.protocol.wire.ProtocolException;
 import io.jburrow.server.core.portpool.application.port.PortReservations;
 import io.jburrow.server.core.portpool.application.port.Reservation;
 import io.jburrow.server.core.routing.application.port.ClaimRefused;
+import io.jburrow.server.core.routing.application.port.Claimed;
 import io.jburrow.server.core.routing.application.port.SubdomainClaims;
 import io.jburrow.server.core.tunnel.application.port.AuthtokenVerifier;
 import io.jburrow.server.core.tunnel.application.port.LiveSessions;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ClaimOutcome;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.PortClaimOutcome;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResumeOutcome;
 import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.ResumeTokenHash;
@@ -207,11 +209,20 @@ public final class RegisterTunnels {
     private Reservation reservePort(TunnelRequest request, Principal principal) {
         OptionalInt requestedPort =
                 request.remotePort() == null ? OptionalInt.empty() : OptionalInt.of(request.remotePort());
+        Reservation reservation;
         try {
-            return ports.reserve(requestedPort, principal);
+            reservation = ports.reserve(requestedPort, principal);
         } catch (ProtocolException refused) {
+            if (refused.code() == ErrorCode.PORT_UNAVAILABLE) {
+                metrics.portClaimed(PortClaimOutcome.UNAVAILABLE);
+            }
             throw refused.forTunnel(request.ref());
         }
+        metrics.portClaimed(
+                requestedPort.isEmpty()
+                        ? PortClaimOutcome.RANDOM
+                        : reservation.reclaimed() ? PortClaimOutcome.RECLAIMED : PortClaimOutcome.REQUESTED);
+        return reservation;
     }
 
     private SubdomainName claimName(TunnelRequest request, Principal principal, TunnelId id) {
@@ -221,9 +232,9 @@ public final class RegisterTunnels {
             return name;
         }
         try {
-            SubdomainName name = names.claim(new SubdomainName(request.subdomain()), principal, id);
-            metrics.subdomainClaimed(ClaimOutcome.REQUESTED);
-            return name;
+            Claimed claimed = names.claim(new SubdomainName(request.subdomain()), principal, id);
+            metrics.subdomainClaimed(claimed.reclaimed() ? ClaimOutcome.RECLAIMED : ClaimOutcome.REQUESTED);
+            return claimed.name();
         } catch (ClaimRefused refused) {
             ProtocolException error =
                     switch (refused.reason()) {

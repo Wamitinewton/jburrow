@@ -36,8 +36,12 @@ import java.util.random.RandomGenerator;
  */
 public final class PortPool<P> {
 
-    /** A reserved port and the holder number that must be presented to release it. */
-    public record Held(int port, long holder) {}
+    /**
+     * A reserved port and the holder number that must be presented to release it.
+     *
+     * @param reclaimed whether the port was held for the same principal, which took it back
+     */
+    public record Held(int port, long holder, boolean reclaimed) {}
 
     /** How many ports are in each state. */
     public record Snapshot(int free, int reserved, int held, int quarantined) {}
@@ -145,13 +149,13 @@ public final class PortPool<P> {
         refresh(clock.millis());
         int offset = port - range.first();
         return switch (states[offset]) {
-            case FREE -> Optional.of(reserve(offset, principal));
+            case FREE -> Optional.of(reserve(offset, principal, false));
             case HELD -> {
                 if (!principals[offset].equals(principal)) {
                     yield Optional.empty();
                 }
                 held--;
-                yield Optional.of(reserve(offset, principal));
+                yield Optional.of(reserve(offset, principal, true));
             }
             case RESERVED, QUARANTINED -> Optional.empty();
         };
@@ -168,7 +172,7 @@ public final class PortPool<P> {
         if (from.size() == 0) {
             return Optional.empty();
         }
-        return Optional.of(reserve(from.get(random.nextInt(from.size())), principal));
+        return Optional.of(reserve(from.get(random.nextInt(from.size())), principal, false));
     }
 
     /**
@@ -271,7 +275,7 @@ public final class PortPool<P> {
         return new Snapshot(cooled.size() + warming.size(), reserved, held, quarantined);
     }
 
-    private Held reserve(int offset, P principal) {
+    private Held reserve(int offset, P principal, boolean reclaimed) {
         if (cooled.contains(offset)) {
             cooled.remove(offset);
         } else if (warming.contains(offset)) {
@@ -282,7 +286,7 @@ public final class PortPool<P> {
         principals[offset] = principal;
         reserved++;
         version++;
-        return new Held(range.first() + offset, lastHolder);
+        return new Held(range.first() + offset, lastHolder, reclaimed);
     }
 
     private void hold(int offset, long until) {

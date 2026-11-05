@@ -109,7 +109,8 @@ class LeaseKeeperTest {
 
     @Test
     void aHeldNameIsWrittenAsHeldUntilItsHoldEnds() {
-        SubdomainName name = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1");
+        SubdomainName name = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1")
+                .name();
         routes.release(name, "tunnel-1");
         Instant releasedAt = clock.instant();
 
@@ -121,7 +122,8 @@ class LeaseKeeperTest {
 
     @Test
     void onceEverythingIsGoneOneEmptySnapshotIsWrittenAndThenNothing() {
-        SubdomainName name = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1");
+        SubdomainName name = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1")
+                .name();
         keeper.tick();
         routes.release(name, "tunnel-1");
         keeper.tick();
@@ -142,7 +144,8 @@ class LeaseKeeperTest {
 
     @Test
     void aFailedWriteIsReportedAndRetriedNextTickWithAFreshSnapshot() {
-        SubdomainName first = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1");
+        SubdomainName first = routes.claim(new SubdomainName("quiet-otter"), "alice", "tunnel-1")
+                .name();
         store.failure = new IllegalStateException("Postgres is down");
 
         keeper.tick();
@@ -152,7 +155,8 @@ class LeaseKeeperTest {
         assertThat(events.failures).containsExactly(1, 2);
         assertThat(store.replaces).isZero();
 
-        SubdomainName second = routes.claim(new SubdomainName("brave-heron"), "bob", "tunnel-2");
+        SubdomainName second = routes.claim(new SubdomainName("brave-heron"), "bob", "tunnel-2")
+                .name();
         store.failure = null;
         clock.advance(Duration.ofSeconds(1));
         keeper.tick();

@@ -391,6 +391,50 @@ class RegisterTunnelsTest {
         Registration again = registerTunnels.execute(SESSION, ticket(), register(ALICE_TOKEN, tcp("ssh", port)), HTTP);
 
         assertThat(port(again, 0)).isEqualTo(port);
+        assertThat(metrics.events())
+                .filteredOn(event -> event.startsWith("portClaimed"))
+                .containsExactly(
+                        "portClaimed RANDOM",
+                        "portClaimed UNAVAILABLE",
+                        "portClaimed RANDOM",
+                        "portClaimed RANDOM",
+                        "portClaimed RECLAIMED");
+    }
+
+    @Test
+    void aRequestedPortIsCountedAsRequestedAndOneOutsideTheRangeAsUnavailable() {
+        registerTunnels.execute(SESSION, ticket(), register(ALICE_TOKEN, tcp("ssh", 21_001)), HTTP);
+        assertRefused(
+                () -> registerTunnels.execute(SESSION, ticket(), register(BOB_TOKEN, tcp("ssh", 20_417)), HTTP),
+                ErrorCode.PORT_UNAVAILABLE);
+
+        assertThat(metrics.events()).containsExactly("portClaimed REQUESTED", "portClaimed UNAVAILABLE");
+    }
+
+    @Test
+    void anExhaustedPoolIsNotAPortClaimRefusal() {
+        for (int i = 0; i < 3; i++) {
+            ports.reserve(OptionalInt.empty(), ALICE);
+        }
+
+        assertRefused(
+                () -> registerTunnels.execute(SESSION, ticket(), register(ALICE_TOKEN, tcp("ssh", null)), HTTP),
+                ErrorCode.PORT_POOL_EXHAUSTED);
+
+        assertThat(metrics.events()).noneMatch(event -> event.startsWith("portClaimed"));
+    }
+
+    @Test
+    void aNameHeldForItsPrincipalIsCountedAsReclaimed() {
+        HandshakeTicket aliceTicket = ticket();
+        Registration first =
+                registerTunnels.execute(SESSION, aliceTicket, register(ALICE_TOKEN, http("web", "demo")), HTTP);
+        registerTunnels.release(first);
+        admission.release(aliceTicket);
+
+        registerTunnels.execute(SESSION, ticket(), register(ALICE_TOKEN, http("web", "demo")), HTTP);
+
+        assertThat(metrics.events()).containsExactly("subdomainClaimed REQUESTED", "subdomainClaimed RECLAIMED");
     }
 
     @Test

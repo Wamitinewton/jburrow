@@ -7,16 +7,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.jburrow.client.TunnelStartException;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ErrorBody;
+import io.jburrow.protocol.control.Register;
+import io.jburrow.protocol.control.Registered;
 import io.jburrow.protocol.control.RegisteredTunnel;
+import io.jburrow.protocol.control.ResumeToken;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.flow.FlowLimits;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
+import io.jburrow.protocol.wire.Capability;
 import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.FrameLimits;
 import io.jburrow.server.e2e.support.HttpVisitor;
 import io.netty.buffer.Unpooled;
 import io.netty.util.ReferenceCountUtil;
 import java.net.Socket;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -509,6 +514,108 @@ class TunnelMetricsIntegrationTest extends TunnelTestSupport {
 
         private double moved(String name, String... labels) {
             return TunnelMetricsIntegrationTest.moved(before, after, name, labels);
+        }
+    }
+
+    /**
+     * The series of {@code docs/phase-4-staying-connected/ARCHITECTURE.md} §Observability that registration moves: a
+     * session ended by its successor's resume token, a token that names nothing, a name and a port taken back by their
+     * owner, a port held for someone else, and holds counted as they start and end. The drain's series move once per
+     * process, at its stop, after the last scrape; here they only have to exist, and {@link ShutdownIntegrationTest}
+     * counts them.
+     */
+    @Nested
+    @NestedTestConfiguration(NestedTestConfiguration.EnclosingConfiguration.OVERRIDE)
+    @TestPropertySource(properties = "jburrow.tcp.port-range=32290-32299")
+    @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+    class Resume extends TunnelTestSupport {
+
+        private static final List<Capability> RESUMING = List.of(Capability.HTTP, Capability.RESUME);
+
+        private Scrape before;
+        private Scrape after;
+        private double heldNamesBefore;
+        private double heldNamesAfterAnEnd;
+
+        @BeforeAll
+        void runTheScenario() throws Exception {
+            before = Scrape.parse(scrape());
+
+            ScriptedPeer first = helloed(connectUri(), RESUMING);
+            first.send(new Frame.Register(new Register(ALICE_TOKEN, List.of(httpRequest(null)))));
+            Registered firstReply =
+                    first.expect(Frame.Registered.class, TIMEOUT).message();
+            String name = label(firstReply.tunnels().getFirst().publicHost());
+            ScriptedPeer ssh = helloed(connectUri(), RESUMING);
+            ssh.send(new Frame.Register(new Register(ALICE_TOKEN, List.of(tcpRequest(null)))));
+            int port = ssh.expect(Frame.Registered.class, TIMEOUT)
+                    .message()
+                    .tunnels()
+                    .getFirst()
+                    .publicPort();
+
+            ScriptedPeer successor = helloed(connectUri(), RESUMING);
+            successor.send(new Frame.Register(
+                    new Register(ALICE_TOKEN, List.of(httpRequest(name)), firstReply.resumeToken())));
+            successor.expect(Frame.Registered.class, TIMEOUT);
+            first.expectError(ErrorCode.SESSION_REPLACED, TIMEOUT);
+
+            ssh.dropConnection();
+            await("the port is held for its owner", () -> gauge("jburrow.holds", "kind", "port") >= 1);
+            assertThat(refusal(connectUri(), BOB_TOKEN, tcpRequest(port))).isEqualTo(ErrorCode.PORT_UNAVAILABLE);
+            ScriptedPeer sshAgain = helloed(connectUri(), RESUMING);
+            sshAgain.send(new Frame.Register(
+                    new Register(ALICE_TOKEN, List.of(tcpRequest(port)), ResumeToken.generate(new SecureRandom()))));
+            sshAgain.expect(Frame.Registered.class, TIMEOUT);
+
+            heldNamesBefore = gauge("jburrow.holds", "kind", "name");
+            successor.close();
+            await("the successor's name is held", () -> gauge("jburrow.holds", "kind", "name") >= heldNamesBefore + 1);
+            heldNamesAfterAnEnd = gauge("jburrow.holds", "kind", "name");
+            after = Scrape.parse(scrape());
+        }
+
+        @Test
+        void resumeTokensByWhatTheyFound() {
+            assertMoved(1, "jburrow_resume_total", "outcome", "replaced");
+            assertMoved(1, "jburrow_resume_total", "outcome", "none");
+            assertMoved(1, "jburrow_protocol_errors_total", "code", "SESSION_REPLACED", "side", "local");
+            assertMoved(1, "jburrow_sessions_closed_total", "reason", "SESSION_REPLACED");
+        }
+
+        @Test
+        void namesAndPortsTakenBackByTheirOwner() {
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "random");
+            assertMoved(1, "jburrow_subdomain_claims_total", "outcome", "reclaimed");
+            assertMoved(0, "jburrow_subdomain_claims_total", "outcome", "requested");
+            assertMoved(1, "jburrow_port_claims_total", "outcome", "random");
+            assertMoved(1, "jburrow_port_claims_total", "outcome", "reclaimed");
+            assertMoved(1, "jburrow_port_claims_total", "outcome", "unavailable");
+            assertMoved(0, "jburrow_port_claims_total", "outcome", "requested");
+        }
+
+        @Test
+        void holdsAreGaugedByKind() {
+            assertThat(heldNamesAfterAnEnd).isEqualTo(heldNamesBefore + 1);
+            assertThat(after.value("jburrow_holds", "kind", "port"))
+                    .isEqualTo(after.value("jburrow_tcp_ports", "state", "held"));
+            assertThat(after.value("jburrow_holds", "kind", "name")).isEqualTo(heldNamesAfterAnEnd);
+        }
+
+        @Test
+        void theDrainsSeriesExistBeforeAnyDrain() {
+            assertThat(after.value("jburrow_goaway_sent_total")).isZero();
+            assertThat(after.value("jburrow_drain_streams_cut_total")).isZero();
+            assertThat(after.value("jburrow_visitor_connections_refused_total", "reason", "draining"))
+                    .isZero();
+            assertThat(after.value("jburrow_lease_writes_total", "outcome", "failed"))
+                    .isZero();
+        }
+
+        private void assertMoved(double expected, String name, String... labels) {
+            assertThat(TunnelMetricsIntegrationTest.moved(before, after, name, labels))
+                    .as("change in %s %s", name, List.of(labels))
+                    .isEqualTo(expected);
         }
     }
 

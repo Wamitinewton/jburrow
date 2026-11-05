@@ -11,7 +11,9 @@ import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ClaimOutcome
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Direction;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FlowScope;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.FrameDirection;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.PortClaimOutcome;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResponseOrigin;
+import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.ResumeOutcome;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.SessionEnd;
 import io.jburrow.server.core.tunnel.application.port.TunnelMetrics.Side;
 import io.jburrow.server.core.tunnel.domain.StreamAdmission;
@@ -209,7 +211,57 @@ class MicrometerTunnelMetricsTest {
         assertThat(gauge("jburrow.tcp.ports", "state", "reserved")).isEqualTo(7);
         assertThat(gauge("jburrow.tcp.ports", "state", "held")).isEqualTo(5);
         assertThat(gauge("jburrow.tcp.ports", "state", "quarantined")).isEqualTo(3);
+        assertThat(gauge("jburrow.holds", "kind", "port")).isEqualTo(5);
         assertThat(gauge("jburrow.netty.direct.memory")).isEqualTo(4_096);
+    }
+
+    @Test
+    void heldNamesAreGaugedBesideHeldPorts() {
+        metrics.bindHeldNames(() -> 12);
+
+        assertThat(gauge("jburrow.holds", "kind", "name")).isEqualTo(12);
+    }
+
+    /** {@code docs/phase-4-staying-connected/ARCHITECTURE.md} §Observability. */
+    @Test
+    void registersAndCountsTheResumeAndDrainSeries() {
+        assertThat(counter("jburrow.resume", "outcome", "replaced")).isZero();
+        assertThat(counter("jburrow.resume", "outcome", "none")).isZero();
+        assertThat(counter("jburrow.goaway.sent", null, null)).isZero();
+        assertThat(counter("jburrow.drain.streams.cut", null, null)).isZero();
+        for (String outcome : Set.of("random", "requested", "reclaimed", "unavailable")) {
+            assertThat(counter("jburrow.port.claims", "outcome", outcome)).isZero();
+        }
+        assertThat(counter("jburrow.subdomain.claims", "outcome", "reclaimed")).isZero();
+        assertThat(registry.get("jburrow.protocol.errors")
+                        .tag("code", "SESSION_REPLACED")
+                        .tag("side", "local")
+                        .counter()
+                        .count())
+                .isZero();
+        assertThat(registry.get("jburrow.visitor.connections.refused")
+                        .tag("reason", "draining")
+                        .counter()
+                        .count())
+                .isZero();
+
+        metrics.resumed(ResumeOutcome.REPLACED);
+        metrics.resumed(ResumeOutcome.NONE);
+        metrics.resumed(ResumeOutcome.NONE);
+        metrics.goAwaySent();
+        metrics.drainStreamsCut(3);
+        metrics.drainStreamsCut(0);
+        metrics.portClaimed(PortClaimOutcome.RECLAIMED);
+        metrics.subdomainClaimed(ClaimOutcome.RECLAIMED);
+
+        assertThat(counter("jburrow.resume", "outcome", "replaced")).isOne();
+        assertThat(counter("jburrow.resume", "outcome", "none")).isEqualTo(2);
+        assertThat(counter("jburrow.goaway.sent", null, null)).isOne();
+        assertThat(counter("jburrow.drain.streams.cut", null, null)).isEqualTo(3);
+        assertThat(counter("jburrow.port.claims", "outcome", "reclaimed")).isOne();
+        assertThat(counter("jburrow.port.claims", "outcome", "random")).isZero();
+        assertThat(counter("jburrow.subdomain.claims", "outcome", "reclaimed")).isOne();
+        assertThatIllegalArgumentException().isThrownBy(() -> metrics.drainStreamsCut(-1));
     }
 
     @Test
@@ -254,8 +306,11 @@ class MicrometerTunnelMetricsTest {
         assertThatIllegalArgumentException().isThrownBy(() -> metrics.httpResponse(99, ResponseOrigin.EDGE));
     }
 
+    /** The count of {@code name} with {@code key=value}, or of its one series when {@code key} is null. */
     private double counter(String name, String key, String value) {
-        return registry.get(name).tag(key, value).counter().count();
+        return key == null
+                ? registry.get(name).counter().count()
+                : registry.get(name).tag(key, value).counter().count();
     }
 
     private double gauge(String name, String... tags) {

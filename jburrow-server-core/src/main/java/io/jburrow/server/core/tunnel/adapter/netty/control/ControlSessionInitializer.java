@@ -187,6 +187,7 @@ public final class ControlSessionInitializer implements SessionInitializer {
             long reconnectAfter = ThreadLocalRandom.current()
                     .nextLong(settings.drain().reconnectSpread().toMillis() + 1);
             context.channel().writeAndFlush(new Frame.GoAway(new GoAway(reconnectAfter, timeout.toMillis())));
+            deps.metrics().goAwaySent();
         }
         log.debug(
                 "session {}: draining with {} open streams{}",

@@ -247,6 +247,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session with code 4, as before. The native smoke test restarts the server under an open HTTP
   tunnel and requires the same URL to answer within the client's reconnect schedule once the new
   server is ready, giving the server itself up to `SERVER_RESTART_TIMEOUT` (180 s) to start.
+- The metrics of a server that keeps tunnels across restarts: `jburrow_resume_total{outcome}`
+  (`replaced`, `none`), `jburrow_goaway_sent_total`, `jburrow_drain_streams_cut_total`,
+  `jburrow_holds{kind}` (`name`, `port`), and `jburrow_port_claims_total{outcome}` (`random`,
+  `requested`, `reclaimed`, `unavailable`). `jburrow_subdomain_claims_total` gains the outcome
+  `reclaimed`, a held name taken back by its owner. The "session established" line gains
+  `resumed=true|false`, whether the `REGISTER` carried a resume token.
+- `scripts/gap-probe.sh <url> [interval]` polls a URL with `curl`, prints each change between
+  `ok`, a status, `timeout` and `unreachable`, and on Ctrl-C the longest run of failures and when it
+  started: the gap a deploy leaves for a visitor.
+- End-to-end suites that restart a real server under real clients in one JVM, on epoll and NIO: a
+  deploy through the drain, a crash with no flush, a cut connection, a silent one replaced by the
+  client's next session, and 200 clients reconnecting at once under the handshake cap.
 
 ### Fixed
 

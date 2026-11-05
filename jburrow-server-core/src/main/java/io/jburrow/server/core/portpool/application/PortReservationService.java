@@ -82,7 +82,7 @@ public final class PortReservationService<P> implements PortReservations<P>, Por
     }
 
     private static Reservation toReservation(PortPool.Held held) {
-        return new Reservation(held.port(), held.holder());
+        return new Reservation(held.port(), held.holder(), held.reclaimed());
     }
 
     private static <P> PortClaimSnapshot<P> toSnapshot(PortPool.Claim<P> claim) {

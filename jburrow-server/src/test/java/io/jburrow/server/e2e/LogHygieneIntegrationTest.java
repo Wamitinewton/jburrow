@@ -3,6 +3,7 @@ package io.jburrow.server.e2e;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.jburrow.client.ReconnectPolicy;
 import io.jburrow.protocol.adapter.netty.Frame;
 import io.jburrow.protocol.control.ClientInfo;
 import io.jburrow.protocol.control.Hello;
@@ -38,6 +39,7 @@ import io.jburrow.server.core.tunnel.application.port.TunnelMetrics;
 import io.jburrow.server.core.tunnel.domain.Principal;
 import io.jburrow.server.core.tunnel.domain.TunnelId;
 import io.jburrow.server.e2e.support.HttpVisitor;
+import io.jburrow.server.e2e.support.ServerContexts;
 import java.io.InterruptedIOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -427,6 +429,65 @@ class LogHygieneIntegrationTest extends TunnelTestSupport {
         private static Frame register(ResumeToken resume) {
             return new Frame.Register(new Register(
                     TOKEN, List.of(new TunnelRequest("web", TunnelKind.HTTP, "resumed-demo", null)), resume));
+        }
+    }
+
+    /**
+     * A whole restart's log ({@code docs/phase-4-staying-connected/ARCHITECTURE.md} §Observability): a real client and
+     * scripted ones with {@code resume} on a server that drains, and on the process after it, which seeds the leases.
+     * There a scripted client presents the token of a session that died with the old process, and another replaces it
+     * with the token it got. The lines the phase adds are there, and no token, nor its hash in hex or base64, is in any
+     * line.
+     */
+    @Nested
+    @NestedTestConfiguration(NestedTestConfiguration.EnclosingConfiguration.OVERRIDE)
+    @TestPropertySource(properties = "jburrow.tcp.port-range=32260-32269")
+    class Restart extends TunnelTestSupport {
+
+        private static final List<Capability> RESUMING = List.of(Capability.HTTP, Capability.RESUME);
+        private static final Duration BACK_WITHIN = Duration.ofSeconds(10);
+
+        @Test
+        void noResumeTokenOrHashOfOneIsLoggedAcrossARestart(CapturedOutput output) throws Exception {
+            ServerContexts servers = serverContexts(new ServerContexts.Ports(32_270));
+            servers.start();
+            Tunnel cli = openTunnel(httpClient(ALICE_TOKEN, unusedPort())
+                    .server(servers.connectUri())
+                    .reconnect(ReconnectPolicy.standard()));
+            ResumeToken diedWithTheProcess = register(servers.connectUri(), null);
+
+            servers.stop();
+            servers.start();
+
+            ResumeToken unused = register(servers.connectUri(), diedWithTheProcess);
+            ScriptedPeer replacing = helloed(servers.connectUri(), RESUMING);
+            replacing.send(new Frame.Register(new Register(BOB_TOKEN, List.of(httpRequest(null)), unused)));
+            ResumeToken replacement =
+                    replacing.expect(Frame.Registered.class, TIMEOUT).message().resumeToken();
+            cli.events().awaitReconnected(BACK_WITHIN);
+            await("the replacement is logged", () -> output.getAll().contains("session replaced:"));
+            String all = output.getAll();
+
+            assertThat(all).contains("leases seeded: ", "drain: sessions=");
+            assertThat(all.lines().filter(line -> line.contains("session established:")))
+                    .anyMatch(line -> line.contains(" resumed=false"))
+                    .anyMatch(line -> line.contains(" resumed=true"));
+            for (ResumeToken token : List.of(diedWithTheProcess, unused, replacement)) {
+                byte[] hash = token.sha256();
+                assertThat(all)
+                        .doesNotContain(token.value())
+                        .doesNotContain(token.value().substring(4))
+                        .doesNotContain(HexFormat.of().formatHex(hash))
+                        .doesNotContain(Base64.getEncoder().encodeToString(hash))
+                        .doesNotContain(Base64.getUrlEncoder().withoutPadding().encodeToString(hash));
+            }
+        }
+
+        /** Registers an HTTP tunnel for {@code bob} presenting {@code resume}, in a session kept open; its new token. */
+        private ResumeToken register(URI server, ResumeToken resume) {
+            ScriptedPeer peer = helloed(server, RESUMING);
+            peer.send(new Frame.Register(new Register(BOB_TOKEN, List.of(httpRequest(null)), resume)));
+            return peer.expect(Frame.Registered.class, TIMEOUT).message().resumeToken();
         }
     }
 

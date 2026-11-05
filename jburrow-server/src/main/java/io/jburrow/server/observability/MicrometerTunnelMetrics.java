@@ -24,6 +24,7 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
@@ -82,6 +83,10 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     private final Counter streamsParked;
     private final Counter parksRefused;
     private final Map<ClaimOutcome, Counter> subdomainClaims;
+    private final Map<PortClaimOutcome, Counter> portClaims;
+    private final Map<ResumeOutcome, Counter> resumes;
+    private final Counter goAwaysSent;
+    private final Counter drainStreamsCut;
 
     public MicrometerTunnelMetrics(MeterRegistry registry) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -214,6 +219,25 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
                         .description("Subdomains claimed by registration, or refused to it")
                         .tag("outcome", label(outcome))
                         .register(registry));
+        portClaims = byEnum(
+                PortClaimOutcome.class,
+                outcome -> Counter.builder("jburrow.port.claims")
+                        .description("Tunnel ports reserved by registration, or refused to it")
+                        .tag("outcome", label(outcome))
+                        .register(registry));
+        resumes = byEnum(
+                ResumeOutcome.class,
+                outcome -> Counter.builder("jburrow.resume")
+                        .description("Registrations that presented a resume token, by whether it named a live session"
+                                + " that was ended")
+                        .tag("outcome", label(outcome))
+                        .register(registry));
+        goAwaysSent = Counter.builder("jburrow.goaway.sent")
+                .description("GOAWAY frames sent to draining sessions")
+                .register(registry);
+        drainStreamsCut = Counter.builder("jburrow.drain.streams.cut")
+                .description("Streams still open when a drain ended")
+                .register(registry);
     }
 
     @Override
@@ -338,6 +362,29 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
     }
 
     @Override
+    public void portClaimed(PortClaimOutcome outcome) {
+        portClaims.get(outcome).increment();
+    }
+
+    @Override
+    public void resumed(ResumeOutcome outcome) {
+        resumes.get(outcome).increment();
+    }
+
+    @Override
+    public void goAwaySent() {
+        goAwaysSent.increment();
+    }
+
+    @Override
+    public void drainStreamsCut(int streams) {
+        if (streams < 0) {
+            throw new IllegalArgumentException("streams must not be negative: " + streams);
+        }
+        drainStreamsCut.increment(streams);
+    }
+
+    @Override
     public void bindParkedBytes(LongSupplier parkedBytes) {
         Objects.requireNonNull(parkedBytes, "parkedBytes");
         Gauge.builder("jburrow.flow.parked.bytes", parkedBytes::getAsLong)
@@ -354,6 +401,13 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
         portGauge("reserved", snapshot, PortPoolSnapshot::reserved);
         portGauge("held", snapshot, PortPoolSnapshot::held);
         portGauge("quarantined", snapshot, PortPoolSnapshot::quarantined);
+        holdsGauge("port", () -> snapshot.get().held());
+    }
+
+    @Override
+    public void bindHeldNames(IntSupplier heldNames) {
+        Objects.requireNonNull(heldNames, "heldNames");
+        holdsGauge("name", heldNames);
     }
 
     @Override
@@ -369,6 +423,13 @@ public final class MicrometerTunnelMetrics implements TunnelMetrics {
         Gauge.builder("jburrow.tcp.ports", () -> count.applyAsInt(snapshot.get()))
                 .description("Tunnel ports by state")
                 .tag("state", state)
+                .register(registry);
+    }
+
+    private void holdsGauge(String kind, IntSupplier held) {
+        Gauge.builder("jburrow.holds", held::getAsInt)
+                .description("Names and ports held for their owner after the session that had them ended")
+                .tag("kind", kind)
                 .register(registry);
     }
 

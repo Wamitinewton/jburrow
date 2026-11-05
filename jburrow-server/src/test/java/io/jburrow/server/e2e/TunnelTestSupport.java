@@ -17,10 +17,13 @@ import io.jburrow.protocol.control.RegisteredTunnel;
 import io.jburrow.protocol.control.TunnelKind;
 import io.jburrow.protocol.control.TunnelRequest;
 import io.jburrow.protocol.testsupport.ScriptedPeer;
+import io.jburrow.protocol.wire.Capability;
+import io.jburrow.protocol.wire.ErrorCode;
 import io.jburrow.protocol.wire.ProtocolVersion;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeServer;
 import io.jburrow.server.e2e.support.HttpVisitor;
 import io.jburrow.server.e2e.support.Ingress;
+import io.jburrow.server.e2e.support.ServerContexts;
 import io.jburrow.server.support.TestContainersConfiguration;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.io.IOException;
@@ -49,10 +52,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.jdbc.autoconfigure.JdbcConnectionDetails;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.env.Environment;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.web.client.RestClient;
 
@@ -110,6 +115,12 @@ abstract class TunnelTestSupport {
 
     @Autowired
     MeterRegistry meters;
+
+    @Autowired
+    JdbcConnectionDetails db;
+
+    @Autowired
+    Environment environment;
 
     @LocalManagementPort
     int managementPort;
@@ -215,6 +226,45 @@ abstract class TunnelTestSupport {
                 .http(LocalTarget.of("127.0.0.1", localPort))
                 .clientInfo("jburrow-e2e", "1.0.0")
                 .reconnect(ReconnectPolicy.never());
+    }
+
+    /**
+     * Server processes one after another beside this class's context, on its Postgres, in {@code ports}, with
+     * {@code properties}; the running one is stopped through the drain after the test.
+     */
+    ServerContexts serverContexts(ServerContexts.Ports ports, String... properties) {
+        return closeAfterTest(ServerContexts.create(db, environment, ports, properties));
+    }
+
+    /** A scripted client of {@code server} that has offered {@code capabilities} and been answered. */
+    ScriptedPeer helloed(URI server, List<Capability> capabilities) {
+        ScriptedPeer peer = closeAfterTest(ScriptedPeer.connect(server, ProtocolVersion.CURRENT));
+        peer.send(new Frame.Hello(new Hello(
+                new ClientInfo("jburrow-scripted", "1.0.0", "linux", "amd64"),
+                capabilities.stream().map(Capability::wireName).toList(),
+                ScriptedPeer.CLIENT_WINDOWS)));
+        peer.expect(Frame.ServerHello.class, TIMEOUT);
+        return peer;
+    }
+
+    /** The code {@code server} refuses {@code token}'s registration of {@code tunnel} with, in a session of its own. */
+    ErrorCode refusal(URI server, String token, TunnelRequest tunnel) {
+        ScriptedPeer peer = helloed(server, List.of(Capability.HTTP));
+        peer.send(new Frame.Register(new Register(token, List.of(tunnel))));
+        return peer.expect(Frame.Error.class, TIMEOUT).body().code();
+    }
+
+    static TunnelRequest httpRequest(String subdomain) {
+        return new TunnelRequest("web", TunnelKind.HTTP, subdomain, null);
+    }
+
+    static TunnelRequest tcpRequest(Integer remotePort) {
+        return new TunnelRequest("ssh", TunnelKind.TCP, remotePort);
+    }
+
+    /** The subdomain of an HTTP tunnel's host. */
+    static String label(String host) {
+        return host.substring(0, host.indexOf('.'));
     }
 
     /** A connection to the edge, as a visitor with no proxy in front of it. */

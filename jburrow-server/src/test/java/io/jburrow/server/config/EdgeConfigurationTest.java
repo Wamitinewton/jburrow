@@ -3,16 +3,24 @@ package io.jburrow.server.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
+import io.jburrow.protocol.control.SubdomainName;
 import io.jburrow.protocol.control.Windows;
 import io.jburrow.protocol.wire.Capability;
 import io.jburrow.server.core.portpool.domain.PortRange;
+import io.jburrow.server.core.routing.application.SubdomainRoutes;
+import io.jburrow.server.core.routing.domain.Blocklist;
+import io.jburrow.server.core.routing.domain.NameGenerator;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.Cidr;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.DrainSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeSettings;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.EdgeTransport;
 import io.jburrow.server.core.tunnel.adapter.netty.edge.HttpSettings;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.InstantSource;
 import java.util.List;
+import java.util.Random;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.util.unit.DataSize;
@@ -22,6 +30,27 @@ class EdgeConfigurationTest {
     private static final PortRange RANGE = new PortRange(21_000, 21_099);
     private static final JBurrowProperties.Drain DRAIN =
             new JBurrowProperties.Drain(Duration.ofSeconds(5), Duration.ofSeconds(2));
+
+    @Test
+    void heldNamesCountsOnlyHoldsStillRunning() {
+        Instant now = Instant.parse("2026-11-05T10:00:00Z");
+        SubdomainRoutes<String, String> routes = new SubdomainRoutes<>(
+                Blocklist.defaults(Set.of()),
+                new NameGenerator(new Random(1)),
+                Duration.ofSeconds(120),
+                InstantSource.fixed(now));
+        routes.claim(new SubdomainName("active"), "alice", "t1");
+        routes.claim(new SubdomainName("held"), "alice", "t2");
+        routes.release(new SubdomainName("held"), "t2");
+        routes.seedHold(new SubdomainName("seeded"), "bob", now.plusSeconds(30));
+
+        assertThat(EdgeConfiguration.heldNames(routes, InstantSource.fixed(now)))
+                .isEqualTo(2);
+        assertThat(EdgeConfiguration.heldNames(routes, InstantSource.fixed(now.plusSeconds(60))))
+                .isOne();
+        assertThat(EdgeConfiguration.heldNames(routes, InstantSource.fixed(now.plusSeconds(120))))
+                .isZero();
+    }
 
     @Test
     void buildsEdgeSettingsFromTheProperties() {

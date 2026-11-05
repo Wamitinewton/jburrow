@@ -861,12 +861,14 @@ The threats of phases 1 to 3 and their mitigations stand. Phase 4 adds:
 | `DrainIntegrationTest` | real edge, `ScriptedPeer` clients | `GOAWAY` only to sessions with `resume`; no `OPEN` after it; a TCP visitor refused and an HTTP request answered `503` during the drain; open streams finish; the drain ends early when they do and at 5 s when they don't |
 | `ResumeIntegrationTest` | real edge, `ScriptedPeer` | a second session presenting the first's token: the first gets `SESSION_REPLACED`, the second the same name and port, within the session limit |
 | `ConnectionCutIntegrationTest` | full server + real client through a TCP proxy | the proxy cuts the connection: same URL within 1 s; streams reported closed first |
+| `StaleSessionIntegrationTest` | full server + real client through a TCP proxy | the proxy goes silent without closing, towards the client first, so the client's idle timeout fires before the server's: it reconnects with its token, the server logs "session replaced" before its own timeout, same URL |
 | `ServerRestartIntegrationTest` | two server contexts in turn, one Postgres, real client | stop the first (the drain), start the second on the same ports: the client is back with the same random name and the same TCP port; a second principal asking for the name in between is refused |
 | `ServerCrashIntegrationTest` | as above, without the drain | the first is killed without a flush; leases from its last write are honoured |
 | `ReconnectStormIntegrationTest` | full server + 200 real clients | after a restart, every client is back with its URL; the handshake cap is never exceeded; no client retries faster than its schedule |
 | `Phase3ClientIntegrationTest` | real edge, a client without `resume` | `ERROR SERVER_SHUTTING_DOWN` at stop, no `GOAWAY`; holds still return its name when it comes back |
 | `ResponseTimeoutIntegrationTest` additions | full server + real client | a slow upload past the timeout succeeds; a local service that never answers still gets `504` |
-| `TunnelMetricsIntegrationTest`, `LogHygieneIntegrationTest` | existing, extended | the new metrics; no resume token in any log line |
+| `ShutdownIntegrationTest` | a server application closed under a real client and scripted ones | the drain end to end: `GOAWAY` only with `resume`; a download in flight finishes and the drain ends with it, in about a second; every session then ends with `SERVER_SHUTTING_DOWN` |
+| `TunnelMetricsIntegrationTest`, `LogHygieneIntegrationTest` | existing, extended | the new metrics; no resume token, nor its hash, in any log line of a whole restart |
 | `JBurrowPropertiesTest` additions | unit | the new keys; `jburrow.http.name-hold` refused with its replacement named |
 | ArchUnit fixtures | architecture | the `lease` feature's boundaries |
 
